@@ -34,11 +34,15 @@ class SheetRefusedError(RuntimeError):
 
 def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> str:
     """Build the single-call grid prompt with captions, chroma bg, and suffix."""
+    from sticker_service.services.postprocess import grid_for
+
     caption_list = "; ".join(f'"{c}"' for c in captions)
     suffix = style.sticker_style_suffix.replace("{age_clause}", age_clause)
+    rows, cols = grid_for(len(captions))
     return (
         f"Draw the SAME character as in the reference image as a sheet of {len(captions)} "
-        f"stickers arranged in a regular, even grid. Each sticker shows the character in a "
+        f"stickers arranged in a regular, even grid of exactly {rows} rows by {cols} columns. "
+        f"Each sticker shows the character in a "
         f"different emotion or pose with a Russian caption, in this order: {caption_list}. "
         f"Render the Russian (Cyrillic) text cleanly, with no character artifacts. "
         f"The background MUST be a solid flat {CHROMA} magenta everywhere between and around "

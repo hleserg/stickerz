@@ -20,24 +20,38 @@ from sticker_service.services.publish import Publisher
 MAGENTA = (255, 0, 255, 255)
 
 
-def _sheet_bytes(n: int = 3) -> bytes:
-    sheet = Image.new("RGBA", (120 * n, 140), MAGENTA)
+def _sheet_bytes(n: int = 12) -> bytes:
+    """A clean magenta sheet of ``n`` well-separated squares (chroma-sliceable)."""
+    from sticker_service.services.postprocess import grid_for
+
+    rows, cols = grid_for(n)
+    cell = 120
+    sheet = Image.new("RGBA", (cols * cell, rows * cell), MAGENTA)
     draw = ImageDraw.Draw(sheet)
-    for i in range(n):
-        x = 20 + i * 120
-        draw.rectangle([x, 20, x + 80, 120], fill=(0, 120 + i * 20, 200, 255))
+    drawn = 0
+    for r in range(rows):
+        for c in range(cols):
+            if drawn >= n:
+                break
+            x, y = c * cell + 25, r * cell + 25
+            draw.rectangle([x, y, x + 70, y + 70], fill=(0, 120, 200, 255))
+            drawn += 1
     buffer = BytesIO()
     sheet.save(buffer, format="PNG")
     return buffer.getvalue()
 
 
+# build_caption_set() yields the 12-item standard block.
+EXPECTED = 12
+
+
 class _SheetModel(ImageModel):
-    """Returns a real 3-sticker magenta sheet for any prompt."""
+    """Returns a real 12-sticker magenta sheet for any prompt."""
 
     name = "sheet"
 
     def __init__(self) -> None:
-        self._sheet = _sheet_bytes(3)
+        self._sheet = _sheet_bytes(EXPECTED)
         self.generate_calls: list[str] = []
 
     async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
@@ -120,13 +134,13 @@ async def test_create_pack_full_flow(db: Database, loader: StyleLoader, tmp_path
     )
     result = await orch.create_pack(owner_id=42, character=char)
 
-    assert result.count == 3
+    assert result.count == EXPECTED
     assert result.set_name.endswith("_by_yourbot")
     assert result.link == f"https://t.me/addstickers/{result.set_name}"
     assert bot.created[0]["user_id"] == 42  # owner = user (§B.4)
     packs = await db.list_packs(42)
     assert len(packs) == 1
-    assert await db.count_stickers(packs[0].id) == 3
+    assert await db.count_stickers(packs[0].id) == EXPECTED
 
 
 async def test_one_character_many_packs(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
@@ -162,8 +176,8 @@ async def test_extend_pack_appends(db: Database, loader: StyleLoader, tmp_path: 
 
     result = await orch.extend_pack(owner_id=7, pack=pack)
     assert result.set_name == pack.set_name
-    assert len(bot.added) == 3  # appended via add_sticker_to_set
-    assert await db.count_stickers(pack.id) == 6  # 3 + 3, positions continue
+    assert len(bot.added) == EXPECTED  # appended via add_sticker_to_set
+    assert await db.count_stickers(pack.id) == 2 * EXPECTED  # appended, positions continue
 
 
 async def test_unknown_style_raises(db: Database, loader: StyleLoader, tmp_path: Path) -> None:

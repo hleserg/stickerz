@@ -9,11 +9,29 @@ from PIL import Image, ImageDraw
 
 from sticker_service.services.postprocess import (
     chroma_key,
+    chroma_key_auto,
     encode_sticker,
     fit_to_512,
+    grid_for,
+    grid_slice,
     process_sheet,
     slice_sheet,
 )
+
+PINK = (240, 80, 160, 255)
+
+
+def _packed_pink_grid(rows: int, cols: int) -> Image.Image:
+    """A gap-less sheet on a non-#FF00FF (pink) background — defeats chroma slicing."""
+    cell = 100
+    sheet = Image.new("RGBA", (cols * cell, rows * cell), PINK)
+    draw = ImageDraw.Draw(sheet)
+    for r in range(rows):
+        for c in range(cols):
+            x, y = c * cell + 20, r * cell + 20
+            draw.ellipse([x, y, x + 60, y + 60], fill=(0, 100 + r * 20, 200, 255))
+    return sheet
+
 
 MAGENTA = (255, 0, 255, 255)
 
@@ -97,3 +115,36 @@ def test_min_area_filters_specks() -> None:
     sheet.putpixel((50, 50), (0, 0, 0, 255))  # 1px speck
     keyed = chroma_key(sheet)
     assert slice_sheet(keyed, min_area=256) == []
+
+
+# --- grid fallback ----------------------------------------------------------
+
+
+def test_grid_for_balanced() -> None:
+    assert grid_for(6) == (2, 3)
+    assert grid_for(15) == (4, 4)
+    assert grid_for(1) == (1, 1)
+
+
+def test_chroma_key_auto_detects_pink_bg() -> None:
+    keyed = chroma_key_auto(_packed_pink_grid(1, 1))
+    arr = np.asarray(keyed)
+    assert arr[0, 0, 3] == 0  # pink corner detected and removed
+    assert arr[50, 50, 3] == 255  # the circle stays
+
+
+def test_grid_slice_separates_packed_cells() -> None:
+    pieces = grid_slice(_packed_pink_grid(2, 3), 2, 3)
+    assert len(pieces) == 6
+    for piece in pieces:
+        assert np.asarray(piece.convert("RGBA"))[..., 3].max() == 255
+
+
+def test_process_sheet_grid_fallback_when_chroma_fails() -> None:
+    # Pink, gap-less sheet: chroma #FF00FF yields 1 blob; grid fallback recovers 6.
+    sheet = _packed_pink_grid(2, 3)
+    assert len(slice_sheet(chroma_key(sheet))) < 6  # chroma path under-performs
+    stickers = process_sheet(sheet, grid=(2, 3))
+    assert len(stickers) == 6
+    for data in stickers:
+        assert max(Image.open(BytesIO(data)).size) == 512

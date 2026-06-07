@@ -12,6 +12,7 @@ Flow (a sheet is NEVER published as-is — slicing is mandatory, §B.4):
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, cast
@@ -132,15 +133,90 @@ def encode_sticker(image: Image.Image, *, max_bytes: int = _MAX_BYTES) -> bytes:
     return data  # pragma: no cover - best effort
 
 
+def grid_for(n: int) -> tuple[int, int]:
+    """Pick a balanced ``(rows, cols)`` grid for ``n`` stickers."""
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
+    return rows, cols
+
+
+def _detect_bg_color(arr: np.ndarray) -> tuple[int, int, int]:
+    """Estimate the background color from the four corners of an image array."""
+    s = max(2, min(arr.shape[0], arr.shape[1]) // 16)
+    corners = np.concatenate(
+        [
+            arr[:s, :s].reshape(-1, 4),
+            arr[:s, -s:].reshape(-1, 4),
+            arr[-s:, :s].reshape(-1, 4),
+            arr[-s:, -s:].reshape(-1, 4),
+        ]
+    )
+    med = np.median(corners[:, :3], axis=0)
+    return int(med[0]), int(med[1]), int(med[2])
+
+
+def chroma_key_auto(
+    image: Image.Image, *, tolerance: float = 70.0, despill: bool = False
+) -> Image.Image:
+    """Chroma-key using the auto-detected corner background color (any solid bg)."""
+    arr = np.asarray(image.convert("RGBA"))
+    r, g, b = _detect_bg_color(arr)
+    return chroma_key(image, chroma=f"#{r:02x}{g:02x}{b:02x}", tolerance=tolerance, despill=despill)
+
+
+def _trim_transparent(image: Image.Image) -> Image.Image:
+    """Crop an RGBA image to the bounding box of its non-transparent pixels."""
+    arr = np.asarray(image.convert("RGBA"))
+    ys, xs = np.where(arr[..., 3] > 0)
+    if xs.size == 0:
+        return image
+    return image.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
+
+
+def grid_slice(
+    image: Image.Image, rows: int, cols: int, *, tolerance: float = 70.0, min_content: int = 64
+) -> list[Image.Image]:
+    """Cut a sheet into a regular ``rows×cols`` grid; per-cell auto background removal.
+
+    Fallback for when the model didn't honor the exact chroma background or left
+    no gaps between stickers, so connected-component slicing can't separate them.
+    """
+    rgba = image.convert("RGBA")
+    width, height = rgba.size
+    cell_w, cell_h = width / cols, height / rows
+    out: list[Image.Image] = []
+    for r in range(rows):
+        for c in range(cols):
+            box = (
+                round(c * cell_w),
+                round(r * cell_h),
+                round((c + 1) * cell_w),
+                round((r + 1) * cell_h),
+            )
+            cell = _trim_transparent(chroma_key_auto(rgba.crop(box), tolerance=tolerance))
+            if int((np.asarray(cell.convert("RGBA"))[..., 3] > 0).sum()) >= min_content:
+                out.append(cell)
+    return out
+
+
 def process_sheet(
     sheet: bytes | Image.Image,
     *,
     chroma: str = CHROMA_DEFAULT,
     tolerance: float = 80.0,
     min_area: int = 256,
+    grid: tuple[int, int] | None = None,
 ) -> list[bytes]:
-    """Full pipeline: chroma-key → slice → fit 512 → encode. Returns PNG/WebP bytes."""
+    """Full pipeline: chroma-key → slice → fit 512 → encode. Returns PNG/WebP bytes.
+
+    If ``grid`` is given and chroma slicing under-performs (model used an off
+    background or left no gaps), fall back to cutting that regular grid.
+    """
     image = sheet if isinstance(sheet, Image.Image) else Image.open(BytesIO(sheet))
     keyed = chroma_key(image, chroma=chroma, tolerance=tolerance)
     pieces = slice_sheet(keyed, min_area=min_area)
+    if grid is not None:
+        rows, cols = grid
+        if len(pieces) < rows * cols - 1:
+            pieces = grid_slice(image, rows, cols)
     return [encode_sticker(fit_to_512(piece)) for piece in pieces]

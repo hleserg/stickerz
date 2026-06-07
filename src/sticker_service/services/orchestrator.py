@@ -20,7 +20,7 @@ from sticker_service.services.canonical.engine import CanonicalEngine
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.canonical.schema import Style
 from sticker_service.services.models.base import ImageModel
-from sticker_service.services.postprocess import process_sheet
+from sticker_service.services.postprocess import grid_for, process_sheet
 from sticker_service.services.publish import Publisher
 from sticker_service.services.stickers import (
     assign_emojis,
@@ -155,7 +155,7 @@ class Orchestrator:
             subject_type=character.subject_type,
             child_age=character.child_age,
         )
-        stickers = process_sheet(sheet)
+        stickers = process_sheet(sheet, grid=grid_for(len(captions)))
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
         emojis = await assign_emojis(self._model, stickers)
