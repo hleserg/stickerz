@@ -13,8 +13,13 @@ import logging
 from aiogram import Bot
 
 from sticker_service.config import get_settings
+from sticker_service.db import Database
 from sticker_service.handlers import build_dispatcher
 from sticker_service.observability import init_sentry
+from sticker_service.services.canonical.loader import StyleLoader
+from sticker_service.services.models import build_model
+from sticker_service.services.orchestrator import Orchestrator
+from sticker_service.services.publish import Publisher
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +37,30 @@ def build_bot(token: str | None = None) -> Bot:
 
 
 async def run() -> None:
-    """Initialize observability and long-poll until cancelled."""
+    """Wire the full app (db, styles, model, publisher) and long-poll."""
     init_sentry()
+    settings = get_settings()
     bot = build_bot()
-    dp = build_dispatcher()
-    logger.info("Starting long-polling")
+    me = await bot.get_me()
+
+    db = await Database.connect(settings.data_dir / "sticker_service.sqlite")
+    loader = StyleLoader(settings.styles_dir)
+    loader.load()
+    orchestrator = Orchestrator(
+        model=build_model(),
+        db=db,
+        publisher=Publisher(bot, me.username or ""),
+        loader=loader,
+        storage_dir=settings.data_dir,
+    )
+    dp = build_dispatcher(db=db, orchestrator=orchestrator, loader=loader)
+
+    logger.info("Starting long-polling as @%s", me.username)
     try:
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
+        await db.close()
 
 
 def main() -> int:

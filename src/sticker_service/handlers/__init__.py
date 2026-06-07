@@ -5,16 +5,23 @@ from __future__ import annotations
 from aiogram import Dispatcher
 
 from sticker_service.db import Database
-from sticker_service.handlers import admin, start
+from sticker_service.handlers import admin, flow, start
 from sticker_service.handlers.middleware import WhitelistMiddleware
+from sticker_service.services.canonical.loader import StyleLoader
+from sticker_service.services.orchestrator import Orchestrator
 
 
-def build_dispatcher(db: Database | None = None) -> Dispatcher:
+def build_dispatcher(
+    db: Database | None = None,
+    orchestrator: Orchestrator | None = None,
+    loader: StyleLoader | None = None,
+) -> Dispatcher:
     """Build the root :class:`Dispatcher` with all feature routers registered.
 
     When ``db`` is provided, the whitelist middleware and admin commands are
-    wired and ``db`` is injected into handler scope. Kept argument-optional so
-    the dispatcher can be constructed and inspected in tests without a DB.
+    wired. When ``orchestrator`` (and ``loader``) are provided, the full
+    pack-building flow is included. Dependencies are injected into handler scope.
+    Argument-optional so the dispatcher can be built and inspected in tests.
     """
     dp = Dispatcher()
     if db is not None:
@@ -22,6 +29,11 @@ def build_dispatcher(db: Database | None = None) -> Dispatcher:
         dp.message.outer_middleware(WhitelistMiddleware(db))
         dp.callback_query.outer_middleware(WhitelistMiddleware(db))
         dp.include_router(admin.build_router())
+    if orchestrator is not None:
+        dp["orchestrator"] = orchestrator
+        if loader is not None:
+            dp["loader"] = loader
+        dp.include_router(flow.build_router())
     dp.include_router(start.build_router())
     return dp
 
