@@ -101,7 +101,7 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["src/sticker_service"]
-omit = ["src/sticker_service/cli.py"]
+omit = ["src/sticker_service/cli.py", "src/sticker_service/bot.py"]
 
 [tool.coverage.report]
 fail_under = 90

@@ -1,0 +1,22 @@
+# Local/VDS deployment: the bot plus a Redis instance for the generation queue.
+# Build the image from docker/Dockerfile; secrets come from .env (git-ignored).
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file: .env
+    depends_on:
+      - redis
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data # sqlite db + downloaded photos + generated sheets
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
