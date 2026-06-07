@@ -164,6 +164,43 @@ async def test_refusal_gives_up_after_reformulations() -> None:
     assert model.calls == 3  # plain + 2 wholesome reformulations
 
 
+async def test_skip_if_yes_skips_step_when_answer_yes() -> None:
+    model = MockImageModel(ask_answer="Да")
+    style = _style(
+        [
+            {"step": 1, "prompt": "a", "refs": ["photo"], "gate": "none"},
+            {
+                "step": 2,
+                "prompt": "turn to camera",
+                "refs": ["prev"],
+                "gate": "none",
+                "skip_if_yes": "смотрит в камеру?",
+            },
+        ]
+    )
+    await CanonicalEngine(model).run(style, b"P", subject_type="adult")
+    # Only step 1 generated; step 2 skipped by the pre-check.
+    assert model.generate_calls == ["a"]
+
+
+async def test_skip_if_yes_runs_step_when_answer_no() -> None:
+    model = MockImageModel(ask_answer="Нет")
+    style = _style(
+        [
+            {"step": 1, "prompt": "a", "refs": ["photo"], "gate": "none"},
+            {
+                "step": 2,
+                "prompt": "turn to camera",
+                "refs": ["prev"],
+                "gate": "none",
+                "skip_if_yes": "смотрит в камеру?",
+            },
+        ]
+    )
+    await CanonicalEngine(model).run(style, b"P", subject_type="adult")
+    assert model.generate_calls == ["a", "turn to camera"]  # step 2 ran
+
+
 async def test_step_ref_collection() -> None:
     model = MockImageModel()
     style = _style(

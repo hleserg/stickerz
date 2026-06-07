@@ -40,3 +40,12 @@ class ImageModel(ABC):
     @abstractmethod
     async def pick_emoji(self, image: bytes) -> str:
         """Return a single emoji matching the sticker's emotion/gesture."""
+
+    async def ask(self, image: bytes, question: str) -> str:
+        """Answer a short free-form question about an image (vision Q&A).
+
+        Default returns an empty string (treated as "no" by callers). Providers
+        override this; used e.g. for the gaze pre-check before the turn-to-camera
+        step.
+        """
+        return ""

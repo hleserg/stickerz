@@ -152,10 +152,18 @@ def test_loader_reload_picks_up_changes(tmp_path: Path) -> None:
     assert set(loader.reload()) == {"good"}
 
 
-def test_real_watercolor_style_loads() -> None:
+def test_real_styles_load() -> None:
     loader = StyleLoader(get_settings().styles_dir)
     watercolor = loader.get("watercolor")
     assert watercolor is not None
     assert watercolor.display_name == "Акварель"
     assert len(watercolor.pipeline) == 3
-    assert ("watercolor", "Акварель") in loader.menu()
+    # Step 3 carries the gaze pre-check.
+    assert watercolor.pipeline[2].skip_if_yes is not None
+
+    soft_anime = loader.get("soft_anime")
+    assert soft_anime is not None
+    assert len(soft_anime.pipeline) == 3
+
+    menu_ids = {sid for sid, _ in loader.menu()}
+    assert {"watercolor", "soft_anime"} <= menu_ids

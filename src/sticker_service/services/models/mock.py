@@ -37,10 +37,12 @@ class MockImageModel(ImageModel):
         refuse_on: str | None = None,
         judge_score: float = 0.9,
         emoji: str = "😄",
+        ask_answer: str = "нет",
     ) -> None:
         self._refuse_on = refuse_on
         self._judge_score = judge_score
         self._emoji = emoji
+        self._ask_answer = ask_answer
         #: prompts seen, in order — handy for asserting one-call-per-sheet etc.
         self.generate_calls: list[str] = []
 
@@ -56,3 +58,6 @@ class MockImageModel(ImageModel):
 
     async def pick_emoji(self, image: bytes) -> str:
         return self._emoji
+
+    async def ask(self, image: bytes, question: str) -> str:
+        return self._ask_answer

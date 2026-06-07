@@ -67,7 +67,7 @@ class Orchestrator:
         self._publisher = publisher
         self._loader = loader
         self._storage = Path(storage_dir)
-        self._engine = engine or CanonicalEngine(model)
+        self._engine = engine or CanonicalEngine(model, gate_threshold=0.5, max_step_retries=1)
 
     async def build_canonical(
         self,

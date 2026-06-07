@@ -51,6 +51,10 @@ class PipelineStep(BaseModel):
     prompt: str
     refs: list[str]
     gate: Gate = Gate.VISION_JUDGE
+    # Optional vision pre-check: a yes/no question asked about the previous frame
+    # before running this step. If the model answers "yes", the step is skipped
+    # (e.g. "is the person looking at the camera?" → skip the turn-to-camera step).
+    skip_if_yes: str | None = None
 
     @field_validator("refs")
     @classmethod

@@ -1,24 +1,20 @@
 schema_version: 1
-style_id: watercolor
-display_name: "Акварель"
+style_id: soft_anime
+display_name: "Ghibli (мягкое аниме)"
 enabled: true
-distance: far
+distance: medium
 
-# Debugged ladder (RU prompts, literal):
-#   1) photo → realistic colored drawing;
-#   2) prev  → line-art contour + textured watercolor color;
-#   3) prev  → turn the gaze into the camera (skipped if already looking at it).
+# Same ladder as watercolor; only step 2 differs (soft anime / Ghibli look).
 pipeline:
   - step: 1
     prompt: "Сделай из фото фотореалистичный цветной рисунок."
     refs: [photo]
     gate: vision_judge
   - step: 2
-    prompt: "Добавь тонкие контуры линером и цвет сделай акварельным и фактурным."
+    prompt: "Добавь мягкости цветов и черты характерные для студии ghibli"
     refs: [prev]
     gate: vision_judge
   - step: 3
-    # Pre-check: if the character already looks at the camera, skip this step.
     skip_if_yes: "Ответь да или нет, одним словом: человек на изображении смотрит прямо в камеру?"
     prompt: >-
       Сделай так чтобы герой смотрел в камеру, если голова повернута в другую
@@ -27,6 +23,4 @@ pipeline:
     refs: [prev]
     gate: none
 
-# Appended to the sticker-sheet prompt. The final canonical (attached as the
-# reference) carries the art style, so here we only fix language + age.
 sticker_style_suffix: "Подписи только на русском языке. {age_clause}"

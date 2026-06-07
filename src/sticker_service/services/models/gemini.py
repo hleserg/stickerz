@@ -192,6 +192,13 @@ class GeminiImageModel(ImageModel):
         )
         return parse_emoji(text) or "🙂"
 
+    async def ask(self, image: bytes, question: str) -> str:  # pragma: no cover
+        from google.genai import types
+
+        return await self._vision_text(
+            [types.Part.from_bytes(data=image, mime_type=_mime(image)), question]
+        )
+
     @staticmethod
     def _finish(candidate: object) -> str:  # pragma: no cover - diagnostic
         return str(getattr(candidate, "finish_reason", "unknown"))
