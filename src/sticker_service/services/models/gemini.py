@@ -117,14 +117,18 @@ class GeminiImageModel(ImageModel):
                 )
                 return self._extract_image(response)
             except ModelRefusalError:
+                # A real safety refusal — let the engine reformulate, don't retry blindly.
                 raise
-            except Exception as exc:  # transient overload -> backoff + fallback model
+            except Exception as exc:  # ANY other error -> backoff + fallback model
                 last = exc
-                if _is_retryable(exc) and attempt < _MAX_GEN_ATTEMPTS - 1:
-                    logger.warning("gemini %s overloaded (%s); retrying", model, str(exc)[:80])
+                kind = "transient" if _is_retryable(exc) else "error"
+                if attempt < _MAX_GEN_ATTEMPTS - 1:
+                    logger.warning("gemini %s %s (%s); retrying", model, kind, str(exc)[:100])
                     await asyncio.sleep(2 * (attempt + 1))
                     continue
-                raise
+                raise ModelError(
+                    f"Gemini generation failed after {_MAX_GEN_ATTEMPTS} attempts: {exc}"
+                ) from exc
         raise ModelError(f"Gemini image generation failed after retries: {last}")
 
     @staticmethod
@@ -151,13 +155,13 @@ class GeminiImageModel(ImageModel):
                     model=VISION_MODEL, contents=contents
                 )
                 return response.text or ""
-            except Exception as exc:
+            except Exception as exc:  # retry any error
                 last = exc
-                if _is_retryable(exc) and attempt < 2:
-                    logger.warning("gemini vision overloaded (%s); retrying", str(exc)[:80])
+                if attempt < 2:
+                    logger.warning("gemini vision failed (%s); retrying", str(exc)[:100])
                     await asyncio.sleep(2 * (attempt + 1))
                     continue
-                raise
+                raise ModelError(f"Gemini vision failed after retries: {exc}") from exc
         raise ModelError(f"Gemini vision failed after retries: {last}")
 
     async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:  # pragma: no cover

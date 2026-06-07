@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import pytest
 
 from sticker_service.services.canonical import (
@@ -14,6 +16,30 @@ from sticker_service.services.canonical import (
     run_gate,
 )
 from sticker_service.services.models import MockImageModel
+from sticker_service.services.models.base import ImageModel, ModelRefusalError
+
+
+class _RefuseThenOk(ImageModel):
+    """Refuses the first ``refuse_times`` generate calls, then succeeds."""
+
+    name = "refuse"
+
+    def __init__(self, refuse_times: int) -> None:
+        self._left = refuse_times
+        self.calls = 0
+
+    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
+        self.calls += 1
+        if self._left > 0:
+            self._left -= 1
+            raise ModelRefusalError("IMAGE_SAFETY")
+        return b"\x89PNGok"
+
+    async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:
+        return 0.95
+
+    async def pick_emoji(self, image: bytes) -> str:
+        return "🙂"
 
 
 def _style(steps: list[dict[str, object]], suffix: str = "") -> Style:
@@ -118,6 +144,24 @@ async def test_on_step_callback_reports_progress() -> None:
 
     await CanonicalEngine(model).run(_watercolor_like(), b"P", subject_type="adult", on_step=cb)
     assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+async def test_refusal_retries_with_reformulation() -> None:
+    model = _RefuseThenOk(refuse_times=1)  # refuse once, then succeed
+    style = _style([{"step": 1, "prompt": "p", "refs": ["photo"], "gate": "none"}])
+    canonical = await CanonicalEngine(model).run(style, b"P", subject_type="adult")
+    assert canonical == b"\x89PNGok"
+    assert model.calls == 2  # 1 refusal + 1 success
+
+
+async def test_refusal_gives_up_after_reformulations() -> None:
+    from sticker_service.services.canonical import CanonicalError
+
+    model = _RefuseThenOk(refuse_times=99)  # always refuses
+    style = _style([{"step": 1, "prompt": "p", "refs": ["photo"], "gate": "none"}])
+    with pytest.raises(CanonicalError, match="refused"):
+        await CanonicalEngine(model).run(style, b"P", subject_type="adult")
+    assert model.calls == 3  # plain + 2 wholesome reformulations
 
 
 async def test_step_ref_collection() -> None:
