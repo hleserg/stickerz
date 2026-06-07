@@ -202,10 +202,93 @@ async def on_confirm(  # pragma: no cover - publishes via Bot API
     await callback.answer()
 
 
+async def cmd_mychars(message: Message, db: Database) -> None:
+    """List saved characters; selecting one starts a new pack about them (§3.2)."""
+    tag_component("handlers.flow")
+    user_id = message.from_user.id if message.from_user else 0
+    characters = await db.list_characters(user_id)
+    if not characters:
+        await message.answer("Пока нет сохранённых персонажей. Создай пак: /new")
+        return
+    kb = InlineKeyboardBuilder()
+    for char in characters:
+        kb.button(text=f"{char.name} ({char.style_id})", callback_data=f"char:{char.id}")
+    kb.adjust(1)
+    await message.answer("Новый пак про сохранённого персонажа:", reply_markup=kb.as_markup())
+
+
+async def on_pick_char(  # pragma: no cover - publishes via Bot API
+    callback: CallbackQuery, db: Database, orchestrator: Orchestrator
+) -> None:
+    """Reuse a saved character's canonical to build a new pack (pipeline skipped)."""
+    tag_component("handlers.flow")
+    char_id = int((callback.data or "char:0").split(":", 1)[-1])
+    character = await db.get_character(char_id)
+    if character is None:
+        await callback.answer("Персонаж не найден", show_alert=True)
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.answer("Генерирую новый пак про этого персонажа…")
+    user_id = callback.from_user.id if callback.from_user else 0
+    result = await orchestrator.create_pack(owner_id=user_id, character=character)
+    if isinstance(callback.message, Message):
+        await callback.message.answer(f"Готово! Пак: {result.link}")
+    await callback.answer()
+
+
+async def cmd_addto(message: Message, db: Database) -> None:
+    """List the user's packs; selecting one adds stickers to that same set (§3.2)."""
+    tag_component("handlers.flow")
+    user_id = message.from_user.id if message.from_user else 0
+    packs = await db.list_packs(user_id)
+    if not packs:
+        await message.answer("Пока нет паков для дополнения. Создай пак: /new")
+        return
+    kb = InlineKeyboardBuilder()
+    for pack in packs:
+        kb.button(text=pack.title, callback_data=f"extend:{pack.id}")
+    kb.adjust(1)
+    await message.answer(
+        "Дополнить пак (тем же персонажем — новое фото нельзя, иначе пак станет разнородным):",
+        reply_markup=kb.as_markup(),
+    )
+
+
+async def on_pick_pack(  # pragma: no cover - publishes via Bot API
+    callback: CallbackQuery, db: Database, orchestrator: Orchestrator
+) -> None:
+    """Append stickers to the chosen existing set via the same character (§3.2)."""
+    tag_component("handlers.flow")
+    pack_id = int((callback.data or "extend:0").split(":", 1)[-1])
+    pack = await db.get_pack(pack_id)
+    if pack is None:
+        await callback.answer("Пак не найден", show_alert=True)
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.answer("Дополняю пак…")
+    user_id = callback.from_user.id if callback.from_user else 0
+    try:
+        result = await orchestrator.extend_pack(owner_id=user_id, pack=pack)
+    except Exception as exc:  # PackFullError etc. — surface, suggest a new pack
+        logger.warning("extend failed: %s", exc)
+        if isinstance(callback.message, Message):
+            await callback.message.answer(
+                "Не получилось дополнить (возможно, достигнут лимит 120). Создай новый "
+                "пак про того же: /mychars"
+            )
+        await callback.answer()
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.answer(f"Готово! Пак: {result.link}")
+    await callback.answer()
+
+
 def build_router() -> Router:
     """Build a fresh flow router (factory: safe to call per dispatcher)."""
     router = Router(name="flow")
     router.message.register(cmd_new, Command("new"))
+    router.message.register(cmd_mychars, Command("mychars"))
+    router.message.register(cmd_addto, Command("addto"))
     router.callback_query.register(on_consent, F.data == "consent:yes")
     router.message.register(on_photo, NewPack.photo)
     router.message.register(on_name, NewPack.name)
@@ -214,4 +297,6 @@ def build_router() -> Router:
     router.callback_query.register(on_style, F.data.startswith("style:"))
     router.callback_query.register(on_confirm, F.data == "canon:ok")
     router.callback_query.register(on_style, F.data == "canon:retake")
+    router.callback_query.register(on_pick_char, F.data.startswith("char:"))
+    router.callback_query.register(on_pick_pack, F.data.startswith("extend:"))
     return router

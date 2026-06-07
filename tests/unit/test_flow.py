@@ -20,6 +20,8 @@ from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.handlers.flow import (
     NewPack,
+    cmd_addto,
+    cmd_mychars,
     cmd_new,
     on_age,
     on_consent,
@@ -102,3 +104,40 @@ async def test_age_selection_advances_to_style(loader: StyleLoader) -> None:
     await on_age(callback, state, loader)
     assert (await state.get_data())["child_age"] == 6
     assert await state.get_state() == NewPack.style.state
+
+
+async def test_mychars_empty_prompts_new(db: Database) -> None:
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=1)
+    await cmd_mychars(message, db)
+    text = message.answer.await_args.args[0]
+    assert "/new" in text
+
+
+async def test_mychars_lists_saved(db: Database) -> None:
+    await db.add_character(
+        owner_id=1, name="Лёшик", style_id="watercolor", subject_type="adult", canonical_path="/x"
+    )
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=1)
+    await cmd_mychars(message, db)
+    # A keyboard with the character is offered.
+    assert message.answer.await_args.kwargs.get("reply_markup") is not None
+
+
+async def test_addto_empty_prompts_new(db: Database) -> None:
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=1)
+    await cmd_addto(message, db)
+    assert "/new" in message.answer.await_args.args[0]
+
+
+async def test_addto_lists_packs(db: Database) -> None:
+    char = await db.add_character(
+        owner_id=1, name="A", style_id="watercolor", subject_type="adult", canonical_path="/x"
+    )
+    await db.add_pack(character_id=char.id, owner_id=1, set_name="s_by_bot", title="Мой пак")
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=1)
+    await cmd_addto(message, db)
+    assert message.answer.await_args.kwargs.get("reply_markup") is not None
