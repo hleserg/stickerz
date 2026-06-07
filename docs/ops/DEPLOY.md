@@ -52,6 +52,7 @@ docker compose logs -f bot        # watch "Starting long-polling as @<bot>"
 ## Notes
 
 - `gemini-3-pro-image` occasionally returns `503 high demand`; retry.
-- Generated data (sqlite, photos, sheets, stickers) lives in `./data`
-  (mounted volume). Back it up if you care about saved characters.
+- Generated data (sqlite, photos, sheets, stickers) lives in the named volume
+  `sticker-data` (owned by the container's appuser). Inspect/back up with
+  `docker compose cp bot:/app/data ./data-backup`.
 - To update: `git pull`, then `docker compose up -d --build`.

@@ -24,6 +24,9 @@ FROM python:3.13-slim AS runtime
 RUN useradd --create-home --uid 10001 appuser
 WORKDIR /app
 
+# Runtime data dir owned by appuser (a named volume inherits this ownership).
+RUN mkdir -p /app/data && chown appuser:appuser /app/data
+
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 

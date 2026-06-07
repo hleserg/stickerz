@@ -10,7 +10,7 @@ services:
       - redis
     restart: unless-stopped
     volumes:
-      - ./data:/app/data # sqlite db + downloaded photos + generated sheets
+      - sticker-data:/app/data # sqlite db + downloaded photos + generated sheets
 
   redis:
     image: redis:7-alpine
@@ -19,4 +19,5 @@ services:
       - redis-data:/data
 
 volumes:
+  sticker-data:
   redis-data:
