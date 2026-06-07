@@ -54,6 +54,7 @@ async def run() -> None:
         storage_dir=settings.data_dir,
     )
     dp = build_dispatcher(db=db, orchestrator=orchestrator, loader=loader)
+    await _set_commands(bot)
 
     logger.info("Starting long-polling as @%s", me.username)
     try:
@@ -61,6 +62,20 @@ async def run() -> None:
     finally:
         await bot.session.close()
         await db.close()
+
+
+async def _set_commands(bot: Bot) -> None:
+    """Register the bot's command menu (the "/" list in Telegram clients)."""
+    from aiogram.types import BotCommand
+
+    await bot.set_my_commands(
+        [
+            BotCommand(command="new", description="Новый пак"),
+            BotCommand(command="mychars", description="Мои персонажи (новый пак про того же)"),
+            BotCommand(command="addto", description="Дополнить существующий пак"),
+            BotCommand(command="start", description="О боте"),
+        ]
+    )
 
 
 def main() -> int:
