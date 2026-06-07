@@ -25,6 +25,8 @@ from sticker_service.services.postprocess import grid_for, process_sheet
 from sticker_service.services.publish import Publisher
 from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers import (
+    MAX_CAPTIONS,
+    PER_PAGE,
     assign_emojis,
     build_caption_set,
     generate_sheet,
@@ -110,14 +112,16 @@ class Orchestrator:
         self,
         character: Character,
         *,
-        personal: list[str] | None = None,
+        captions: list[str] | None = None,
         on_stage: StageCallback | None = None,
     ) -> list[StickerInput]:
         """Generate the sliced stickers (sheet → slice → emoji) WITHOUT publishing.
 
-        Used to show a preview before the user confirms publication.
+        ``captions`` lets the caller pass an explicit set (selected standard +
+        custom). Pages of >12 are generated as separate sheets. Used to show a
+        preview before the user confirms publication.
         """
-        stickers, emojis = await self._generate_stickers(character, personal, on_stage)
+        stickers, emojis = await self._generate_stickers(character, captions, on_stage)
         return list(zip(stickers, emojis, strict=True))
 
     async def publish_new(
@@ -158,11 +162,11 @@ class Orchestrator:
         owner_id: int,
         character: Character,
         title: str | None = None,
-        personal: list[str] | None = None,
+        captions: list[str] | None = None,
         on_stage: StageCallback | None = None,
     ) -> PackResult:
         """Convenience: generate + publish a new pack in one shot."""
-        stickers = await self.build_stickers(character, personal=personal, on_stage=on_stage)
+        stickers = await self.build_stickers(character, captions=captions, on_stage=on_stage)
         await self._stage(on_stage, "publish")
         return await self.publish_new(
             owner_id=owner_id, character=character, stickers=stickers, title=title
@@ -173,14 +177,14 @@ class Orchestrator:
         *,
         owner_id: int,
         pack: Pack,
-        personal: list[str] | None = None,
+        captions: list[str] | None = None,
         on_stage: StageCallback | None = None,
     ) -> PackResult:
         """Convenience: generate + append to an existing pack in one shot (§3.2)."""
         character = await self._db.get_character(pack.character_id)
         if character is None:  # pragma: no cover - referential integrity
             raise OrchestratorError(f"pack {pack.id} references missing character")
-        stickers = await self.build_stickers(character, personal=personal, on_stage=on_stage)
+        stickers = await self.build_stickers(character, captions=captions, on_stage=on_stage)
         await self._stage(on_stage, "publish")
         return await self.publish_extend(owner_id=owner_id, pack=pack, stickers=stickers)
 
@@ -189,26 +193,30 @@ class Orchestrator:
     async def _generate_stickers(
         self,
         character: Character,
-        personal: list[str] | None,
+        captions: list[str] | None,
         on_stage: StageCallback | None = None,
     ) -> tuple[list[bytes], list[str]]:
         style = self._require_style(character.style_id)
         canonical = Path(character.canonical_path).read_bytes()
-        captions = build_caption_set(personal=personal)
+        captions = (captions if captions is not None else build_caption_set())[:MAX_CAPTIONS]
+        pages = [captions[i : i + PER_PAGE] for i in range(0, len(captions), PER_PAGE)]
         await self._stage(on_stage, "sheet")
-        sheet = await generate_sheet(
-            self._model,
-            canonical,
-            style,
-            captions,
-            subject_type=character.subject_type,
-            child_age=character.child_age,
-        )
-        await self._stage(on_stage, "slice")
-        stickers = process_sheet(sheet, grid=grid_for(len(captions)))
+        stickers: list[bytes] = []
+        for page_no, page in enumerate(pages, start=1):
+            logger.info("sheet: page %d/%d (%d captions)", page_no, len(pages), len(page))
+            sheet = await generate_sheet(
+                self._model,
+                canonical,
+                style,
+                page,
+                subject_type=character.subject_type,
+                child_age=character.child_age,
+            )
+            stickers.extend(process_sheet(sheet, grid=grid_for(len(page))))
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
-        logger.info("slice: produced %d stickers", len(stickers))
+        await self._stage(on_stage, "slice")
+        logger.info("slice: produced %d stickers total", len(stickers))
         await self._stage(on_stage, "emoji")
         emojis = await assign_emojis(self._model, stickers)
         return stickers, emojis

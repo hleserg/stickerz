@@ -6,7 +6,7 @@ Three blocks: a standard age-neutral reaction block, an optional personal block
 
 from __future__ import annotations
 
-# Standard chat-reaction block — age-neutral (§6.1). 15 reactions.
+# Standard chat-reaction block — age-neutral (§6.1).
 STANDARD_BLOCK: tuple[str, ...] = (
     "Привет!",
     "Класс!",
@@ -20,10 +20,12 @@ STANDARD_BLOCK: tuple[str, ...] = (
     "Фейспалм",
     "Ты!",
     "Я крутой",
-    "Спасибо!",
     "Пока!",
-    "Что?!",
 )
+
+# Pack limits: up to 24 stickers, laid out 12 per sheet (3×4), max 2 sheets.
+MAX_CAPTIONS = 24
+PER_PAGE = 12
 
 # Example personal block for a child (Russian humour, §6.1).
 CHILD_PERSONAL_EXAMPLE: tuple[str, ...] = (

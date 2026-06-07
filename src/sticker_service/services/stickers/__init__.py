@@ -15,6 +15,8 @@ from sticker_service.services.stickers.generate import (
     generate_sheet,
 )
 from sticker_service.services.stickers.sets import (
+    MAX_CAPTIONS,
+    PER_PAGE,
     STANDARD_BLOCK,
     build_caption_set,
 )
@@ -22,6 +24,8 @@ from sticker_service.services.stickers.sets import (
 __all__ = [
     "CHROMA",
     "DEFAULT_EMOJI",
+    "MAX_CAPTIONS",
+    "PER_PAGE",
     "STANDARD_BLOCK",
     "SheetRefusedError",
     "assign_emoji",

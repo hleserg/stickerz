@@ -41,22 +41,22 @@ def _sheet_bytes(n: int = 15) -> bytes:
     return buffer.getvalue()
 
 
-# build_caption_set() yields the 12-item standard block.
-EXPECTED = 15
+# build_caption_set() yields the standard block.
+EXPECTED = 13  # 12 reactions + «Пока!»
 
 
 class _SheetModel(ImageModel):
-    """Returns a real 12-sticker magenta sheet for any prompt."""
+    """Returns a magenta sheet sized to the number of captions in the prompt."""
 
     name = "sheet"
 
     def __init__(self) -> None:
-        self._sheet = _sheet_bytes(EXPECTED)
         self.generate_calls: list[str] = []
 
     async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
         self.generate_calls.append(prompt)
-        return self._sheet
+        n = prompt.count('"') // 2 or 1  # captions are quoted in the sheet prompt
+        return _sheet_bytes(n)
 
     async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:
         return 0.95

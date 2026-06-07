@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sticker_service.services.postprocess.bundle import bundle_zip
 from sticker_service.services.postprocess.preview import compose_preview
 from sticker_service.services.postprocess.slice_stickers import (
     CHROMA_DEFAULT,
@@ -18,6 +19,7 @@ from sticker_service.services.postprocess.whatsapp import to_whatsapp, to_whatsa
 
 __all__ = [
     "CHROMA_DEFAULT",
+    "bundle_zip",
     "chroma_key",
     "chroma_key_auto",
     "compose_preview",

@@ -32,3 +32,15 @@ def test_compose_preview_splits_into_sheets_of_15() -> None:
 
 def test_compose_preview_empty() -> None:
     assert compose_preview([]) == []
+
+
+def test_bundle_zip_contains_all_stickers() -> None:
+    import zipfile
+
+    from sticker_service.services.postprocess import bundle_zip
+
+    data = bundle_zip([_png(), _png((1, 2, 3, 255)), _png((9, 9, 9, 255))])
+    with zipfile.ZipFile(BytesIO(data)) as zf:
+        names = zf.namelist()
+    assert len(names) == 3
+    assert all(n.endswith(".png") for n in names)

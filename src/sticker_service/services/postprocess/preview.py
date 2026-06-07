@@ -14,8 +14,8 @@ from PIL import Image
 
 from sticker_service.services.postprocess.slice_stickers import fit_to_512
 
-_PER_SHEET = 15
-_COLS = 5
+_PER_SHEET = 12
+_COLS = 3
 _CELL = 256
 _PAD = 14
 
