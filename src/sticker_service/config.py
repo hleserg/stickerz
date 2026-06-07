@@ -14,8 +14,9 @@ from pathlib import Path
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Repository root (…/src/sticker_service/config.py → repo root is parents[2]).
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# Package directory (…/sticker_service). Style plugins ship inside the package,
+# so resolve them relative to it — works both from source and an installed wheel.
+_PACKAGE_DIR = Path(__file__).resolve().parent
 
 
 class Settings(BaseSettings):
@@ -74,8 +75,11 @@ class Settings(BaseSettings):
     admin_ids: str = ""
 
     # --- Paths ---
-    data_dir: Path = _REPO_ROOT / "data"
-    styles_dir: Path = _REPO_ROOT / "src" / "sticker_service" / "services" / "canonical" / "styles"
+    # Runtime data (sqlite, photos, generated stickers): relative to CWD so it
+    # lands in the mounted ./data volume in Docker (WORKDIR=/app -> /app/data).
+    data_dir: Path = Path("data")
+    # Style plugins ship inside the package.
+    styles_dir: Path = _PACKAGE_DIR / "services" / "canonical" / "styles"
     redis_url: str = "redis://localhost:6379/0"
 
     # --- Sentry (disabled by default; empty DSN is a no-op) ---
