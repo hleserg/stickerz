@@ -8,7 +8,6 @@ Run with ``python -m sticker_service.bot`` (the Docker entrypoint) once
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 
 from aiogram import Bot
@@ -66,7 +65,7 @@ async def run() -> None:
 
 
 async def _set_commands(bot: Bot) -> None:
-    """Register the command menu + profile texts (the "/" list, About, Description)."""
+    """Register the bot's command menu (the "/" list in Telegram clients)."""
     from aiogram.types import BotCommand
 
     await bot.set_my_commands(
@@ -77,25 +76,6 @@ async def _set_commands(bot: Bot) -> None:
             BotCommand(command="start", description="О боте"),
         ]
     )
-    with contextlib.suppress(Exception):
-        await bot.set_my_short_description(
-            short_description=(
-                "Делаю стикерпак из твоего фото: человек становится нарисованным "
-                "персонажем с русскими подписями. Пак сразу публикуется в Telegram."
-            )
-        )
-        await bot.set_my_description(
-            description=(
-                "Загрузи фото — и получи готовый стикерпак, где этот человек "
-                "превращается в нарисованного персонажа в выбранном стиле: разные "
-                "эмоции, позы и русские подписи.\n\n"
-                "• Сходство сохраняется — персонаж реально похож (лицо, одежда, "
-                "телосложение), а не безликий аватар.\n"
-                "• Русский текст на стикерах без артефактов кириллицы.\n"
-                "• Автопубликация прямо в Telegram — без ручной возни.\n\n"
-                "Жми «Начать» → /new и собери свой пак за пару минут."
-            )
-        )
 
 
 def main() -> int:
