@@ -1,0 +1,42 @@
+schema_version: 1
+style_id: watercolor
+display_name: "Акварель"
+enabled: true
+distance: far # watercolor is far from a photo → 3 steps (§4.4)
+
+# Sliding-anchor ladder (§4.1, §4.4): each step references the previous frame so
+# facial geometry is carried pixel-to-pixel and the per-step delta stays small.
+pipeline:
+  - step: 1
+    # Photo → faithful realistic portrait. Keep the face 1:1 from the photo.
+    prompt: >-
+      Repaint this photo as a clean photorealistic digital portrait of the SAME
+      person. Preserve hair, eye color, face shape and proportions exactly from
+      the reference. Keep the same clothing and build. Neutral soft lighting,
+      plain light background. {age_clause}
+    refs: [photo]
+    gate: vision_judge
+  - step: 2
+    # Half-stylization toward illustration; hold the face by step 1.
+    prompt: >-
+      Turn the previous portrait into a soft semi-stylized illustration —
+      gentle linework, slightly painterly shading — while holding the exact same
+      facial geometry, hair and eye color from the reference. Do not change the
+      identity. {age_clause}
+    refs: [prev]
+    gate: vision_judge
+  - step: 3
+    # Final watercolor; hold the face by step 2.
+    prompt: >-
+      Render as a finished watercolor illustration: soft outlines, paper
+      texture, delicate washes. Keep the exact same face shape, hair and eye
+      color from the reference; the person must stay clearly recognizable.
+      {age_clause}
+    refs: [prev]
+    gate: vision_judge
+
+# Appended to the sticker-sheet prompt so the 15-sticker sheet matches the style.
+sticker_style_suffix: >-
+  All stickers in a soft watercolor illustration style with gentle outlines and
+  paper texture, consistent with the reference character. Preserve hair, eye
+  color and face shape exactly. {age_clause}
