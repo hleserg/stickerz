@@ -26,7 +26,16 @@ _IMAGE_FALLBACKS = ("gemini-3.1-flash-image", "gemini-2.5-flash-image")
 VISION_MODEL = "gemini-2.5-flash"
 
 _MAX_GEN_ATTEMPTS = 6
-_RETRYABLE = ("503", "unavailable", "overload", "high demand", "resource_exhausted", "429")
+_RETRYABLE = (
+    "503",
+    "500",
+    "unavailable",
+    "internal",
+    "overload",
+    "high demand",
+    "resource_exhausted",
+    "429",
+)
 
 _REFUSAL_REASONS = ("SAFETY", "PROHIBITED", "BLOCK", "RECITATION")
 _FLOAT_RE = re.compile(r"\d+(?:\.\d+)?|\.\d+")

@@ -5,38 +5,53 @@ enabled: true
 distance: far # watercolor is far from a photo → 3 steps (§4.4)
 
 # Sliding-anchor ladder (§4.1, §4.4): each step references the previous frame so
-# facial geometry is carried pixel-to-pixel and the per-step delta stays small.
+# the per-step style delta stays small. To stop identity drift (eye color, face
+# shape), steps 2–3 ALSO re-reference the ORIGINAL PHOTO as the ground truth for
+# identity — prev carries style, photo re-anchors the real face every step.
 pipeline:
   - step: 1
     # Photo → faithful realistic portrait. Keep the face 1:1 from the photo.
     prompt: >-
-      Repaint this photo as a clean photorealistic digital portrait of the SAME
-      person. Preserve hair, eye color, face shape and proportions exactly from
-      the reference. Keep the same clothing and build. Neutral soft lighting,
-      plain light background. {age_clause}
+      Repaint this photograph as a clean, photorealistic digital portrait of the
+      SAME person. Copy the facial geometry exactly: face shape, jawline,
+      cheekbones, distance between the eyes, nose and mouth shape, hairline and
+      hair color. CRITICAL: keep the EXACT eye color from the photo — do not
+      change it (if the eyes are brown/hazel, keep them brown/hazel; never turn
+      them blue). Keep the same clothing, skin tone and build. Neutral soft
+      lighting, plain light background. {age_clause}
     refs: [photo]
     gate: vision_judge
   - step: 2
-    # Half-stylization toward illustration; hold the face by step 1.
+    # Two references: [prev = the portrait, photo = the original]. Style from
+    # prev, identity strictly from the photo.
     prompt: >-
-      Turn the previous portrait into a soft semi-stylized illustration —
-      gentle linework, slightly painterly shading — while holding the exact same
-      facial geometry, hair and eye color from the reference. Do not change the
-      identity. {age_clause}
-    refs: [prev]
+      You are given two references: the FIRST image is a previous illustration
+      (use it ONLY for art style and pose), the SECOND image is the ORIGINAL
+      PHOTOGRAPH (use it as the ground truth for identity). Turn the result into
+      a soft, semi-stylized illustration — gentle linework, slightly painterly
+      shading — while taking face shape, proportions, hairline, skin tone and
+      especially the EXACT eye color strictly from the original photograph. The
+      person must remain unmistakably the same. Do not change the eye color.
+      {age_clause}
+    refs: [prev, photo]
     gate: vision_judge
   - step: 3
-    # Final watercolor; hold the face by step 2.
+    # Final watercolor; still re-anchor identity to the original photo.
     prompt: >-
-      Render as a finished watercolor illustration: soft outlines, paper
-      texture, delicate washes. Keep the exact same face shape, hair and eye
-      color from the reference; the person must stay clearly recognizable.
+      You are given two references: the FIRST image is the previous illustration
+      (use it for the watercolor style and pose), the SECOND image is the
+      ORIGINAL PHOTOGRAPH (the ground truth for identity). Render a finished
+      watercolor illustration: soft outlines, paper texture, delicate washes.
+      Copy face shape, facial proportions, hairline, hair color, skin tone and
+      the EXACT eye color from the original photograph — the likeness must be
+      clearly recognizable as the same person. Never alter the eye color.
       {age_clause}
-    refs: [prev]
+    refs: [prev, photo]
     gate: vision_judge
 
-# Appended to the sticker-sheet prompt so the 15-sticker sheet matches the style.
+# Appended to the sticker-sheet prompt so the sheet matches the style + identity.
 sticker_style_suffix: >-
   All stickers in a soft watercolor illustration style with gentle outlines and
-  paper texture, consistent with the reference character. Preserve hair, eye
-  color and face shape exactly. {age_clause}
+  paper texture, consistent with the reference character. Preserve the exact
+  face shape, hair color and EYE COLOR of the reference character in every
+  sticker; do not change the eye color. {age_clause}
