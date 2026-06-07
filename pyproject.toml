@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sticker_service"
-version = "0.2.0"
+version = "0.3.0"
 description = "Telegram bot that turns a photo into a recognizable drawn-character sticker pack with Russian captions."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -123,7 +123,7 @@ exclude_dirs = ["tests", ".venv"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.2.0"
+version = "0.3.0"
 version_files = ["pyproject.toml:version", "src/sticker_service/__init__.py:__version__"]
 tag_format = "v$version"
 update_changelog_on_bump = true
