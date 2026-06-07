@@ -133,37 +133,51 @@ class GeminiImageModel(ImageModel):
                 return data
         raise ModelError("Gemini returned no image part")
 
+    async def _vision_text(self, contents: list[Any]) -> str:  # pragma: no cover - network
+        client = self._get_client()
+        last: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await client.aio.models.generate_content(
+                    model=VISION_MODEL, contents=contents
+                )
+                return response.text or ""
+            except Exception as exc:
+                last = exc
+                if _is_retryable(exc) and attempt < 2:
+                    logger.warning("gemini vision overloaded (%s); retrying", str(exc)[:80])
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                raise
+        raise ModelError(f"Gemini vision failed after retries: {last}")
+
     async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:  # pragma: no cover
         from google.genai import types
 
-        client = self._get_client()
         prompt = (
             "Это один и тот же человек с одинаковой геометрией лица на обоих "
             "изображениях? Оцени совпадение геометрии лица числом от 0 до 1. "
             "Ответь ТОЛЬКО числом."
         )
-        response = await client.aio.models.generate_content(
-            model=VISION_MODEL,
-            contents=[
+        text = await self._vision_text(
+            [
                 types.Part.from_bytes(data=frame_a, mime_type=_mime(frame_a)),
                 types.Part.from_bytes(data=frame_b, mime_type=_mime(frame_b)),
                 prompt,
-            ],
+            ]
         )
-        return parse_score(response.text or "")
+        return parse_score(text)
 
     async def pick_emoji(self, image: bytes) -> str:  # pragma: no cover
         from google.genai import types
 
-        client = self._get_client()
         prompt = (
             "Подбери ОДИН эмодзи под эмоцию/жест на этом стикере. Ответь только эмодзи, без текста."
         )
-        response = await client.aio.models.generate_content(
-            model=VISION_MODEL,
-            contents=[types.Part.from_bytes(data=image, mime_type=_mime(image)), prompt],
+        text = await self._vision_text(
+            [types.Part.from_bytes(data=image, mime_type=_mime(image)), prompt]
         )
-        return parse_emoji(response.text or "") or "🙂"
+        return parse_emoji(text) or "🙂"
 
     @staticmethod
     def _finish(candidate: object) -> str:  # pragma: no cover - diagnostic
