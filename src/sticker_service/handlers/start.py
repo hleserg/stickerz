@@ -13,8 +13,6 @@ from aiogram.types import Message
 
 from sticker_service.observability import tag_component
 
-router = Router(name="start")
-
 WELCOME = (
     "Привет! Я делаю персональные стикерпаки из фото: твой человек "
     "превращается в нарисованного персонажа с русскими подписями, "
@@ -23,8 +21,14 @@ WELCOME = (
 )
 
 
-@router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     """Greet the user and outline what the bot does."""
     tag_component("handlers.start")
     await message.answer(WELCOME)
+
+
+def build_router() -> Router:
+    """Build a fresh start router (factory: safe to call per dispatcher)."""
+    router = Router(name="start")
+    router.message.register(cmd_start, CommandStart())
+    return router
