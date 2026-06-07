@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "projectname"
+name = "sticker_service"
 version = "0.2.0"
-description = "TODO: one-line project description."
+description = "Telegram bot that turns a photo into a recognizable drawn-character sticker pack with Russian captions."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Sergey Khlebnikov", email = "you@example.com" }]
-keywords = ["python", "ai", "agents"]
+keywords = ["telegram", "stickers", "ai", "image-generation", "aiogram"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -22,9 +22,22 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "sentry-sdk>=2.0",
+    "aiogram>=3.13",
+    "aiosqlite>=0.20",
+    "pyyaml>=6.0",
+    "pillow>=10.3",
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "redis>=5.0",
 ]
 
 [project.optional-dependencies]
+# Provider SDKs are optional: the model layer is config-driven and mocks in
+# tests (§15.1), so core install + CI stay light and offline-friendly.
+models = [
+    "google-genai>=0.3",
+    "openai>=1.40",
+]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
@@ -39,15 +52,15 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hleserg/projectname"
-Repository = "https://github.com/hleserg/projectname"
-Issues = "https://github.com/hleserg/projectname/issues"
+Homepage = "https://github.com/hleserg/stickerz"
+Repository = "https://github.com/hleserg/stickerz"
+Issues = "https://github.com/hleserg/stickerz/issues"
 
 [project.scripts]
-projectname = "projectname.cli:main"
+sticker_service = "sticker_service.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/projectname"]
+packages = ["src/sticker_service"]
 
 [tool.ruff]
 line-length = 100
@@ -59,7 +72,7 @@ select = ["F", "E", "W", "I", "UP", "B", "SIM", "RUF"]
 ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["projectname"]
+known-first-party = ["sticker_service"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]
@@ -87,8 +100,8 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["src/projectname"]
-omit = ["src/projectname/cli.py"]
+source = ["src/sticker_service"]
+omit = ["src/sticker_service/cli.py"]
 
 [tool.coverage.report]
 fail_under = 90
@@ -107,7 +120,7 @@ exclude_dirs = ["tests", ".venv"]
 [tool.commitizen]
 name = "cz_conventional_commits"
 version = "0.2.0"
-version_files = ["pyproject.toml:version", "src/projectname/__init__.py:__version__"]
+version_files = ["pyproject.toml:version", "src/sticker_service/__init__.py:__version__"]
 tag_format = "v$version"
 update_changelog_on_bump = true
 major_version_zero = true

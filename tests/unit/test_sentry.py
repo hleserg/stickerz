@@ -1,4 +1,4 @@
-"""Tests for projectname.observability.sentry."""
+"""Tests for sticker_service.observability.sentry."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from projectname.observability import sentry as obs
+from sticker_service.observability import sentry as obs
 
 
 def test_init_skipped_without_dsn() -> None:
@@ -29,7 +29,7 @@ def test_init_with_dsn_sets_privacy_defaults(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_init_uses_settings_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_SENTRY_DSN", "https://key@o0.ingest.sentry.io/0")
-    from projectname.config import get_settings
+    from sticker_service.config import get_settings
 
     get_settings.cache_clear()
 

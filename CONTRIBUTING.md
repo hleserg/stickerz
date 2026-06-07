@@ -23,7 +23,7 @@ make check        # confirm a green baseline
 ## Conventions
 
 - Python >= 3.12, fully typed, `src/` layout.
-- Env access only through `projectname.config.get_settings()`.
+- Env access only through `sticker_service.config.get_settings()`.
 - Secrets in `.env`; document keys in `.env.example`.
 - Docs English-canonical; add `-ru.md` for user-facing docs.
 - Reusable patterns get a PLAYBOOK marker (`docs/development/PLAYBOOK_MARKERS.md`).

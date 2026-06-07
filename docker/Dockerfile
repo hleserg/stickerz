@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Multi-stage production image. Build context = repo root:
-#   docker build -f docker/Dockerfile -t projectname .
+#   docker build -f docker/Dockerfile -t sticker-service .
 
 FROM python:3.13-slim AS builder
 
@@ -28,4 +28,6 @@ COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
 USER appuser
-ENTRYPOINT ["projectname"]
+# Default entrypoint runs the Telegram bot (long-polling). Override with
+# `sticker_service` for the thin CLI.
+ENTRYPOINT ["python", "-m", "sticker_service.bot"]

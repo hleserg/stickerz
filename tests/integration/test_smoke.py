@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from projectname import __version__
+from sticker_service import __version__
 
 
 @pytest.mark.integration

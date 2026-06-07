@@ -1,5 +1,5 @@
 {
-  "name": "projectname",
+  "name": "sticker_service",
   "build": { "dockerfile": "Dockerfile" },
   "containerEnv": {
     "UV_LINK_MODE": "copy",

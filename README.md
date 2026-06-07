@@ -1,8 +1,8 @@
-# projectname
+# sticker_service
 
-> TODO: one-line project description.
+> Telegram bot that turns a photo into a recognizable drawn-character sticker pack with Russian captions.
 
-[![CI](https://github.com/hleserg/projectname/actions/workflows/ci.yml/badge.svg)](https://github.com/hleserg/projectname/actions/workflows/ci.yml)
+[![CI](https://github.com/hleserg/sticker_service/actions/workflows/ci.yml/badge.svg)](https://github.com/hleserg/sticker_service/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 
@@ -33,7 +33,7 @@ A Python starter kit wired for working with coding agents (Claude Code, Cursor):
 ```bash
 uv sync --all-extras        # create .venv and install everything
 cp .env.example .env        # fill in secrets locally (never commit)
-uv run projectname --version
+uv run sticker_service --version
 make check                  # the Definition-of-Done gate
 ```
 
@@ -41,9 +41,9 @@ make check                  # the Definition-of-Done gate
 
 | Path | Purpose |
 |------|---------|
-| `src/projectname/` | the package (src-layout, fully typed, ships `py.typed`) |
-| `src/projectname/config.py` | typed settings via `pydantic-settings` |
-| `src/projectname/observability/` | Sentry init (`send_default_pii=False`) + component tags |
+| `src/sticker_service/` | the package (src-layout, fully typed, ships `py.typed`) |
+| `src/sticker_service/config.py` | typed settings via `pydantic-settings` |
+| `src/sticker_service/observability/` | Sentry init (`send_default_pii=False`) + component tags |
 | `tests/` | `unit/` + `integration/`, pytest with >=90% coverage gate |
 | `docs/` | architecture (ADRs), development standard, PLAYBOOK marker spec |
 | `scripts/` | `init_template.py`, `extract_playbook.py` |

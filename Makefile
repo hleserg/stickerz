@@ -26,9 +26,14 @@ fmt-check: ## Ruff format (check only)
 type: ## Pyright type check
 	$(PY) pyright
 
+# aiohttp CVE-2026-34993 / CVE-2026-47265 are fixed in 3.14.0, but aiogram caps
+# aiohttp <3.14, so no compatible fix is installable yet. Ignored here until
+# aiogram lifts the cap; revisit on each aiogram bump.
+AIOHTTP_IGNORES := --ignore-vuln CVE-2026-34993 --ignore-vuln CVE-2026-47265
+
 security: ## Bandit + pip-audit (OSV fallback when the default PyPI service is unreachable)
 	$(PY) bandit -c pyproject.toml -r src/ -q
-	$(PY) pip-audit || $(PY) pip-audit --vulnerability-service osv
+	$(PY) pip-audit $(AIOHTTP_IGNORES) || $(PY) pip-audit $(AIOHTTP_IGNORES) --vulnerability-service osv
 
 test: ## Full test suite with coverage gate
 	$(PY) pytest --cov --cov-fail-under=90
