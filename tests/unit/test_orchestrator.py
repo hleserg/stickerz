@@ -76,6 +76,9 @@ class _FakeBot:
     async def add_sticker_to_set(self, **kwargs: object) -> None:
         self.added.append(kwargs)
 
+    async def set_sticker_set_thumbnail(self, **kwargs: object) -> None:
+        pass
+
 
 @pytest_asyncio.fixture
 async def db() -> AsyncIterator[Database]:

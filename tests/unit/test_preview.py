@@ -34,6 +34,16 @@ def test_compose_preview_empty() -> None:
     assert compose_preview([]) == []
 
 
+def test_make_cover_is_100_square_webp() -> None:
+    from sticker_service.services.postprocess import make_cover
+
+    data = make_cover(_png())
+    img = Image.open(BytesIO(data))
+    assert img.format == "WEBP"
+    assert img.size == (100, 100)
+    assert len(data) <= 128 * 1024
+
+
 def test_bundle_zip_contains_all_stickers() -> None:
     import zipfile
 

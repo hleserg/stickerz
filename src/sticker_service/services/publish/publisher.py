@@ -71,8 +71,28 @@ class Publisher:
                     continue
                 raise
             else:
+                await self._set_cover(user_id, name, stickers)
                 return name
         raise RuntimeError("unreachable: create_pack retry loop exhausted")  # pragma: no cover
+
+    async def _set_cover(self, user_id: int, name: str, stickers: Sequence[StickerInput]) -> None:
+        """Pick a random sticker, fit it to a cover, set it as the set thumbnail."""
+        if not stickers:  # pragma: no cover - defensive
+            return
+        import secrets
+
+        from sticker_service.services.postprocess import make_cover
+
+        try:
+            cover = make_cover(secrets.choice(list(stickers))[0])
+            await self._bot.set_sticker_set_thumbnail(  # type: ignore[attr-defined]
+                name=name,
+                user_id=user_id,
+                thumbnail=BufferedInputFile(cover, filename="cover.webp"),
+                format="static",
+            )
+        except Exception as exc:  # cover is best-effort; never fail publish over it
+            logger.warning("could not set set cover for %s: %s", name, str(exc)[:100])
 
     async def add_to_pack(
         self,
