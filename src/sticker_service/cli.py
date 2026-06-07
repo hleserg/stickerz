@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import sys
 
-from projectname import __version__
-from projectname.config import get_settings
-from projectname.observability import init_sentry
+from sticker_service import __version__
+from sticker_service.config import get_settings
+from sticker_service.observability import init_sentry
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -19,12 +19,12 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
 
     if args and args[0] in {"-v", "--version"}:
-        print(f"projectname {__version__}")
+        print(f"sticker_service {__version__}")
         return 0
 
     settings = get_settings()
     init_sentry()
-    print(f"projectname {__version__} — environment: {settings.environment}")
+    print(f"sticker_service {__version__} — environment: {settings.environment}")
     print("Replace this entry point with your real commands.")
     return 0
 

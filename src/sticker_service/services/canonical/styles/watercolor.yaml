@@ -1,0 +1,32 @@
+schema_version: 1
+style_id: watercolor
+display_name: "Акварель"
+enabled: true
+distance: far
+
+# Debugged ladder (RU prompts, literal):
+#   1) photo → realistic colored drawing;
+#   2) prev  → line-art contour + textured watercolor color;
+#   3) prev  → turn the gaze into the camera (skipped if already looking at it).
+pipeline:
+  - step: 1
+    prompt: "Сделай из фото фотореалистичный цветной рисунок."
+    refs: [photo]
+    gate: vision_judge
+  - step: 2
+    prompt: "Добавь тонкие контуры линером и цвет сделай акварельным и фактурным."
+    refs: [prev]
+    gate: vision_judge
+  - step: 3
+    # Pre-check: if the character already looks at the camera, skip this step.
+    skip_if_yes: "Ответь да или нет, одним словом: человек на изображении смотрит прямо в камеру?"
+    prompt: >-
+      Сделай так чтобы герой смотрел в камеру, если голова повернута в другую
+      сторону постарайся развернуть ее в камеру на сколько сможешь не теряя
+      реалистичности
+    refs: [prev]
+    gate: none
+
+# Appended to the sticker-sheet prompt. The final canonical (attached as the
+# reference) carries the art style, so here we only fix language + age.
+sticker_style_suffix: "Подписи только на русском языке. {age_clause}"

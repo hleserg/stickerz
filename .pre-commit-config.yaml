@@ -18,10 +18,16 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.380
+  - repo: local
     hooks:
+      # Run pyright in the project's uv venv so third-party imports resolve
+      # (the isolated pyright-python hook env lacks our dependencies).
       - id: pyright
+        name: pyright
+        entry: uv run pyright
+        language: system
+        types: [python]
+        pass_filenames: false
 
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.9

@@ -42,7 +42,7 @@ Also required:
   sensitive data — never weaken scrubbing or log raw user input.
 - **Secrets only in `.env`** (git-ignored). Document new keys in `.env.example`.
   Never hardcode credentials; never read `os.environ` directly — use
-  `projectname.config.get_settings()`.
+  `sticker_service.config.get_settings()`.
 - **Conventional Commits** (`feat:`, `fix:`, `feat!:` …). Commits/comments in
   English. Versioning via Commitizen.
 - **Docs are English-canonical**; user-facing docs add an `-ru.md` pair, edited
@@ -68,9 +68,9 @@ Spec: `docs/development/PLAYBOOK_MARKERS.md`. When unsure, add one with
 
 | Path | What |
 |------|------|
-| `src/projectname/` | the package |
-| `src/projectname/config.py` | typed settings (env access lives here only) |
-| `src/projectname/observability/` | Sentry init + component tagging |
+| `src/sticker_service/` | the package |
+| `src/sticker_service/config.py` | typed settings (env access lives here only) |
+| `src/sticker_service/observability/` | Sentry init + component tagging |
 | `tests/{unit,integration}/` | tests |
 | `docs/` | architecture (ADRs), dev standard, PLAYBOOK spec |
 | `scripts/` | `init_template.py`, `extract_playbook.py` |

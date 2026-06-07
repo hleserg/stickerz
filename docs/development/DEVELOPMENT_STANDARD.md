@@ -17,7 +17,7 @@ extended rules.
 
 ## Layout & boundaries
 
-- `src/projectname/` — the package. Separate **core** logic (pure, testable)
+- `src/sticker_service/` — the package. Separate **core** logic (pure, testable)
   from **adapters** (I/O, external services).
 - Environment access lives **only** in `config.py` via `get_settings()`.
 - Instrumented dirs (`handlers`/`adapters`/`agents`/`engines`) must call

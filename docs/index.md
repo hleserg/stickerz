@@ -1,4 +1,4 @@
-# projectname docs
+# sticker_service docs
 
 Start here, then dive into specifics.
 

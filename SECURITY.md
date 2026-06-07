@@ -10,7 +10,7 @@ acknowledgement within a few days.
 ## Handling sensitive data
 
 - Sentry runs with `send_default_pii=False` and an extended `EventScrubber`.
-  Do not weaken this. See `src/projectname/observability/sentry.py`.
+  Do not weaken this. See `src/sticker_service/observability/sentry.py`.
 - Never log raw user input, prompts, completions, or embeddings at INFO+.
 - Secrets live only in `.env` (git-ignored). Rotate anything committed by
   accident immediately.

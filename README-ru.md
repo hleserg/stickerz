@@ -1,6 +1,6 @@
-# projectname
+# sticker_service
 
-> TODO: однострочное описание проекта.
+> Telegram bot that turns a photo into a recognizable drawn-character sticker pack with Russian captions.
 
 [English version](README.md)
 
@@ -30,7 +30,7 @@ PLAYBOOK-маркеры и CI из коробки.
 ```bash
 uv sync --all-extras
 cp .env.example .env
-uv run projectname --version
+uv run sticker_service --version
 make check
 ```
 

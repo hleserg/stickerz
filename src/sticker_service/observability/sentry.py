@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from projectname.config import get_settings
+from sticker_service.config import get_settings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
