@@ -1,0 +1,78 @@
+"""Tests for the image-model interface, mock, factory, and key guards."""
+
+from __future__ import annotations
+
+import pytest
+
+from sticker_service.config import get_settings
+from sticker_service.services.models import (
+    GeminiImageModel,
+    GptImageModel,
+    MockImageModel,
+    ModelRefusalError,
+    build_model,
+)
+
+
+async def test_mock_generate_is_deterministic() -> None:
+    model = MockImageModel()
+    a = await model.generate("hello", refs=[b"ref"])
+    b = await model.generate("hello", refs=[b"ref"])
+    c = await model.generate("different", refs=[b"ref"])
+    assert a == b  # same prompt+refs -> same bytes
+    assert a != c  # different prompt -> different bytes
+    assert a.startswith(b"\x89PNG")  # real PNG
+    assert model.generate_calls == ["hello", "hello", "different"]
+
+
+async def test_mock_can_refuse() -> None:
+    model = MockImageModel(refuse_on="ребёнок")
+    with pytest.raises(ModelRefusalError):
+        await model.generate("портрет: ребёнок 6 лет")
+    # Non-matching prompt still works.
+    assert await model.generate("портрет взрослого")
+
+
+async def test_mock_judge_and_emoji() -> None:
+    model = MockImageModel(judge_score=0.42, emoji="🔥")
+    assert await model.judge_geometry(b"a", b"b") == 0.42
+    assert await model.pick_emoji(b"img") == "🔥"
+
+
+def test_build_model_mock() -> None:
+    assert isinstance(build_model("mock"), MockImageModel)
+
+
+def test_build_model_uses_settings_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_MODEL_PROVIDER", "mock")
+    get_settings.cache_clear()
+    assert isinstance(build_model(), MockImageModel)
+
+
+def test_build_model_gemini_and_gpt_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_GEMINI_API_KEY", "k")
+    monkeypatch.setenv("APP_OPENAI_API_KEY", "k2")
+    get_settings.cache_clear()
+    assert build_model("gemini").name == "gemini"
+    assert build_model("gpt").name == "gpt"
+
+
+def test_build_model_unknown_provider() -> None:
+    with pytest.raises(ValueError, match="unknown model provider"):
+        build_model("flux")
+
+
+def test_gemini_requires_key() -> None:
+    with pytest.raises(ValueError, match="GEMINI_KEY"):
+        GeminiImageModel(api_key="")
+
+
+def test_gpt_requires_key() -> None:
+    with pytest.raises(ValueError, match="GPT_KEY"):
+        GptImageModel(api_key="")
+
+
+def test_build_gemini_and_gpt_with_keys() -> None:
+    assert build_model.__name__ == "build_model"  # importable
+    assert GeminiImageModel(api_key="k").name == "gemini"
+    assert GptImageModel(api_key="k").name == "gpt"
