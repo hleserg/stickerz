@@ -10,6 +10,7 @@ from sticker_service.services.postprocess.slice_stickers import (
     process_sheet,
     slice_sheet,
 )
+from sticker_service.services.postprocess.whatsapp import to_whatsapp, to_whatsapp_pack
 
 __all__ = [
     "CHROMA_DEFAULT",
@@ -18,4 +19,6 @@ __all__ = [
     "fit_to_512",
     "process_sheet",
     "slice_sheet",
+    "to_whatsapp",
+    "to_whatsapp_pack",
 ]
