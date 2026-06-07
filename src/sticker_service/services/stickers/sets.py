@@ -6,7 +6,7 @@ Three blocks: a standard age-neutral reaction block, an optional personal block
 
 from __future__ import annotations
 
-# Standard chat-reaction block — age-neutral (§6.1).
+# Standard chat-reaction block — age-neutral (§6.1). 15 reactions.
 STANDARD_BLOCK: tuple[str, ...] = (
     "Привет!",
     "Класс!",
@@ -20,6 +20,9 @@ STANDARD_BLOCK: tuple[str, ...] = (
     "Фейспалм",
     "Ты!",
     "Я крутой",
+    "Спасибо!",
+    "Пока!",
+    "Что?!",
 )
 
 # Example personal block for a child (Russian humour, §6.1).
@@ -39,8 +42,9 @@ def build_caption_set(
     """Combine the standard block with an optional personal block.
 
     Capped at ``limit`` (default 15) so the sheet stays a single generation.
+    Personal captions are always kept; the standard block fills the remaining room.
     """
-    captions = list(STANDARD_BLOCK)
-    if personal:
-        captions.extend(personal)
+    personal = personal or []
+    room = max(0, limit - len(personal))
+    captions = list(STANDARD_BLOCK[:room]) + list(personal)
     return captions[:limit]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sticker_service.services.postprocess.preview import compose_preview
 from sticker_service.services.postprocess.slice_stickers import (
     CHROMA_DEFAULT,
     chroma_key,
@@ -19,6 +20,7 @@ __all__ = [
     "CHROMA_DEFAULT",
     "chroma_key",
     "chroma_key_auto",
+    "compose_preview",
     "encode_sticker",
     "fit_to_512",
     "grid_for",

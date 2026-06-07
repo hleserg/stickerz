@@ -20,7 +20,7 @@ from sticker_service.services.publish import Publisher
 MAGENTA = (255, 0, 255, 255)
 
 
-def _sheet_bytes(n: int = 12) -> bytes:
+def _sheet_bytes(n: int = 15) -> bytes:
     """A clean magenta sheet of ``n`` well-separated squares (chroma-sliceable)."""
     from sticker_service.services.postprocess import grid_for
 
@@ -42,7 +42,7 @@ def _sheet_bytes(n: int = 12) -> bytes:
 
 
 # build_caption_set() yields the 12-item standard block.
-EXPECTED = 12
+EXPECTED = 15
 
 
 class _SheetModel(ImageModel):
@@ -199,6 +199,49 @@ async def test_extend_pack_appends(db: Database, loader: StyleLoader, tmp_path: 
     assert result.set_name == pack.set_name
     assert len(bot.added) == EXPECTED  # appended via add_sticker_to_set
     assert await db.count_stickers(pack.id) == 2 * EXPECTED  # appended, positions continue
+
+
+async def test_build_then_publish_split(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
+    bot = _FakeBot()
+    orch = _orchestrator(db, loader, bot, tmp_path)
+    char = await orch.save_character(
+        owner_id=5,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(EXPECTED),
+    )
+    # 1) generate without publishing — nothing created yet.
+    stickers = await orch.build_stickers(char)
+    assert len(stickers) == EXPECTED
+    assert bot.created == []
+    assert await db.list_packs(5) == []
+    # 2) publish the already-generated stickers.
+    result = await orch.publish_new(owner_id=5, character=char, stickers=stickers)
+    assert result.count == EXPECTED
+    assert len(bot.created) == 1
+    assert await db.count_stickers((await db.list_packs(5))[0].id) == EXPECTED
+
+
+async def test_publish_extend_split(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
+    bot = _FakeBot()
+    orch = _orchestrator(db, loader, bot, tmp_path)
+    char = await orch.save_character(
+        owner_id=9,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(EXPECTED),
+    )
+    await orch.create_pack(owner_id=9, character=char)
+    pack = (await db.list_packs(9))[0]
+    stickers = await orch.build_stickers(char)
+    result = await orch.publish_extend(owner_id=9, pack=pack, stickers=stickers)
+    assert result.set_name == pack.set_name
+    assert len(bot.added) == EXPECTED
+    assert await db.count_stickers(pack.id) == 2 * EXPECTED
 
 
 async def test_unknown_style_raises(db: Database, loader: StyleLoader, tmp_path: Path) -> None:

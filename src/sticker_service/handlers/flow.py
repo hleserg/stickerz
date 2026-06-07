@@ -29,6 +29,8 @@ from sticker_service.db import Database
 from sticker_service.observability import tag_component
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.orchestrator import Orchestrator
+from sticker_service.services.postprocess import compose_preview
+from sticker_service.services.publish.publisher import StickerInput
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +82,7 @@ class NewPack(StatesGroup):
     subject = State()
     child_age = State()
     style = State()
-    confirm = State()
+    publish = State()  # stickers generated, preview shown, awaiting publish/cancel
 
 
 # --- keyboards (pure) --------------------------------------------------------
@@ -115,10 +117,10 @@ def style_kb(loader: StyleLoader) -> Any:
     return kb.as_markup()
 
 
-def confirm_kb() -> Any:
+def publish_kb() -> Any:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Похож, генерируем!", callback_data="canon:ok")
-    kb.button(text="🔁 Переснять", callback_data="canon:retake")
+    kb.button(text="✅ Опубликовать в Telegram", callback_data="pub:yes")
+    kb.button(text="❌ Отмена", callback_data="pub:no")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -201,11 +203,10 @@ async def on_age(callback: CallbackQuery, state: FSMContext, loader: StyleLoader
 async def on_style(  # pragma: no cover - runs the model pipeline
     callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator
 ) -> None:
-    """Run the canonical pipeline (with progress) and show it for confirmation (§4)."""
+    """Build canonical, generate stickers (no 'похож' confirm), show a preview."""
     tag_component("handlers.flow")
     style_id = (callback.data or "").split(":", 1)[-1]
     data = await state.get_data()
-    await state.update_data(style_id=style_id)
     await callback.answer()
     msg = callback.message if isinstance(callback.message, Message) else None
     if msg is None:
@@ -217,6 +218,11 @@ async def on_style(  # pragma: no cover - runs the model pipeline
         with contextlib.suppress(Exception):
             await status.edit_text(f"🎨 Рисую персонажа… шаг {done}/{total}")
 
+    async def on_stage(label: str) -> None:
+        with contextlib.suppress(Exception):
+            await status.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
+
+    user_id = callback.from_user.id if callback.from_user else 0
     try:
         async with _typing(msg):
             canonical = await orchestrator.build_canonical(
@@ -226,27 +232,55 @@ async def on_style(  # pragma: no cover - runs the model pipeline
                 child_age=data.get("child_age"),
                 on_step=on_step,
             )
+            character = await orchestrator.save_character(
+                owner_id=user_id,
+                name=data["name"],
+                style_id=style_id,
+                subject_type=data["subject"],
+                child_age=data.get("child_age"),
+                canonical=canonical,
+            )
+            stickers = await orchestrator.build_stickers(character, on_stage=on_stage)
     except Exception as exc:
-        logger.exception("canonical generation failed")
+        logger.exception("generation failed")
         await status.edit_text(_friendly_error(exc))
         await state.clear()
         return
 
-    await state.update_data(canonical=canonical)
-    await state.set_state(NewPack.confirm)
     with contextlib.suppress(Exception):
         await status.delete()
-    await msg.answer_photo(
-        BufferedInputFile(canonical, "canonical.png"),
-        caption="Похож? Генерируем стикеры?",
-        reply_markup=confirm_kb(),
+    await _present_for_publish(
+        msg, state, stickers, mode="new", character_id=character.id, title=character.name
     )
 
 
-async def on_confirm(  # pragma: no cover - publishes via Bot API
-    callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator
+async def _present_for_publish(  # pragma: no cover - Telegram IO
+    msg: Message,
+    state: FSMContext,
+    stickers: list[StickerInput],
+    *,
+    mode: str,
+    character_id: int,
+    title: str,
+    pack_id: int | None = None,
 ) -> None:
-    """Save the character and build+publish the pack, with progress (§3.2)."""
+    """Send the transparent preview sheet(s) and ask whether to publish."""
+    await state.update_data(
+        stickers=stickers, mode=mode, character_id=character_id, pack_id=pack_id, pub_title=title
+    )
+    await state.set_state(NewPack.publish)
+    for i, sheet in enumerate(compose_preview([img for img, _ in stickers]), start=1):
+        await msg.answer_document(BufferedInputFile(sheet, filename=f"preview_{i}.png"))
+    await msg.answer(
+        f"Готово: {len(stickers)} стикеров (прозрачный фон). Публикуем пак в Telegram?",
+        reply_markup=publish_kb(),
+    )
+
+
+async def on_publish_yes(  # pragma: no cover - publishes via Bot API
+    callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator, db: Database
+) -> None:
+    """Publish the previously-generated stickers (new pack or extend)."""
     tag_component("handlers.flow")
     data = await state.get_data()
     user_id = callback.from_user.id if callback.from_user else 0
@@ -254,33 +288,50 @@ async def on_confirm(  # pragma: no cover - publishes via Bot API
     msg = callback.message if isinstance(callback.message, Message) else None
     if msg is None:
         return
+    stickers: list[StickerInput] = data.get("stickers") or []
+    if not stickers:
+        await msg.answer("Нет готовых стикеров. Начни заново: /new")
+        await state.clear()
+        return
 
-    status = await msg.answer("✨ Готовлю стикеры…")
-
-    async def on_stage(label: str) -> None:
-        with contextlib.suppress(Exception):
-            await status.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
-
+    status = await msg.answer("📦 Публикую пак в Telegram…")
     try:
         async with _typing(msg):
-            character = await orchestrator.save_character(
-                owner_id=user_id,
-                name=data["name"],
-                style_id=data["style_id"],
-                subject_type=data["subject"],
-                child_age=data.get("child_age"),
-                canonical=data["canonical"],
-            )
-            result = await orchestrator.create_pack(
-                owner_id=user_id, character=character, on_stage=on_stage
-            )
+            if data.get("mode") == "extend":
+                pack = await db.get_pack(int(data["pack_id"]))
+                if pack is None:
+                    raise RuntimeError("pack not found")
+                result = await orchestrator.publish_extend(
+                    owner_id=user_id, pack=pack, stickers=stickers
+                )
+            else:
+                character = await db.get_character(int(data["character_id"]))
+                if character is None:
+                    raise RuntimeError("character not found")
+                result = await orchestrator.publish_new(
+                    owner_id=user_id,
+                    character=character,
+                    stickers=stickers,
+                    title=data.get("pub_title"),
+                )
     except Exception as exc:
-        logger.exception("pack build/publish failed")
+        logger.exception("publish failed")
         await status.edit_text(_friendly_error(exc))
         return
 
     await state.clear()
     await status.edit_text(f"✅ Готово! Пак: {result.link}")
+
+
+async def on_publish_no(
+    callback: CallbackQuery, state: FSMContext
+) -> None:  # pragma: no cover - IO
+    """Cancel before publishing."""
+    tag_component("handlers.flow")
+    await state.clear()
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer("Отменено. Новый пак: /new")
 
 
 async def cmd_mychars(message: Message, db: Database) -> None:
@@ -298,23 +349,38 @@ async def cmd_mychars(message: Message, db: Database) -> None:
     await message.answer("Новый пак про сохранённого персонажа:", reply_markup=kb.as_markup())
 
 
-async def on_pick_char(  # pragma: no cover - publishes via Bot API
-    callback: CallbackQuery, db: Database, orchestrator: Orchestrator
+async def on_pick_char(  # pragma: no cover - runs the model + Bot API
+    callback: CallbackQuery, state: FSMContext, db: Database, orchestrator: Orchestrator
 ) -> None:
-    """Reuse a saved character's canonical to build a new pack (pipeline skipped)."""
+    """Reuse a saved character to generate stickers, then preview before publish (§3.2)."""
     tag_component("handlers.flow")
     char_id = int((callback.data or "char:0").split(":", 1)[-1])
     character = await db.get_character(char_id)
-    if character is None:
-        await callback.answer("Персонаж не найден", show_alert=True)
-        return
-    if isinstance(callback.message, Message):
-        await callback.message.answer("Генерирую новый пак про этого персонажа…")
-    user_id = callback.from_user.id if callback.from_user else 0
-    result = await orchestrator.create_pack(owner_id=user_id, character=character)
-    if isinstance(callback.message, Message):
-        await callback.message.answer(f"Готово! Пак: {result.link}")
     await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    if character is None:
+        await msg.answer("Персонаж не найден")
+        return
+    status = await msg.answer("✨ Генерирую стикеры…")
+
+    async def on_stage(label: str) -> None:
+        with contextlib.suppress(Exception):
+            await status.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
+
+    try:
+        async with _typing(msg):
+            stickers = await orchestrator.build_stickers(character, on_stage=on_stage)
+    except Exception as exc:
+        logger.exception("generation failed")
+        await status.edit_text(_friendly_error(exc))
+        return
+    with contextlib.suppress(Exception):
+        await status.delete()
+    await _present_for_publish(
+        msg, state, stickers, mode="new", character_id=character.id, title=character.name
+    )
 
 
 async def cmd_addto(message: Message, db: Database) -> None:
@@ -335,33 +401,48 @@ async def cmd_addto(message: Message, db: Database) -> None:
     )
 
 
-async def on_pick_pack(  # pragma: no cover - publishes via Bot API
-    callback: CallbackQuery, db: Database, orchestrator: Orchestrator
+async def on_pick_pack(  # pragma: no cover - runs the model + Bot API
+    callback: CallbackQuery, state: FSMContext, db: Database, orchestrator: Orchestrator
 ) -> None:
-    """Append stickers to the chosen existing set via the same character (§3.2)."""
+    """Generate stickers for the pack's character, preview, then append on confirm (§3.2)."""
     tag_component("handlers.flow")
     pack_id = int((callback.data or "extend:0").split(":", 1)[-1])
     pack = await db.get_pack(pack_id)
-    if pack is None:
-        await callback.answer("Пак не найден", show_alert=True)
-        return
-    if isinstance(callback.message, Message):
-        await callback.message.answer("Дополняю пак…")
-    user_id = callback.from_user.id if callback.from_user else 0
-    try:
-        result = await orchestrator.extend_pack(owner_id=user_id, pack=pack)
-    except Exception as exc:  # PackFullError etc. — surface, suggest a new pack
-        logger.warning("extend failed: %s", exc)
-        if isinstance(callback.message, Message):
-            await callback.message.answer(
-                "Не получилось дополнить (возможно, достигнут лимит 120). Создай новый "
-                "пак про того же: /mychars"
-            )
-        await callback.answer()
-        return
-    if isinstance(callback.message, Message):
-        await callback.message.answer(f"Готово! Пак: {result.link}")
     await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    if pack is None:
+        await msg.answer("Пак не найден")
+        return
+    character = await db.get_character(pack.character_id)
+    if character is None:
+        await msg.answer("Персонаж пака не найден")
+        return
+    status = await msg.answer("✨ Генерирую стикеры…")
+
+    async def on_stage(label: str) -> None:
+        with contextlib.suppress(Exception):
+            await status.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
+
+    try:
+        async with _typing(msg):
+            stickers = await orchestrator.build_stickers(character, on_stage=on_stage)
+    except Exception as exc:
+        logger.exception("generation failed")
+        await status.edit_text(_friendly_error(exc))
+        return
+    with contextlib.suppress(Exception):
+        await status.delete()
+    await _present_for_publish(
+        msg,
+        state,
+        stickers,
+        mode="extend",
+        character_id=character.id,
+        title=pack.title,
+        pack_id=pack.id,
+    )
 
 
 def build_router() -> Router:
@@ -376,8 +457,8 @@ def build_router() -> Router:
     router.callback_query.register(on_subject, F.data.startswith("subject:"))
     router.callback_query.register(on_age, F.data.startswith("age:"))
     router.callback_query.register(on_style, F.data.startswith("style:"))
-    router.callback_query.register(on_confirm, F.data == "canon:ok")
-    router.callback_query.register(on_style, F.data == "canon:retake")
+    router.callback_query.register(on_publish_yes, F.data == "pub:yes")
+    router.callback_query.register(on_publish_no, F.data == "pub:no")
     router.callback_query.register(on_pick_char, F.data.startswith("char:"))
     router.callback_query.register(on_pick_pack, F.data.startswith("extend:"))
     return router
