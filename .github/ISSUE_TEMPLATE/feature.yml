@@ -1,0 +1,37 @@
+name: Feature / Task
+description: A self-contained unit of work an agent or human can pick up.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this matters; relevant background and links.
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: Task
+      description: What to do, concretely.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: In scope / explicitly out of scope.
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of Done
+      value: |
+        - [ ] Implemented and tested
+        - [ ] `make check` green
+        - [ ] Docs / `.env.example` updated if needed
+    validations:
+      required: true
+  - type: textarea
+    id: refs
+    attributes:
+      label: References

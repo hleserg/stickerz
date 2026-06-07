@@ -1,0 +1,21 @@
+site_name: projectname
+site_description: TODO project description
+docs_dir: docs
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview: architecture/SYSTEM.md
+  - Development:
+      - Standard: development/DEVELOPMENT_STANDARD.md
+      - PLAYBOOK markers: development/PLAYBOOK_MARKERS.md
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid

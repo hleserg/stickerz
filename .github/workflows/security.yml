@@ -1,0 +1,27 @@
+name: Security
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "uv.lock"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - name: Dependency audit (pip-audit, OSV fallback)
+        run: uv run pip-audit || uv run pip-audit --vulnerability-service osv
+      - name: Static security (bandit)
+        run: uv run bandit -c pyproject.toml -r src/ -q

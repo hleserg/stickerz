@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest:*)",
+      "Bash(uv run ruff:*)",
+      "Bash(uv run pyright:*)",
+      "Bash(uv run bandit:*)",
+      "Bash(uv run pip-audit:*)",
+      "Bash(uv run python:*)",
+      "Bash(uv run pre-commit:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv lock:*)",
+      "Bash(uv pip list:*)",
+      "Bash(make:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git fetch:*)",
+      "Bash(git stash:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git checkout -b:*)",
+      "Bash(git switch:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh pr diff:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh issue list:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "statusMessage": "ruff format (touched Python)...",
+            "command": "input=$(cat); printf '%s' \"$input\" | grep -qE '\"file_path\"[^,}]*\\.py' || exit 0; uv run ruff format . >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "timeout": 600,
+            "statusMessage": "PR quality gate (make check)...",
+            "command": "input=$(cat); printf '%s' \"$input\" | grep -q 'gh pr create' || exit 0; gate(){ if ! out=$(eval \"$1\" 2>&1); then { echo \"PR blocked: $2 failed. Fix it, then retry gh pr create.\"; echo \"$out\"; } >&2; exit 2; fi; }; gate 'uv run ruff check .' 'ruff lint'; gate 'uv run ruff format --check .' 'ruff format-check'; gate 'uv run pyright' 'pyright'; gate 'uv run bandit -c pyproject.toml -r src/ -q' 'bandit'; gate 'uv run pip-audit || uv run pip-audit --vulnerability-service osv' 'pip-audit'; gate 'uv run pytest --cov --cov-fail-under=90' 'pytest (coverage>=90%)'"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"Skill-authoring policy (this project): when you finish a task and notice a repeatable, generalizable workflow that is likely to recur here and passes the substitution test (still meaningful after removing project-specific nouns), proactively create a project skill at .claude/skills/<kebab-name>/SKILL.md (frontmatter: name + description, plus a clear when-to-use), then tell the user what you created and why. Do this only when the benefit is real; never for one-off or trivial work. Prefer extending an existing skill over creating a near-duplicate. Complements the PLAYBOOK-marker convention in AGENTS.md.\"}}'"
+          },
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "[ -d .venv ] && [ ! -f .git/hooks/pre-commit ] && uv run pre-commit install >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ]
+  }
+}

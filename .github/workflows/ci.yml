@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    env:
+      # Pin every uv command (sync AND run) to the matrix interpreter. Without
+      # this, the committed .python-version (3.12) overrides the matrix on
+      # `uv run`, rebuilding the venv without dev extras and breaking the 3.13 leg.
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync --all-extras --python ${{ matrix.python-version }}
+      - name: Lint (ruff)
+        run: uv run ruff check .
+      - name: Format check (ruff)
+        run: uv run ruff format --check .
+      - name: Type check (pyright)
+        run: uv run pyright
+      - name: Security (bandit)
+        run: uv run bandit -c pyproject.toml -r src/ -q
+      - name: PLAYBOOK markers valid
+        run: uv run python scripts/extract_playbook.py --check
+      - name: Tests (pytest + coverage)
+        run: uv run pytest --cov --cov-fail-under=90
