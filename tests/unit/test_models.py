@@ -76,3 +76,28 @@ def test_build_gemini_and_gpt_with_keys() -> None:
     assert build_model.__name__ == "build_model"  # importable
     assert GeminiImageModel(api_key="k").name == "gemini"
     assert GptImageModel(api_key="k").name == "gpt"
+
+
+def test_gemini_parse_score() -> None:
+    from sticker_service.services.models.gemini import parse_score
+
+    assert parse_score("0.82") == 0.82
+    assert parse_score("совпадение: 0.7 примерно") == 0.7
+    assert parse_score("1") == 1.0
+    assert parse_score("нет числа") == 0.0
+    assert parse_score("2.5") == 1.0  # clamped
+
+
+def test_gemini_parse_emoji() -> None:
+    from sticker_service.services.models.gemini import parse_emoji
+
+    assert parse_emoji("🔥") == "🔥"
+    assert parse_emoji("вот: 😄 подходит") == "😄"
+    assert parse_emoji("no emoji here") is None
+
+
+def test_gemini_mime_sniff() -> None:
+    from sticker_service.services.models.gemini import _mime
+
+    assert _mime(b"\xff\xd8\xff\xe0rest") == "image/jpeg"
+    assert _mime(b"\x89PNG\r\n") == "image/png"
