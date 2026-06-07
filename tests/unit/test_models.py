@@ -101,3 +101,21 @@ def test_gemini_mime_sniff() -> None:
 
     assert _mime(b"\xff\xd8\xff\xe0rest") == "image/jpeg"
     assert _mime(b"\x89PNG\r\n") == "image/png"
+
+
+def test_gemini_is_retryable() -> None:
+    from sticker_service.services.models.gemini import _is_retryable
+
+    assert _is_retryable(RuntimeError("503 UNAVAILABLE high demand"))
+    assert _is_retryable(RuntimeError("429 RESOURCE_EXHAUSTED"))
+    assert not _is_retryable(RuntimeError("400 invalid argument"))
+
+
+def test_gemini_image_model_fallback_sequence() -> None:
+    from sticker_service.services.models.gemini import IMAGE_MODEL, image_model_for_attempt
+
+    assert image_model_for_attempt(0) == IMAGE_MODEL
+    assert image_model_for_attempt(1) == IMAGE_MODEL
+    assert image_model_for_attempt(2) == "gemini-3.1-flash-image"
+    assert image_model_for_attempt(3) == "gemini-2.5-flash-image"
+    assert image_model_for_attempt(99) == "gemini-2.5-flash-image"  # clamps to last

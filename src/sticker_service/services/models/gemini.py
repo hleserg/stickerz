@@ -8,6 +8,7 @@ their parsing helpers are pure and unit-tested.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Sequence
@@ -17,10 +18,15 @@ from sticker_service.services.models.base import ImageModel, ModelError, ModelRe
 
 logger = logging.getLogger(__name__)
 
-#: Generation model (image-to-image with a photo reference, §8).
+#: Generation model (image-to-image with a photo reference, §8). Primary holds
+#: the face best; fallbacks are more available when the primary is overloaded.
 IMAGE_MODEL = "gemini-3-pro-image"
+_IMAGE_FALLBACKS = ("gemini-3.1-flash-image", "gemini-2.5-flash-image")
 #: Vision/text model for the geometry gate and emoji picking (cheap + fast).
 VISION_MODEL = "gemini-2.5-flash"
+
+_MAX_GEN_ATTEMPTS = 6
+_RETRYABLE = ("503", "unavailable", "overload", "high demand", "resource_exhausted", "429")
 
 _REFUSAL_REASONS = ("SAFETY", "PROHIBITED", "BLOCK", "RECITATION")
 _FLOAT_RE = re.compile(r"\d+(?:\.\d+)?|\.\d+")
@@ -30,6 +36,19 @@ _EMOJI_RE = re.compile("[\U0001f300-\U0001faff\U00002600-\U000027bf\U0001f1e6-\U
 
 def _mime(data: bytes) -> str:
     return "image/jpeg" if data[:3] == b"\xff\xd8\xff" else "image/png"
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """True for transient API errors worth retrying (overload / rate limit)."""
+    s = str(exc).lower()
+    return any(token in s for token in _RETRYABLE)
+
+
+def image_model_for_attempt(attempt: int) -> str:
+    """Pick the image model for a 0-based attempt: primary first, then fallbacks."""
+    if attempt < 2:
+        return IMAGE_MODEL
+    return _IMAGE_FALLBACKS[min(attempt - 2, len(_IMAGE_FALLBACKS) - 1)]
 
 
 def parse_score(text: str) -> float:
@@ -75,15 +94,37 @@ class GeminiImageModel(ImageModel):
             types.Part.from_bytes(data=ref, mime_type=_mime(ref)) for ref in refs
         ]
         contents.append(prompt)
-        logger.info("gemini.generate model=%s refs=%d", IMAGE_MODEL, len(refs))
-        response = await client.aio.models.generate_content(
-            model=IMAGE_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
-        )
+        config = types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"])
+
+        last: Exception | None = None
+        for attempt in range(_MAX_GEN_ATTEMPTS):
+            model = image_model_for_attempt(attempt)
+            logger.info(
+                "gemini.generate model=%s refs=%d attempt=%d", model, len(refs), attempt + 1
+            )
+            try:
+                response = await client.aio.models.generate_content(
+                    model=model, contents=contents, config=config
+                )
+                return self._extract_image(response)
+            except ModelRefusalError:
+                raise
+            except Exception as exc:  # transient overload -> backoff + fallback model
+                last = exc
+                if _is_retryable(exc) and attempt < _MAX_GEN_ATTEMPTS - 1:
+                    logger.warning("gemini %s overloaded (%s); retrying", model, str(exc)[:80])
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                raise
+        raise ModelError(f"Gemini image generation failed after retries: {last}")
+
+    @staticmethod
+    def _extract_image(response: Any) -> bytes:  # pragma: no cover - needs live resp
         candidate = response.candidates[0] if response.candidates else None
-        if candidate is None or self._is_refusal(candidate):
-            raise ModelRefusalError(f"Gemini refused generation: {self._finish(candidate)}")
+        if candidate is None or GeminiImageModel._is_refusal(candidate):
+            raise ModelRefusalError(
+                f"Gemini refused generation: {GeminiImageModel._finish(candidate)}"
+            )
         content = candidate.content
         for part in (content.parts if content else None) or []:
             if part.inline_data and part.inline_data.data:
