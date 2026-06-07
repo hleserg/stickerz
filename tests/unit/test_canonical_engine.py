@@ -109,6 +109,17 @@ async def test_gate_none_skips_judge() -> None:
     assert canonical  # gate=none lets it through despite score 0.0
 
 
+async def test_on_step_callback_reports_progress() -> None:
+    model = MockImageModel()
+    seen: list[tuple[int, int]] = []
+
+    async def cb(done: int, total: int) -> None:
+        seen.append((done, total))
+
+    await CanonicalEngine(model).run(_watercolor_like(), b"P", subject_type="adult", on_step=cb)
+    assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
 async def test_step_ref_collection() -> None:
     model = MockImageModel()
     style = _style(

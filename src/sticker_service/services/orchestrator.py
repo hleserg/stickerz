@@ -11,6 +11,7 @@ that person (§3.2 / §B.4), so packs stay stylistically consistent.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,10 @@ from sticker_service.services.stickers import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Awaited with a short human stage label ("sheet", "slice", "emoji", "publish").
+StageCallback = Callable[[str], Awaitable[None]]
+StepCallback = Callable[[int, int], Awaitable[None]]
 
 
 class OrchestratorError(RuntimeError):
@@ -71,10 +76,13 @@ class Orchestrator:
         style_id: str,
         subject_type: SubjectType,
         child_age: int | None,
+        on_step: StepCallback | None = None,
     ) -> bytes:
         """Run the canonical pipeline for a style; returns canonical bytes."""
         style = self._require_style(style_id)
-        return await self._engine.run(style, photo, subject_type=subject_type, child_age=child_age)
+        return await self._engine.run(
+            style, photo, subject_type=subject_type, child_age=child_age, on_step=on_step
+        )
 
     async def save_character(
         self,
@@ -104,10 +112,13 @@ class Orchestrator:
         character: Character,
         title: str | None = None,
         personal: list[str] | None = None,
+        on_stage: StageCallback | None = None,
     ) -> PackResult:
         """New pack with this character: generate, slice, emoji, publish, persist."""
         title = title or character.name
-        stickers, emojis = await self._generate_stickers(character, personal)
+        stickers, emojis = await self._generate_stickers(character, personal, on_stage)
+        await self._stage(on_stage, "publish")
+        logger.info("publish: creating set owner=%s title=%s", owner_id, title)
         set_name = await self._publisher.create_pack(
             user_id=owner_id, title=title, stickers=list(zip(stickers, emojis, strict=True))
         )
@@ -115,6 +126,7 @@ class Orchestrator:
             character_id=character.id, owner_id=owner_id, set_name=set_name, title=title
         )
         await self._persist_stickers(pack, stickers, emojis, start=0)
+        logger.info("publish: done set=%s stickers=%d", set_name, len(stickers))
         return PackResult(set_name, self._publisher.link(set_name), len(stickers))
 
     async def extend_pack(
@@ -123,12 +135,14 @@ class Orchestrator:
         owner_id: int,
         pack: Pack,
         personal: list[str] | None = None,
+        on_stage: StageCallback | None = None,
     ) -> PackResult:
         """Add stickers of the pack's existing character to the same set (§3.2)."""
         character = await self._db.get_character(pack.character_id)
         if character is None:  # pragma: no cover - referential integrity
             raise OrchestratorError(f"pack {pack.id} references missing character")
-        stickers, emojis = await self._generate_stickers(character, personal)
+        stickers, emojis = await self._generate_stickers(character, personal, on_stage)
+        await self._stage(on_stage, "publish")
         current = await self._db.count_stickers(pack.id)
         await self._publisher.add_to_pack(
             user_id=owner_id,
@@ -142,11 +156,15 @@ class Orchestrator:
     # --- internals -----------------------------------------------------------
 
     async def _generate_stickers(
-        self, character: Character, personal: list[str] | None
+        self,
+        character: Character,
+        personal: list[str] | None,
+        on_stage: StageCallback | None = None,
     ) -> tuple[list[bytes], list[str]]:
         style = self._require_style(character.style_id)
         canonical = Path(character.canonical_path).read_bytes()
         captions = build_caption_set(personal=personal)
+        await self._stage(on_stage, "sheet")
         sheet = await generate_sheet(
             self._model,
             canonical,
@@ -155,11 +173,20 @@ class Orchestrator:
             subject_type=character.subject_type,
             child_age=character.child_age,
         )
+        await self._stage(on_stage, "slice")
         stickers = process_sheet(sheet, grid=grid_for(len(captions)))
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
+        logger.info("slice: produced %d stickers", len(stickers))
+        await self._stage(on_stage, "emoji")
         emojis = await assign_emojis(self._model, stickers)
         return stickers, emojis
+
+    @staticmethod
+    async def _stage(on_stage: StageCallback | None, label: str) -> None:
+        logger.info("stage: %s", label)
+        if on_stage is not None:
+            await on_stage(label)
 
     async def _persist_stickers(
         self, pack: Pack, stickers: list[bytes], emojis: list[str], *, start: int

@@ -66,10 +66,13 @@ async def generate_sheet(
     age_clause = build_age_clause(subject_type, child_age)
     base_prompt = build_sheet_prompt(style, captions, age_clause)
 
+    logger.info("sheet: generating %d stickers in one call", len(captions))
     for attempt in range(max_refusal_retries):
         reformulation = _REFORMULATIONS[min(attempt, len(_REFORMULATIONS) - 1)]
         try:
-            return await model.generate(base_prompt + reformulation, refs=[canonical])
+            sheet = await model.generate(base_prompt + reformulation, refs=[canonical])
+            logger.info("sheet: generated (%d bytes)", len(sheet))
+            return sheet
         except ModelRefusalError:
             logger.warning(
                 "sheet generation refused (attempt %d/%d); reformulating",

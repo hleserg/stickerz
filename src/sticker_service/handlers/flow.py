@@ -12,14 +12,17 @@ Invariants enforced here and covered by tests:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sticker_service.db import Database
@@ -28,6 +31,44 @@ from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
+
+_STAGE_TEXT = {
+    "sheet": "✨ Рисую лист стикеров…",
+    "slice": "✂️ Нарезаю на отдельные стикеры…",
+    "emoji": "🎭 Подбираю эмодзи…",
+    "publish": "📦 Публикую пак в Telegram…",
+}
+
+
+def _friendly_error(exc: Exception) -> str:
+    """Turn a backend exception into a short user-facing message."""
+    s = str(exc).lower()
+    if "503" in s or "unavailable" in s or "overload" in s or "high demand" in s:
+        return "⚠️ Модель сейчас перегружена (503). Попробуй ещё раз через минуту."
+    if "refus" in s or "safety" in s or "prohibited" in s:
+        return "⚠️ Модель отклонила генерацию (фильтр). Попробуй другое фото или возраст."
+    if any(w in s for w in ("proxy", "connect", "timeout", "resolve", "ssl", "network")):
+        return "⚠️ Нет доступа к модели (сеть/прокси). Проверь APP_MODELS_PROXY_URL и логи."
+    return f"⚠️ Не получилось: {exc}"
+
+
+@contextlib.asynccontextmanager
+async def _typing(message: Message) -> AsyncIterator[None]:
+    """Keep an 'uploading photo…' chat action alive during a long task."""
+
+    async def beat() -> None:
+        while True:
+            with contextlib.suppress(Exception):
+                await message.bot.send_chat_action(message.chat.id, "upload_photo")  # type: ignore[union-attr]
+            await asyncio.sleep(4)
+
+    task = asyncio.create_task(beat())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 class NewPack(StatesGroup):
@@ -160,46 +201,86 @@ async def on_age(callback: CallbackQuery, state: FSMContext, loader: StyleLoader
 async def on_style(  # pragma: no cover - runs the model pipeline
     callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator
 ) -> None:
-    """Run the canonical pipeline and show it for confirmation (§4)."""
+    """Run the canonical pipeline (with progress) and show it for confirmation (§4)."""
     tag_component("handlers.flow")
     style_id = (callback.data or "").split(":", 1)[-1]
     data = await state.get_data()
     await state.update_data(style_id=style_id)
-    if isinstance(callback.message, Message):
-        await callback.message.answer("Генерирую персонажа, это займёт минуту…")
-    canonical = await orchestrator.build_canonical(
-        photo=data["photo"],
-        style_id=style_id,
-        subject_type=data["subject"],
-        child_age=data.get("child_age"),
-    )
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+
+    status = await msg.answer("🎨 Рисую персонажа… (шаг 1)")
+
+    async def on_step(done: int, total: int) -> None:
+        with contextlib.suppress(Exception):
+            await status.edit_text(f"🎨 Рисую персонажа… шаг {done}/{total}")
+
+    try:
+        async with _typing(msg):
+            canonical = await orchestrator.build_canonical(
+                photo=data["photo"],
+                style_id=style_id,
+                subject_type=data["subject"],
+                child_age=data.get("child_age"),
+                on_step=on_step,
+            )
+    except Exception as exc:
+        logger.exception("canonical generation failed")
+        await status.edit_text(_friendly_error(exc))
+        await state.clear()
+        return
+
     await state.update_data(canonical=canonical)
     await state.set_state(NewPack.confirm)
-    if isinstance(callback.message, Message):
-        await callback.message.answer("Похож? Генерируем стикеры?", reply_markup=confirm_kb())
-    await callback.answer()
+    with contextlib.suppress(Exception):
+        await status.delete()
+    await msg.answer_photo(
+        BufferedInputFile(canonical, "canonical.png"),
+        caption="Похож? Генерируем стикеры?",
+        reply_markup=confirm_kb(),
+    )
 
 
 async def on_confirm(  # pragma: no cover - publishes via Bot API
     callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator
 ) -> None:
-    """Save the character and build+publish the pack (§3.2)."""
+    """Save the character and build+publish the pack, with progress (§3.2)."""
     tag_component("handlers.flow")
     data = await state.get_data()
     user_id = callback.from_user.id if callback.from_user else 0
-    character = await orchestrator.save_character(
-        owner_id=user_id,
-        name=data["name"],
-        style_id=data["style_id"],
-        subject_type=data["subject"],
-        child_age=data.get("child_age"),
-        canonical=data["canonical"],
-    )
-    result = await orchestrator.create_pack(owner_id=user_id, character=character)
-    await state.clear()
-    if isinstance(callback.message, Message):
-        await callback.message.answer(f"Готово! Пак: {result.link}")
     await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+
+    status = await msg.answer("✨ Готовлю стикеры…")
+
+    async def on_stage(label: str) -> None:
+        with contextlib.suppress(Exception):
+            await status.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
+
+    try:
+        async with _typing(msg):
+            character = await orchestrator.save_character(
+                owner_id=user_id,
+                name=data["name"],
+                style_id=data["style_id"],
+                subject_type=data["subject"],
+                child_age=data.get("child_age"),
+                canonical=data["canonical"],
+            )
+            result = await orchestrator.create_pack(
+                owner_id=user_id, character=character, on_stage=on_stage
+            )
+    except Exception as exc:
+        logger.exception("pack build/publish failed")
+        await status.edit_text(_friendly_error(exc))
+        return
+
+    await state.clear()
+    await status.edit_text(f"✅ Готово! Пак: {result.link}")
 
 
 async def cmd_mychars(message: Message, db: Database) -> None:

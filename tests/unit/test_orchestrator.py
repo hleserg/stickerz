@@ -143,6 +143,27 @@ async def test_create_pack_full_flow(db: Database, loader: StyleLoader, tmp_path
     assert await db.count_stickers(packs[0].id) == EXPECTED
 
 
+async def test_create_pack_reports_stages(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    char = await orch.save_character(
+        owner_id=1,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(3),
+    )
+    stages: list[str] = []
+
+    async def on_stage(label: str) -> None:
+        stages.append(label)
+
+    await orch.create_pack(owner_id=1, character=char, on_stage=on_stage)
+    assert stages == ["sheet", "slice", "emoji", "publish"]
+
+
 async def test_one_character_many_packs(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
     orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
     char = await orch.save_character(

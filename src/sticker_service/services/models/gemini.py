@@ -8,11 +8,14 @@ their parsing helpers are pure and unit-tested.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Sequence
 from typing import Any
 
 from sticker_service.services.models.base import ImageModel, ModelError, ModelRefusalError
+
+logger = logging.getLogger(__name__)
 
 #: Generation model (image-to-image with a photo reference, §8).
 IMAGE_MODEL = "gemini-3-pro-image"
@@ -72,6 +75,7 @@ class GeminiImageModel(ImageModel):
             types.Part.from_bytes(data=ref, mime_type=_mime(ref)) for ref in refs
         ]
         contents.append(prompt)
+        logger.info("gemini.generate model=%s refs=%d", IMAGE_MODEL, len(refs))
         response = await client.aio.models.generate_content(
             model=IMAGE_MODEL,
             contents=contents,
@@ -83,7 +87,9 @@ class GeminiImageModel(ImageModel):
         content = candidate.content
         for part in (content.parts if content else None) or []:
             if part.inline_data and part.inline_data.data:
-                return part.inline_data.data
+                data = part.inline_data.data
+                logger.info("gemini.generate ok (%d bytes)", len(data))
+                return data
         raise ModelError("Gemini returned no image part")
 
     async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:  # pragma: no cover

@@ -12,6 +12,7 @@ On a gate slip, only *that* step is rolled back and re-shot with a smaller delta
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
 from sticker_service.db.models import SubjectType
 from sticker_service.services.canonical.gate import run_gate
@@ -19,6 +20,9 @@ from sticker_service.services.canonical.schema import PipelineStep, Style
 from sticker_service.services.models.base import ImageModel
 
 logger = logging.getLogger(__name__)
+
+# Called after each completed step with (done, total) for progress UIs.
+StepCallback = Callable[[int, int], Awaitable[None]]
 
 _SMALLER_DELTA_NUDGE = (
     " Make a SMALLER change from the reference this time: keep the face geometry "
@@ -71,9 +75,22 @@ class CanonicalEngine:
         *,
         subject_type: SubjectType,
         child_age: int | None = None,
+        on_step: StepCallback | None = None,
     ) -> bytes:
-        """Execute the pipeline and return the final canonical image bytes."""
+        """Execute the pipeline and return the final canonical image bytes.
+
+        ``on_step(done, total)`` is awaited after each completed step, for
+        progress reporting.
+        """
         age_clause = build_age_clause(subject_type, child_age)
+        total = len(style.pipeline)
+        logger.info(
+            "canonical: style=%s steps=%d subject=%s age=%s",
+            style.style_id,
+            total,
+            subject_type,
+            child_age,
+        )
         by_step: dict[int, bytes] = {}
         prev: bytes | None = None
 
@@ -86,9 +103,13 @@ class CanonicalEngine:
             image = await self._run_step(style.style_id, step, prompt, refs, gate_prev)
             by_step[step.step] = image
             prev = image
+            logger.info("canonical step %d/%d done (%d bytes)", step.step, total, len(image))
+            if on_step is not None:
+                await on_step(step.step, total)
 
         if prev is None:  # pragma: no cover - schema guarantees a non-empty pipeline
             raise CanonicalError("empty pipeline produced no canonical")
+        logger.info("canonical: complete for style=%s", style.style_id)
         return prev
 
     async def _run_step(
@@ -102,9 +123,23 @@ class CanonicalEngine:
         attempts = self._max_step_retries + 1
         for attempt in range(attempts):
             attempt_prompt = prompt if attempt == 0 else prompt + _SMALLER_DELTA_NUDGE
+            logger.info(
+                "canonical step %d: generating (attempt %d/%d, refs=%s)",
+                step.step,
+                attempt + 1,
+                attempts,
+                step.refs,
+            )
             image = await self._model.generate(attempt_prompt, refs)
             result = await run_gate(
                 step.gate, self._model, gate_prev, image, threshold=self._threshold
+            )
+            logger.info(
+                "canonical step %d: gate=%s score=%.2f ok=%s",
+                step.step,
+                step.gate,
+                result.score,
+                result.ok,
             )
             if result.ok:
                 return image
