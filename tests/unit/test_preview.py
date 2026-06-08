@@ -25,9 +25,29 @@ def test_compose_preview_single_sheet() -> None:
     assert isinstance(corner, tuple) and corner[3] == 0
 
 
-def test_compose_preview_splits_into_sheets_of_15() -> None:
+def test_compose_preview_splits_into_two_sheets() -> None:
     sheets = compose_preview([_png() for _ in range(16)])
-    assert len(sheets) == 2  # 15 + 1
+    assert len(sheets) == 2
+
+
+def test_balanced_sizes_splits_half_and_half() -> None:
+    from sticker_service.services.postprocess.preview import _balanced_sizes
+
+    assert _balanced_sizes(15, 12) == [8, 7]  # odd → ±1
+    assert _balanced_sizes(14, 12) == [7, 7]
+    assert _balanced_sizes(13, 12) == [7, 6]  # no lonely leftover sheet
+    assert _balanced_sizes(12, 12) == [12]  # fits one sheet
+    assert _balanced_sizes(6, 12) == [6]
+    assert _balanced_sizes(25, 12) == [9, 8, 8]
+
+
+def test_compose_preview_sheets_share_dimensions() -> None:
+    # 15 stickers → 8 + 7 across two sheets of identical size, so a sticker looks
+    # the same on both previews (no oversized leftover sheet).
+    sheets = compose_preview([_png() for _ in range(15)])
+    assert len(sheets) == 2
+    sizes = [Image.open(BytesIO(s)).size for s in sheets]
+    assert sizes[0] == sizes[1]
 
 
 def test_compose_preview_empty() -> None:
