@@ -26,6 +26,22 @@ WELCOME = (
     "стикеров вы автоматически соглашаетесь с ними.</i>"
 )
 
+HELP = (
+    "🆘 <b>Что я умею</b>\n\n"
+    "/new — новый стикерпак из фото\n"
+    "/mychars — мои персонажи: новый пак про того же человека\n"
+    "/mypacks — мои паки: открыть / опубликовать / скачать\n"
+    "/addto — добавить стикеры в существующий пак\n"
+    "/cancel — отменить текущее действие\n"
+    "/rules — правила · /report — сообщить об ошибке\n\n"
+    "<b>Как это работает:</b> пришли фото → выбери стиль → отметь подписи → "
+    "посмотри превью → опубликуй пак в Telegram или скачай.\n\n"
+    "💸 <b>В альфе у тебя бюджет в «паках»</b> (старт — 3):\n"
+    "• новый пак — 1 пак\n"
+    "• добавить стикеры к готовому персонажу — 0.5 пака\n"
+    "За подтверждённый баг из /report начисляем бонусные паки."
+)
+
 RULES = (
     "📜 <b>Правила</b>\n\n"
     "Запрещено и будет отклонено автоматически:\n"
@@ -80,9 +96,16 @@ async def cmd_rules(message: Message) -> None:
     await message.answer(RULES, parse_mode="HTML")
 
 
+async def cmd_help(message: Message) -> None:
+    """Show what the bot can do and the alpha pricing."""
+    tag_component("handlers.start")
+    await message.answer(HELP, parse_mode="HTML")
+
+
 def build_router() -> Router:
     """Build a fresh start router (factory: safe to call per dispatcher)."""
     router = Router(name="start")
     router.message.register(cmd_start, CommandStart())
     router.message.register(cmd_rules, Command("rules"))
+    router.message.register(cmd_help, Command("help"))
     return router

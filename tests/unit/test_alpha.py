@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 
 import pytest_asyncio
 
-from sticker_service.db import DEFAULT_GENERATIONS, Database
+from sticker_service.db import DEFAULT_CREDITS, Database
 from sticker_service.services import analytics, budget
 
 
@@ -44,12 +44,13 @@ async def test_reapply_resets_to_pending(db: Database) -> None:
 # --- quotas -----------------------------------------------------------------
 
 
-async def test_generations_default_and_ops(db: Database) -> None:
-    assert await db.generations_left(5) == DEFAULT_GENERATIONS
-    assert await db.consume_generation(5) == DEFAULT_GENERATIONS - 1
-    await db.set_generations(5, 0)
-    assert await db.consume_generation(5) == 0  # never negative
-    assert await db.add_generations(5, 2) == 2
+async def test_credits_default_and_ops(db: Database) -> None:
+    assert await db.credits_left(5) == DEFAULT_CREDITS  # 6 half-packs = 3 packs
+    assert await db.consume_credits(5, 2) == DEFAULT_CREDITS - 2  # spend 1 pack
+    assert await db.consume_credits(5, 1) == DEFAULT_CREDITS - 3  # spend 0.5 pack
+    await db.set_credits(5, 0)
+    assert await db.consume_credits(5, 2) == 0  # never negative
+    assert await db.add_credits(5, 2) == 2
 
 
 # --- budget -----------------------------------------------------------------

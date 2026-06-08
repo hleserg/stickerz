@@ -29,7 +29,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.observability import tag_component
-from sticker_service.services import analytics, budget, modes, photo_check
+from sticker_service.services import analytics, budget, modes, photo_check, pricing
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.models import errors as model_errors
 from sticker_service.services.moderation import caption_rejection_reason
@@ -189,8 +189,8 @@ async def _alpha_gate(db: Database, user_id: int) -> str | None:  # pragma: no c
     return None
 
 
-async def _generation_gate(db: Database, user_id: int) -> str | None:  # pragma: no cover
-    """Budget + per-user generation limits for approved alpha participants."""
+async def _generation_gate(db: Database, user_id: int, cost: int) -> str | None:  # pragma: no cover
+    """Budget + per-user credit check for an action costing ``cost`` credits."""
     if _is_admin(user_id) or await modes.get_mode(db) != modes.ALPHA:
         return None
     if not await budget.enough_for(db, 2):
@@ -198,9 +198,11 @@ async def _generation_gate(db: Database, user_id: int) -> str | None:  # pragma:
             "⛔ Тестирование временно приостановлено из-за исчерпания бюджета. "
             "Скоро либо пополним бюджет, либо перейдём в бета-стадию — ждите уведомлений."
         )
-    if await db.generations_left(user_id) <= 0:
+    left = await db.credits_left(user_id)
+    if left < cost:
         return (
-            "К сожалению, генерации для тестирования закончились. "
+            f"Недостаточно паков: действие стоит {pricing.format_packs(cost)}, "
+            f"а осталось {pricing.format_packs(left)}. "
             "Огромное спасибо за участие в альфе проекта! 🙏"
         )
     return None
@@ -501,9 +503,19 @@ async def on_rev_create(  # pragma: no cover
     if not captions:
         await msg.answer("Выберите хотя бы один стикер.")
         return
-    if (hint := await _generation_gate(db, user_id)) is not None:
+    mode = data.get("mode", "fresh")
+    cost = pricing.cost_for_mode(mode)
+    if (hint := await _generation_gate(db, user_id, cost)) is not None:
         await msg.answer(hint)
         return
+
+    # Inform of the price before doing the (paid) work, for alpha participants.
+    if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
+        have = await db.credits_left(user_id)
+        await msg.answer(
+            f"💸 Это действие спишет {pricing.format_packs(cost)} пак "
+            f"(сейчас у тебя {pricing.format_packs(have)})."
+        )
 
     std_names = [STANDARD_BLOCK[i] for i in sorted(set(data.get("std_sel", [])))]
     await analytics.log(
@@ -527,7 +539,6 @@ async def on_rev_create(  # pragma: no cover
         with contextlib.suppress(Exception):
             await status.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
 
-    mode = data.get("mode", "fresh")
     try:
         async with _typing(msg):
             bundle = await orchestrator.build_for_review(
@@ -568,9 +579,12 @@ async def on_rev_create(  # pragma: no cover
         msg, state, bundle.stickers, mode=mode, title=bundle.title, pack_id=bundle.pack_id
     )
 
-    # Alpha: one generation consumed per delivered review; alert admins on low budget.
+    # Alpha: charge the action's credits and tell the user the remaining balance.
     if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
-        await db.consume_generation(user_id)
+        left = await db.consume_credits(user_id, cost)
+        await msg.answer(
+            f"Списано {pricing.format_packs(cost)} пак. Осталось: {pricing.format_packs(left)}."
+        )
     for alert in await budget.pending_alerts(db):
         for admin_id in get_settings().admin_id_list:
             with contextlib.suppress(Exception):
@@ -747,7 +761,9 @@ async def cmd_mypacks(message: Message, db: Database) -> None:
         kb.button(text=f"{mark} {pack.title}", callback_data=f"pk:{pack.id}")
     kb.adjust(1)
     await message.answer(
-        "Ваши паки:\n\n🐞 Если что-то не так — напишите /report с подробностями.",
+        "Ваши паки. Выберите пак, чтобы открыть, опубликовать или скачать; "
+        "✅ — опубликованный, 📝 — черновик. Дополнить пак — /addto, новый — /new, "
+        "что умею и цены — /help.\n\n🐞 Если что-то не так — напишите /report.",
         reply_markup=kb.as_markup(),
     )
 

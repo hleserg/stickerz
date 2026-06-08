@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher
 
 from sticker_service.bot import build_bot
 from sticker_service.handlers import build_dispatcher
-from sticker_service.handlers.start import cmd_start
+from sticker_service.handlers.start import cmd_help, cmd_rules, cmd_start
 
 
 def test_build_bot_requires_token() -> None:
@@ -44,3 +44,16 @@ async def test_cmd_start_answers() -> None:
         assert await db.has_events(1)  # start event recorded
     finally:
         await db.close()
+
+
+async def test_cmd_help_lists_capabilities_and_prices() -> None:
+    message = AsyncMock()
+    await cmd_help(message)
+    text = message.answer.await_args.args[0]
+    assert "/new" in text and "пак" in text.lower()  # capabilities + pricing
+
+
+async def test_cmd_rules_answers() -> None:
+    message = AsyncMock()
+    await cmd_rules(message)
+    assert "Правила" in message.answer.await_args.args[0]

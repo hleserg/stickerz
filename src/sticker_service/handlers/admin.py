@@ -17,11 +17,12 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sticker_service.config import get_settings
-from sticker_service.db import DEFAULT_GENERATIONS, Database
+from sticker_service.db import Database
+from sticker_service.db.repository import CREDITS_PER_PACK, DEFAULT_CREDITS
 from sticker_service.observability import tag_component
-from sticker_service.services import analytics, budget, charts, modes
+from sticker_service.services import analytics, budget, charts, modes, pricing
 
-BUG_BONUS = 2  # extra generations for a confirmed bug report
+BUG_BONUS_PACKS = 2  # extra packs for a confirmed bug report
 
 
 class AdminFSM(StatesGroup):
@@ -241,17 +242,17 @@ async def cmd_setbudget(message: Message, command: CommandObject, db: Database) 
 
 
 async def cmd_gen(message: Message, command: CommandObject, db: Database) -> None:
-    """Adjust a user's remaining generations (admin). /gen <user_id> <delta>"""
+    """Adjust a user's remaining packs (admin). /gen <user_id> <±N packs>"""
     tag_component("handlers.admin")
     if message.from_user is None or not _is_admin(message.from_user.id):
         return
     parts = (command.args or "").split()
     if len(parts) != 2 or not parts[0].lstrip("-").isdigit() or not parts[1].lstrip("-").isdigit():
-        await message.answer("Использование: /gen <user_id> <±N>")
+        await message.answer("Использование: /gen <user_id> <±N паков>")
         return
-    user_id, delta = int(parts[0]), int(parts[1])
-    left = await db.add_generations(user_id, delta)
-    await message.answer(f"Генераций у {user_id}: {left}.")
+    user_id, delta_packs = int(parts[0]), int(parts[1])
+    left = await db.add_credits(user_id, delta_packs * CREDITS_PER_PACK)
+    await message.answer(f"Паков у {user_id}: {pricing.format_packs(left)}.")
 
 
 _STATUS_CMD = {"waiting": "pending", "rejected": "rejected", "approved": "approved"}
@@ -313,7 +314,7 @@ async def on_app_view(callback: CallbackQuery, db: Database) -> None:
 
 
 async def on_app_approve(callback: CallbackQuery, db: Database, bot: Bot) -> None:
-    """Approve: whitelist + grant default generations + welcome the user."""
+    """Approve: whitelist + grant default packs + welcome the user."""
     tag_component("handlers.admin")
     if callback.from_user is None or not _is_admin(callback.from_user.id):
         await callback.answer()
@@ -321,14 +322,16 @@ async def on_app_approve(callback: CallbackQuery, db: Database, bot: Bot) -> Non
     user_id = int((callback.data or "appok:0").split(":", 1)[-1])
     await db.set_application_status(user_id, "approved")
     await db.allow(user_id)
-    await db.set_generations(user_id, DEFAULT_GENERATIONS)
+    await db.set_credits(user_id, DEFAULT_CREDITS)
     await callback.answer("Одобрено")
+    packs = pricing.format_packs(DEFAULT_CREDITS)
     with contextlib.suppress(Exception):
         await bot.send_message(
             user_id,
             f"🎉 Рады приветствовать вас в тестировании! Вам доступно "
-            f"{DEFAULT_GENERATIONS} бесплатные генерации. За каждый подтверждённый баг "
-            f"из /report начислим ещё. Поехали: /new",
+            f"{packs} бесплатных паков (новый пак — 1, добавить стикеры — 0.5). "
+            f"За каждый подтверждённый баг из /report начислим ещё. "
+            f"Что умеет бот — /help. Поехали: /new",
         )
     if isinstance(callback.message, Message):
         await callback.message.answer(f"✅ {user_id} одобрен и уведомлён.")
@@ -348,21 +351,22 @@ async def on_app_reject(callback: CallbackQuery, db: Database) -> None:
 
 
 async def on_bug_confirm(callback: CallbackQuery, db: Database, bot: Bot) -> None:
-    """Confirm a report as a real bug → grant bonus generations."""
+    """Confirm a report as a real bug → grant bonus packs."""
     tag_component("handlers.admin")
     if callback.from_user is None or not _is_admin(callback.from_user.id):
         await callback.answer()
         return
     user_id = int((callback.data or "bug:0").split(":", 1)[-1])
-    left = await db.add_generations(user_id, BUG_BONUS)
+    left = await db.add_credits(user_id, BUG_BONUS_PACKS * CREDITS_PER_PACK)
     await callback.answer("Засчитано")
     with contextlib.suppress(Exception):
         await bot.send_message(
-            user_id, f"🐞 Спасибо за найденный баг! Начислили +{BUG_BONUS} генерации."
+            user_id, f"🐞 Спасибо за найденный баг! Начислили +{BUG_BONUS_PACKS} пака."
         )
     if isinstance(callback.message, Message):
+        total = pricing.format_packs(left)
         await callback.message.answer(
-            f"✅ +{BUG_BONUS} генерации пользователю {user_id} (итого {left})."
+            f"✅ +{BUG_BONUS_PACKS} пака пользователю {user_id} (итого {total})."
         )
 
 

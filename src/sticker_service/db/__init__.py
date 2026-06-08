@@ -11,10 +11,10 @@ from sticker_service.db.models import (
     SubjectType,
     WhitelistEntry,
 )
-from sticker_service.db.repository import DEFAULT_GENERATIONS, Database, open_database
+from sticker_service.db.repository import DEFAULT_CREDITS, Database, open_database
 
 __all__ = [
-    "DEFAULT_GENERATIONS",
+    "DEFAULT_CREDITS",
     "Application",
     "Character",
     "Database",
