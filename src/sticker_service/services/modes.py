@@ -1,12 +1,14 @@
 """Bot operating modes, switchable by the first admin.
 
 debug   — only admins can use the bot; everyone else gets a friendly "in
-          development" message; no limits.
-alpha   — not implemented yet.
-beta    — not implemented yet (current closed test behaves like this).
-prod    — normal operation (whitelist + moderation + limits).
+          development" message; no limits. (implemented)
+alpha   — open to all in the middleware; applications + free-generation quotas +
+          USD budget gate pack creation to approved participants. (implemented)
+beta    — not implemented yet (switching is refused).
+prod    — not implemented yet (switching is refused).
 
-The active mode is stored in the DB ``config`` table.
+One variable, four values; only ``debug`` and ``alpha`` are implemented. The
+active mode is stored in the DB ``config`` table.
 """
 
 from __future__ import annotations

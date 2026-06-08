@@ -31,6 +31,7 @@ from sticker_service.db import Database
 from sticker_service.observability import tag_component
 from sticker_service.services import analytics, budget, modes, photo_check
 from sticker_service.services.canonical.loader import StyleLoader
+from sticker_service.services.models import errors as model_errors
 from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import Orchestrator
 from sticker_service.services.postprocess import bundle_zip, compose_preview
@@ -49,20 +50,15 @@ _STAGE_TEXT = {
 
 
 def _friendly_error(exc: Exception) -> str:
-    """Turn a backend exception into a short user-facing message."""
-    s = str(exc).lower()
-    if "credits" in s or "quota" in s or "billing" in s or "prepayment" in s:
-        return (
-            "⚠️ Генерация временно недоступна (исчерпан лимит у провайдера). "
-            "Мы уже разбираемся — попробуй позже."
-        )
-    if "503" in s or "unavailable" in s or "overload" in s or "high demand" in s:
-        return "⚠️ Модель сейчас перегружена (503). Попробуй ещё раз через минуту."
-    if "refus" in s or "safety" in s or "prohibited" in s:
-        return "⚠️ Модель отклонила генерацию (фильтр). Попробуй другое фото или возраст."
-    if any(w in s for w in ("proxy", "connect", "timeout", "resolve", "ssl", "network")):
-        return "⚠️ Нет доступа к модели (сеть/прокси). Проверь APP_MODELS_PROXY_URL и логи."
-    return f"⚠️ Не получилось: {exc}"
+    """Turn a backend exception into a short user-facing message (shared taxonomy)."""
+    return model_errors.user_message(exc)
+
+
+def _progress_bar(done: int, total: int, width: int = 10) -> str:
+    """Render a ``▰▰▱▱▱`` bar for a done/total step count."""
+    total = max(total, 1)
+    filled = round(width * max(0, min(done, total)) / total)
+    return "▰" * filled + "▱" * (width - filled)
 
 
 @contextlib.asynccontextmanager
@@ -276,6 +272,14 @@ async def _strike(
     if until is not None:
         text += " Вы временно заблокированы."
     await msg.answer(text)
+
+
+async def _alert_admins_quota(msg: Message, exc: Exception) -> None:  # pragma: no cover
+    """DM every admin once a generation fails because the model is out of credits."""
+    text = f"🔴 Генерация остановлена: у провайдера закончились кредиты.\n{str(exc)[:200]}"
+    for admin_id in get_settings().admin_id_list:
+        with contextlib.suppress(Exception):
+            await msg.bot.send_message(admin_id, text)  # type: ignore[union-attr]
 
 
 async def on_name(message: Message, state: FSMContext, db: Database) -> None:
@@ -515,7 +519,9 @@ async def on_rev_create(  # pragma: no cover
 
     async def on_step(done: int, total: int) -> None:
         with contextlib.suppress(Exception):
-            await status.edit_text(f"🎨 Рисую персонажа… шаг {done}/{total}")
+            await status.edit_text(
+                f"🎨 Рисую персонажа… {_progress_bar(done, total)} {done}/{total}"
+            )
 
     async def on_stage(label: str) -> None:
         with contextlib.suppress(Exception):
@@ -524,49 +530,28 @@ async def on_rev_create(  # pragma: no cover
     mode = data.get("mode", "fresh")
     try:
         async with _typing(msg):
-            if mode == "extend":
-                pack = await db.get_pack(int(data["pack_id"]))
-                if pack is None:
-                    raise RuntimeError("pack not found")
-                character = await db.get_character(pack.character_id)
-                title, pack_id = pack.title, pack.id
-            elif mode == "reuse":
-                character = await db.get_character(int(data["character_id"]))
-                title, pack_id = (character.name if character else ""), None
-            else:  # fresh — build canonical now
-                canonical = await orchestrator.build_canonical(
-                    photo=data["photo"],
-                    style_id=data["style_id"],
-                    subject_type=data["subject"],
-                    child_age=data.get("child_age"),
-                    on_step=on_step,
-                )
-                character = await orchestrator.save_character(
-                    owner_id=user_id,
-                    name=data["name"],
-                    style_id=data["style_id"],
-                    subject_type=data["subject"],
-                    child_age=data.get("child_age"),
-                    canonical=canonical,
-                )
-                title, pack_id = character.name, None
-            if character is None:
-                raise RuntimeError("character not found")
-            stickers = await orchestrator.build_stickers(
-                character, captions=captions, on_stage=on_stage
+            bundle = await orchestrator.build_for_review(
+                mode=mode,
+                owner_id=user_id,
+                captions=captions,
+                on_step=on_step,
+                on_stage=on_stage,
+                photo=data.get("photo"),
+                style_id=data.get("style_id"),
+                subject_type=data.get("subject"),
+                child_age=data.get("child_age"),
+                name=data.get("name"),
+                character_id=data.get("character_id"),
+                pack_id=data.get("pack_id"),
             )
-            if mode != "extend":
-                # Save as a draft so it survives and can be published/downloaded later.
-                draft = await orchestrator.save_draft(
-                    owner_id=user_id, character=character, title=title, stickers=stickers
-                )
-                pack_id = draft.id
     except Exception as exc:
         logger.exception("generation failed")
         await analytics.log(
             db, user_id, analytics.GENERATION_ERROR, mode=mode, reason=str(exc)[:200]
         )
         await status.edit_text(_friendly_error(exc))
+        if model_errors.is_quota(exc):
+            await _alert_admins_quota(msg, exc)
         return
 
     await analytics.log(
@@ -574,12 +559,14 @@ async def on_rev_create(  # pragma: no cover
         user_id,
         analytics.GENERATION_DONE,
         mode=mode,
-        count=len(stickers),
+        count=len(bundle.stickers),
         seconds=round(time.monotonic() - started, 1),
     )
     with contextlib.suppress(Exception):
         await status.delete()
-    await _present_for_publish(msg, state, stickers, mode=mode, title=title, pack_id=pack_id)
+    await _present_for_publish(
+        msg, state, bundle.stickers, mode=mode, title=bundle.title, pack_id=bundle.pack_id
+    )
 
     # Alpha: one generation consumed per delivered review; alert admins on low budget.
     if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
@@ -682,6 +669,16 @@ async def on_publish_no(callback: CallbackQuery, state: FSMContext) -> None:  # 
     await callback.answer()
     if isinstance(callback.message, Message):
         await callback.message.answer("Отменено. Новый пак: /new")
+
+
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    """Abort whatever the user is in the middle of (works from any FSM state)."""
+    tag_component("handlers.flow")
+    if await state.get_state() is None:
+        await message.answer("Нечего отменять. Новый пак: /new")
+        return
+    await state.clear()
+    await message.answer("Отменено. Начать заново: /new")
 
 
 async def cmd_mychars(message: Message, db: Database) -> None:
@@ -854,6 +851,7 @@ def build_router() -> Router:
     """Build a fresh flow router (factory: safe to call per dispatcher)."""
     router = Router(name="flow")
     router.message.register(cmd_new, Command("new"))
+    router.message.register(cmd_cancel, Command("cancel"))
     router.message.register(cmd_mychars, Command("mychars"))
     router.message.register(cmd_mypacks, Command("mypacks"))
     router.message.register(cmd_addto, Command("addto"))

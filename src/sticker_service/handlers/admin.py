@@ -91,7 +91,9 @@ async def cmd_stats(message: Message, db: Database) -> None:
         ("Скачано", await db.count_events(analytics.DOWNLOADED)),
     ]
     png = charts.render_bar_chart("Воронка Stickerz", items)
-    await message.answer_photo(BufferedInputFile(png, filename="stats.png"))
+    await message.answer_photo(
+        BufferedInputFile(png, filename="stats.png"), caption=await budget.summary_line(db)
+    )
 
 
 async def cmd_bans(message: Message, db: Database) -> None:

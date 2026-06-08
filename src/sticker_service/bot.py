@@ -74,6 +74,7 @@ async def _set_commands(bot: Bot) -> None:
             BotCommand(command="mychars", description="Мои персонажи (новый пак про того же)"),
             BotCommand(command="mypacks", description="Мои паки (открыть/опубликовать/скачать)"),
             BotCommand(command="addto", description="Дополнить существующий пак"),
+            BotCommand(command="cancel", description="Отменить текущее действие"),
             BotCommand(command="rules", description="Правила"),
             BotCommand(command="report", description="Сообщить об ошибке"),
             BotCommand(command="start", description="О боте"),

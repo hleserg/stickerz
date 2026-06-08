@@ -20,7 +20,11 @@ from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.handlers.flow import (
     NewPack,
+    _alpha_gate,
+    _generation_gate,
+    _progress_bar,
     cmd_addto,
+    cmd_cancel,
     cmd_mychars,
     cmd_mypacks,
     cmd_new,
@@ -28,6 +32,7 @@ from sticker_service.handlers.flow import (
     on_name,
     on_subject,
 )
+from sticker_service.services import budget, modes
 from sticker_service.services.canonical import StyleLoader
 
 
@@ -106,6 +111,51 @@ async def test_age_selection_advances_to_style(loader: StyleLoader) -> None:
     await on_age(callback, state, loader)
     assert (await state.get_data())["child_age"] == 6
     assert await state.get_state() == NewPack.style.state
+
+
+def test_progress_bar_renders_proportionally() -> None:
+    assert _progress_bar(0, 3, width=10) == "▱" * 10
+    assert _progress_bar(3, 3, width=10) == "▰" * 10
+    mid = _progress_bar(1, 2, width=10)
+    assert mid.count("▰") == 5 and mid.count("▱") == 5
+    assert _progress_bar(5, 0) == "▰" * 10  # never divides by zero
+
+
+async def test_cancel_clears_active_state() -> None:
+    state = _state()
+    await state.set_state(NewPack.photo)
+    message = AsyncMock()
+    await cmd_cancel(message, state)
+    assert await state.get_state() is None
+    assert "/new" in message.answer.await_args.args[0]
+
+
+async def test_cancel_when_idle_is_noop() -> None:
+    state = _state()
+    message = AsyncMock()
+    await cmd_cancel(message, state)
+    assert "Нечего отменять" in message.answer.await_args.args[0]
+
+
+async def test_alpha_gate_blocks_unapproved_then_allows(db: Database) -> None:
+    await modes.set_mode(db, modes.ALPHA)
+    uid = 99999  # not an admin
+    hint = await _alpha_gate(db, uid)
+    assert hint is not None and "заявку" in hint  # must apply first
+    await db.allow(uid)
+    assert await _alpha_gate(db, uid) is None  # approved → passes
+
+
+async def test_generation_gate_budget_and_quota(db: Database) -> None:
+    await modes.set_mode(db, modes.ALPHA)
+    uid = 99998
+    await budget.set_budget(db, 100)  # plenty
+    assert await _generation_gate(db, uid) is None  # default quota > 0
+    await db.set_generations(uid, 0)
+    assert "закончились" in (await _generation_gate(db, uid) or "")
+    await db.set_generations(uid, 3)
+    await budget.set_budget(db, 0)  # can't cover 2 more
+    assert "приостановлено" in (await _generation_gate(db, uid) or "")
 
 
 async def test_mychars_empty_prompts_new(db: Database) -> None:

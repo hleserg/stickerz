@@ -277,6 +277,78 @@ async def test_draft_lifecycle(db: Database, loader: StyleLoader, tmp_path: Path
     assert refreshed.set_name == result.set_name
 
 
+async def test_build_for_review_fresh_persists_character_and_draft(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    bundle = await orch.build_for_review(
+        mode="fresh",
+        owner_id=11,
+        captions=["Привет", "Пока"],
+        photo=b"PHOTO",
+        style_id="watercolor",
+        subject_type="adult",
+        name="Аня",
+    )
+    assert bundle.mode == "fresh"
+    assert len(bundle.stickers) == 2
+    assert (await db.list_characters(11))[0].name == "Аня"  # character saved for reuse
+    pack = await db.get_pack(bundle.pack_id or 0)
+    assert pack is not None and pack.published is False  # draft saved, not published
+
+
+async def test_build_for_review_reuse_does_not_make_new_character(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    char = await orch.save_character(
+        owner_id=12,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(EXPECTED),
+    )
+    bundle = await orch.build_for_review(
+        mode="reuse", owner_id=12, captions=["Йо"], character_id=char.id
+    )
+    assert bundle.character.id == char.id
+    assert len(await db.list_characters(12)) == 1  # reused, not duplicated (§3.2)
+
+
+async def test_build_for_review_extend_skips_draft(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    char = await orch.save_character(
+        owner_id=13,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(EXPECTED),
+    )
+    await orch.create_pack(owner_id=13, character=char)
+    pack = (await db.list_packs(13))[0]
+    bundle = await orch.build_for_review(
+        mode="extend", owner_id=13, captions=["Эй"], pack_id=pack.id
+    )
+    assert bundle.pack_id == pack.id  # appends to the same pack, no new draft
+    assert len(await db.list_packs(13)) == 1
+
+
+async def test_build_for_review_validates_required_args(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    with pytest.raises(OrchestratorError, match="fresh mode needs"):
+        await orch.build_for_review(mode="fresh", owner_id=1, captions=["x"])
+    with pytest.raises(OrchestratorError, match="reuse mode needs"):
+        await orch.build_for_review(mode="reuse", owner_id=1, captions=["x"])
+    with pytest.raises(OrchestratorError, match="extend mode needs"):
+        await orch.build_for_review(mode="extend", owner_id=1, captions=["x"])
+
+
 async def test_unknown_style_raises(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
     orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
     with pytest.raises(OrchestratorError, match="unknown"):

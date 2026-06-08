@@ -50,6 +50,27 @@ async def enough_for(db: Database, generations: int) -> bool:
     return await remaining_budget(db) >= generations * await cost_per_gen(db)
 
 
+async def forecast_generations(db: Database) -> int:
+    """How many more packs the remaining budget can fund (floored at 0)."""
+    per = await cost_per_gen(db)
+    if per <= 0:
+        return 0
+    return max(0, int(await remaining_budget(db) // per))
+
+
+async def summary_line(db: Database) -> str:
+    """One-line budget status for the admin /stats view."""
+    spent = await total_cost(db)
+    total = await get_budget(db)
+    remaining = await remaining_budget(db)
+    per = await cost_per_gen(db)
+    forecast = await forecast_generations(db)
+    return (
+        f"Бюджет: ${remaining:.2f} из ${total:.0f} (потрачено ${spent:.2f}, "
+        f"${per:.2f}/ген) — хватит ещё на ~{forecast} генераций."
+    )
+
+
 async def pending_alerts(db: Database) -> list[str]:
     """Return low-budget alert messages to broadcast (each threshold once)."""
     remaining = await remaining_budget(db)
