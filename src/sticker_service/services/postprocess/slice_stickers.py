@@ -177,6 +177,71 @@ def _trim_transparent(image: Image.Image) -> Image.Image:
     return image.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
 
 
+def _opaque_area(image: Image.Image) -> int:
+    """Count the non-transparent pixels of an RGBA image (its real footprint)."""
+    return int((np.asarray(image.convert("RGBA"))[..., 3] > 0).sum())
+
+
+# PLAYBOOK-START
+# pattern: keep-dominant-component-plus-neighbours
+# status: draft
+# problem: segmenting a subject from a tile leaves stray blobs the colour key
+#   missed (corner scenery, a detached glyph, paint splatter) that must go,
+#   while small *adjacent* blobs that belong to the subject (a heart by the
+#   hand, an emoji on the caption) must stay.
+# solution: keep the largest component; also keep any component that is either
+#   large relative to it OR whose bounding box is near the main one's (grown by
+#   a margin); zero the rest. Proximity — not mere size — is the keep signal.
+def _clean_satellites(
+    image: Image.Image, *, margin_frac: float = 0.12, keep_frac: float = 0.30
+) -> Image.Image:
+    """Keep a tile's main figure (+ blobs touching it) and drop far stray bits.
+
+    A painterly tile can carry scenery the chroma key missed — a picture frame in
+    a corner, a stray eye, a paint splash — sitting *away* from the central
+    figure. Keep the largest component plus any component that is large
+    (``keep_frac`` of it) or near it (its box overlaps the figure box grown by
+    ``margin_frac`` of the tile), zeroing everything else. A heart or 😉 next to
+    the face survives; a corner shard does not.
+    """
+    arr = np.asarray(image.convert("RGBA")).copy()
+    solid = arr[..., 3] > 0
+    if not solid.any():
+        return image
+    structure = ndimage.generate_binary_structure(2, 2)
+    labeled, count = cast(Any, ndimage.label(solid, structure=structure))
+    if count <= 1:
+        return _trim_transparent(image)
+    slices = ndimage.find_objects(labeled)
+    areas = [int((labeled == idx).sum()) for idx in range(1, count + 1)]
+    main = int(np.argmax(areas)) + 1
+    main_area = areas[main - 1]
+    mr, mc = slices[main - 1]
+    height, width = arr.shape[:2]
+    margin_y, margin_x = margin_frac * height, margin_frac * width
+    keep = labeled == main
+    for idx in range(1, count + 1):
+        if idx == main or slices[idx - 1] is None:
+            continue
+        if areas[idx - 1] >= keep_frac * main_area:
+            keep |= labeled == idx
+            continue
+        rr, cc = slices[idx - 1]
+        near = (
+            rr.start <= mr.stop + margin_y
+            and rr.stop >= mr.start - margin_y
+            and cc.start <= mc.stop + margin_x
+            and cc.stop >= mc.start - margin_x
+        )
+        if near:
+            keep |= labeled == idx
+    arr[..., 3] = np.where(keep, arr[..., 3], 0)
+    return _trim_transparent(Image.fromarray(arr, mode="RGBA"))
+
+
+# PLAYBOOK-END
+
+
 def grid_slice(
     image: Image.Image, rows: int, cols: int, *, tolerance: float = 70.0, min_content: int = 64
 ) -> list[Image.Image]:
@@ -197,8 +262,8 @@ def grid_slice(
                 round((c + 1) * cell_w),
                 round((r + 1) * cell_h),
             )
-            cell = _trim_transparent(chroma_key_auto(rgba.crop(box), tolerance=tolerance))
-            if int((np.asarray(cell.convert("RGBA"))[..., 3] > 0).sum()) >= min_content:
+            cell = _clean_satellites(chroma_key_auto(rgba.crop(box), tolerance=tolerance))
+            if _opaque_area(cell) >= min_content:
                 out.append(cell)
     return out
 
@@ -222,6 +287,35 @@ def drop_text_strips(pieces: list[Image.Image]) -> list[Image.Image]:
     return kept or pieces
 
 
+def drop_outlier_fragments(
+    pieces: list[Image.Image], *, expected: int | None = None, area_frac: float = 0.4
+) -> list[Image.Image]:
+    """Drop small-area outlier pieces: stray glyphs, scenery shards, paint splashes.
+
+    A valid sticker fills its tile with the character, so every real piece has a
+    similar opaque footprint; a detached letter (e.g. a lone «Я»), a corner
+    picture-frame or a splash is a *small* outlier. Drop pieces whose opaque area
+    is below ``area_frac`` of the median, smallest first, stopping once ``expected``
+    pieces remain so a legitimate count is never thinned. Complements
+    ``drop_text_strips``, which only catches short-wide caption lines — not tall
+    single glyphs. Never returns an empty list.
+    """
+    if len(pieces) < 2:
+        return pieces
+    areas = [_opaque_area(p) for p in pieces]
+    median = sorted(areas)[len(areas) // 2]
+    if median == 0:
+        return pieces
+    threshold = area_frac * median
+    small = [i for i, a in enumerate(areas) if a < threshold]
+    budget = len(small) if expected is None else max(0, min(len(small), len(pieces) - expected))
+    if budget <= 0:
+        return pieces
+    to_drop = set(sorted(small, key=lambda i: areas[i])[:budget])
+    kept = [p for i, p in enumerate(pieces) if i not in to_drop]
+    return kept or pieces
+
+
 def process_sheet(
     sheet: bytes | Image.Image,
     *,
@@ -231,14 +325,16 @@ def process_sheet(
     grid: tuple[int, int] | None = None,
     expected: int | None = None,
 ) -> list[bytes]:
-    """Full pipeline: chroma-key → slice → drop text strips → fit 512 → encode.
+    """Full pipeline: chroma-key → slice → drop junk → fit 512 → encode.
 
     Detached caption-only fragments are dropped first so no sticker is text without
     a character. Only when connected-component slicing falls short of the expected
     number of stickers do we fall back to cutting the regular ``grid`` (for sheets
     where the model used an off background or left no gaps); we then keep whichever
     result is closest to ``expected``. ``expected`` defaults to ``rows*cols-1`` so
-    callers that don't know the exact count keep the previous behaviour.
+    callers that don't know the exact count keep the previous behaviour. Finally
+    small-area outliers (stray glyphs, scenery shards, paint splashes the chroma
+    key missed) are dropped down to ``expected`` so no junk tile is published.
     """
     image = sheet if isinstance(sheet, Image.Image) else Image.open(BytesIO(sheet))
     keyed = chroma_key(image, chroma=chroma, tolerance=tolerance)
@@ -253,4 +349,5 @@ def process_sheet(
                 pieces = min((pieces, grid_pieces), key=lambda ps: abs(len(ps) - expected))
             else:
                 pieces = grid_pieces
+    pieces = drop_outlier_fragments(pieces, expected=expected)
     return [encode_sticker(fit_to_512(piece)) for piece in pieces]

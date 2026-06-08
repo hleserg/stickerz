@@ -90,6 +90,7 @@ def test_sheet_prompt_has_chroma_captions_and_resolved_suffix() -> None:
     assert CHROMA in prompt
     assert '"Привет!"' in prompt and '"Класс!"' in prompt
     assert "watercolor style" in prompt
+    assert "ONLY the character" in prompt  # no scenery/splashes allowed on a tile
     assert "{age_clause}" not in prompt  # placeholder resolved
 
 
