@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -27,7 +28,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sticker_service.db import Database
 from sticker_service.observability import tag_component
-from sticker_service.services import photo_check
+from sticker_service.services import analytics, photo_check
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import Orchestrator
@@ -309,11 +310,15 @@ async def _start_selection(msg: Message, state: FSMContext) -> None:  # pragma: 
     )
 
 
-async def on_style(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+async def on_style(
+    callback: CallbackQuery, state: FSMContext, db: Database
+) -> None:  # pragma: no cover
     """Store the style and start caption selection (canonical is built on Create)."""
     tag_component("handlers.flow")
     style_id = (callback.data or "").split(":", 1)[-1]
     await state.update_data(mode="fresh", style_id=style_id)
+    if callback.from_user is not None:
+        await analytics.log(db, callback.from_user.id, analytics.STYLE_CHOSEN, style_id=style_id)
     await callback.answer()
     if isinstance(callback.message, Message):
         await _start_selection(callback.message, state)
@@ -465,6 +470,16 @@ async def on_rev_create(  # pragma: no cover
         await msg.answer("Выберите хотя бы один стикер.")
         return
 
+    std_names = [STANDARD_BLOCK[i] for i in sorted(set(data.get("std_sel", [])))]
+    await analytics.log(
+        db,
+        user_id,
+        analytics.CAPTIONS_SELECTED,
+        standard=std_names,
+        custom=list(data.get("custom", [])),
+        total=len(captions),
+    )
+    started = time.monotonic()
     status = await msg.answer("🎨 Рисую персонажа…")
 
     async def on_step(done: int, total: int) -> None:
@@ -517,9 +532,20 @@ async def on_rev_create(  # pragma: no cover
                 pack_id = draft.id
     except Exception as exc:
         logger.exception("generation failed")
+        await analytics.log(
+            db, user_id, analytics.GENERATION_ERROR, mode=mode, reason=str(exc)[:200]
+        )
         await status.edit_text(_friendly_error(exc))
         return
 
+    await analytics.log(
+        db,
+        user_id,
+        analytics.GENERATION_DONE,
+        mode=mode,
+        count=len(stickers),
+        seconds=round(time.monotonic() - started, 1),
+    )
     with contextlib.suppress(Exception):
         await status.delete()
     await _present_for_publish(msg, state, stickers, mode=mode, title=title, pack_id=pack_id)
@@ -581,11 +607,15 @@ async def on_publish_yes(  # pragma: no cover
         await status.edit_text(_friendly_error(exc))
         return
 
+    event = analytics.EXTENDED if data.get("mode") == "extend" else analytics.PUBLISHED
+    await analytics.log(db, user_id, event, set_name=result.set_name, count=result.count)
     await state.clear()
     await status.edit_text(f"✅ Готово! Пак: {result.link}")
 
 
-async def on_pub_download(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+async def on_pub_download(  # pragma: no cover
+    callback: CallbackQuery, state: FSMContext, db: Database
+) -> None:
     """Send the stickers as a ZIP; keep state so the user can still publish."""
     tag_component("handlers.flow")
     data = await state.get_data()
@@ -597,6 +627,8 @@ async def on_pub_download(callback: CallbackQuery, state: FSMContext) -> None:  
     if not stickers:
         await msg.answer("Нет готовых стикеров. Начни заново: /new")
         return
+    if callback.from_user is not None:
+        await analytics.log(db, callback.from_user.id, analytics.DOWNLOADED, count=len(stickers))
     archive = bundle_zip([img for img, _ in stickers])
     await msg.answer_document(
         BufferedInputFile(archive, filename="stickers.zip"),
@@ -711,6 +743,10 @@ async def on_saved_download(  # pragma: no cover
     if not stickers:
         await msg.answer("У этого пака нет сохранённых стикеров.")
         return
+    if callback.from_user is not None:
+        await analytics.log(
+            db, callback.from_user.id, analytics.DOWNLOADED, pack_id=pack_id, count=len(stickers)
+        )
     archive = bundle_zip([img for img, _ in stickers])
     await msg.answer_document(
         BufferedInputFile(archive, filename="stickers.zip"),
@@ -747,6 +783,9 @@ async def on_saved_publish(  # pragma: no cover
         logger.exception("publish failed")
         await status.edit_text(_friendly_error(exc))
         return
+    await analytics.log(
+        db, user_id, analytics.PUBLISHED, set_name=result.set_name, count=result.count
+    )
     await status.edit_text(f"✅ Готово! Пак: {result.link}")
 
 

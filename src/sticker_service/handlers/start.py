@@ -10,7 +10,9 @@ from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
+from sticker_service.db import Database
 from sticker_service.observability import tag_component
+from sticker_service.services import analytics
 
 WELCOME = (
     "Привет! Я делаю персональные стикерпаки из фото: твой человек "
@@ -35,9 +37,11 @@ RULES = (
 )
 
 
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, db: Database) -> None:
     """Greet the user and outline what the bot does."""
     tag_component("handlers.start")
+    if message.from_user is not None:
+        await analytics.track_start(db, message.from_user.id)
     await message.answer(WELCOME, parse_mode="HTML")
 
 

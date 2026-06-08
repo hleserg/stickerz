@@ -78,6 +78,13 @@ CREATE TABLE IF NOT EXISTS bans (
     user_id INTEGER PRIMARY KEY,
     until   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    event      TEXT NOT NULL,
+    detail     TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -388,6 +395,30 @@ class Database:
             return None
         until = datetime.fromisoformat(row["until"])
         return until if until > _now() else None
+
+    # --- analytics events ----------------------------------------------------
+
+    async def add_event(self, user_id: int, event: str, detail: dict[str, object]) -> None:
+        """Append an analytics event (JSON detail)."""
+        await self._conn.execute(
+            "INSERT INTO events (user_id, event, detail, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, event, json.dumps(detail, ensure_ascii=False), _now().isoformat()),
+        )
+        await self._conn.commit()
+
+    async def has_events(self, user_id: int) -> bool:
+        """True if the user has any prior recorded event (returning user)."""
+        async with self._conn.execute(
+            "SELECT 1 FROM events WHERE user_id = ? LIMIT 1", (user_id,)
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    async def count_events(self, event: str) -> int:
+        async with self._conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE event = ?", (event,)
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
 
 
 async def open_database(paths: Sequence[str | Path] | None = None) -> Database:  # pragma: no cover
