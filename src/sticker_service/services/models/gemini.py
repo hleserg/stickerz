@@ -89,7 +89,20 @@ class GeminiImageModel(ImageModel):
             self._client = genai.Client(api_key=self._api_key)
         return self._client
 
-    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:  # pragma: no cover
+    async def generate(  # pragma: no cover
+        self,
+        prompt: str,
+        refs: Sequence[bytes] = (),
+        *,
+        model: str | None = None,
+        image_size: str | None = None,
+    ) -> bytes:
+        """Generate an image.
+
+        ``model`` forces a specific image model (e.g. for an A/B run) and disables
+        the family fallback so the comparison stays clean. ``image_size`` ("1K" /
+        "2K" / "4K") sets the output resolution when the model supports it.
+        """
         from google.genai import types
 
         client = self._get_client()
@@ -97,17 +110,25 @@ class GeminiImageModel(ImageModel):
             types.Part.from_bytes(data=ref, mime_type=_mime(ref)) for ref in refs
         ]
         contents.append(prompt)
-        config = types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"])
+        image_config = types.ImageConfig(image_size=image_size) if image_size else None
+        config = types.GenerateContentConfig(
+            response_modalities=["TEXT", "IMAGE"], image_config=image_config
+        )
 
         last: Exception | None = None
         for attempt in range(_MAX_GEN_ATTEMPTS):
-            model = image_model_for_attempt(attempt)
+            # Forced model stays fixed across retries; otherwise walk the fallback chain.
+            model_id = model or image_model_for_attempt(attempt)
             logger.info(
-                "gemini.generate model=%s refs=%d attempt=%d", model, len(refs), attempt + 1
+                "gemini.generate model=%s size=%s refs=%d attempt=%d",
+                model_id,
+                image_size or "default",
+                len(refs),
+                attempt + 1,
             )
             try:
                 response = await client.aio.models.generate_content(
-                    model=model, contents=contents, config=config
+                    model=model_id, contents=contents, config=config
                 )
                 return self._extract_image(response)
             except ModelRefusalError:
@@ -122,7 +143,7 @@ class GeminiImageModel(ImageModel):
                 last = exc
                 kind = "transient" if _is_retryable(exc) else "error"
                 if attempt < _MAX_GEN_ATTEMPTS - 1:
-                    logger.warning("gemini %s %s (%s); retrying", model, kind, str(exc)[:100])
+                    logger.warning("gemini %s %s (%s); retrying", model_id, kind, str(exc)[:100])
                     await asyncio.sleep(2 * (attempt + 1))
                     continue
                 raise ModelError(
