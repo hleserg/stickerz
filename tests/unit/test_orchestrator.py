@@ -349,6 +349,43 @@ async def test_build_for_review_validates_required_args(
         await orch.build_for_review(mode="extend", owner_id=1, captions=["x"])
 
 
+async def test_save_character_stores_source_photo(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    char = await orch.save_character(
+        owner_id=1,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(3),
+        photo=b"PHOTOBYTES",
+    )
+    assert char.photo_path is not None and Path(char.photo_path).exists()  # kept for redraw
+
+
+async def test_redraw_canonical_replaces_canonical_and_photo(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    char = await orch.save_character(
+        owner_id=1,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(3),
+        photo=b"OLD",
+    )
+    new = await orch.redraw_canonical(char, b"NEWPHOTO")
+    assert new.startswith(b"\x89PNG")
+    refreshed = await db.get_character(char.id)
+    assert refreshed is not None
+    assert Path(refreshed.canonical_path).read_bytes() == new  # canonical replaced
+    assert refreshed.photo_path is not None and Path(refreshed.photo_path).exists()
+
+
 async def test_unknown_style_raises(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
     orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
     with pytest.raises(OrchestratorError, match="unknown"):
