@@ -1,0 +1,25 @@
+schema_version: 1
+style_id: webtoon
+display_name: "Webtoon / манхва"
+enabled: true
+distance: medium
+
+pipeline:
+  - step: 1
+    prompt: "Сделай из фото фотореалистичный цветной рисунок."
+    refs: [photo]
+    gate: vision_judge
+  - step: 2
+    prompt: "Добавь черты характерные для стиля webtoon, manhwa, manhwafilter."
+    refs: [prev]
+    gate: vision_judge
+  - step: 3
+    skip_if_yes: "Ответь да или нет, одним словом: человек на изображении смотрит прямо в камеру?"
+    prompt: >-
+      Сделай так чтобы герой смотрел в камеру, если голова повернута в другую
+      сторону постарайся развернуть ее в камеру на сколько сможешь не теряя
+      реалистичности
+    refs: [prev]
+    gate: none
+
+sticker_style_suffix: "Подписи только на русском языке. {age_clause}"
