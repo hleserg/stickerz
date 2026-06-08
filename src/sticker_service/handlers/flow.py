@@ -253,6 +253,8 @@ async def on_photo(  # pragma: no cover
         await message.answer("Нужно именно фото. Пришли изображение человека.")
         return
     bot = message.bot
+    await bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
+    status = await message.answer("📸 Принял фото, проверяю…")
     file = await bot.download(message.photo[-1].file_id)  # type: ignore[union-attr]
     photo = file.read() if file else b""
     uid = message.from_user.id if message.from_user else 0
@@ -265,11 +267,11 @@ async def on_photo(  # pragma: no cover
         await _strike(db, uid, message, "На фото обнажёнка")
         return
     if code is not None:
-        await message.answer(_PHOTO_HINTS.get(code, "Фото не подходит, пришли другое."))
+        await status.edit_text(_PHOTO_HINTS.get(code, "Фото не подходит, пришли другое."))
         return
     await state.update_data(photo=photo)
     await state.set_state(NewPack.name)
-    await message.answer("Как назвать пак/персонажа? (можно кириллицу и эмодзи)")
+    await status.edit_text("Как назвать пак/персонажа? (можно кириллицу и эмодзи)")
 
 
 async def _strike(
@@ -825,6 +827,8 @@ async def on_redraw_photo(  # pragma: no cover
         await state.clear()
         await message.answer("Персонаж не найден. Начни заново: /mychars")
         return
+    await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
+    status = await message.answer("📸 Принял фото, проверяю…")
     file = await message.bot.download(message.photo[-1].file_id)  # type: ignore[union-attr]
     photo = file.read() if file else b""
     try:
@@ -836,9 +840,9 @@ async def on_redraw_photo(  # pragma: no cover
         await _strike(db, user_id, message, "На фото обнажёнка")
         return
     if code is not None:
-        await message.answer(_PHOTO_HINTS.get(code, "Фото не подходит, пришли другое."))
+        await status.edit_text(_PHOTO_HINTS.get(code, "Фото не подходит, пришли другое."))
         return
-    status = await message.answer("🎨 Перерисовываю персонажа…")
+    await status.edit_text("🎨 Перерисовываю персонажа…")
 
     async def on_step(done: int, total: int) -> None:
         with contextlib.suppress(Exception):
