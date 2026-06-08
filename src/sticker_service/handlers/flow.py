@@ -51,6 +51,11 @@ _STAGE_TEXT = {
 def _friendly_error(exc: Exception) -> str:
     """Turn a backend exception into a short user-facing message."""
     s = str(exc).lower()
+    if "credits" in s or "quota" in s or "billing" in s or "prepayment" in s:
+        return (
+            "⚠️ Генерация временно недоступна (исчерпан лимит у провайдера). "
+            "Мы уже разбираемся — попробуй позже."
+        )
     if "503" in s or "unavailable" in s or "overload" in s or "high demand" in s:
         return "⚠️ Модель сейчас перегружена (503). Попробуй ещё раз через минуту."
     if "refus" in s or "safety" in s or "prohibited" in s:

@@ -14,7 +14,12 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
-from sticker_service.services.models.base import ImageModel, ModelError, ModelRefusalError
+from sticker_service.services.models.base import (
+    ImageModel,
+    ModelError,
+    ModelQuotaError,
+    ModelRefusalError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,10 @@ _RETRYABLE = (
     "429",
 )
 
+#: Permanent billing/quota signals inside a 429 — retrying or failing over to
+#: another model can't help, so we fail fast instead of burning the retry budget.
+_BILLING = ("credits are depleted", "prepayment", "billing", "out of credits")
+
 _REFUSAL_REASONS = ("SAFETY", "PROHIBITED", "BLOCK", "RECITATION")
 _FLOAT_RE = re.compile(r"\d+(?:\.\d+)?|\.\d+")
 # Emoji-ish codepoint ranges, mirrors stickers.emoji validation.
@@ -47,8 +56,16 @@ def _mime(data: bytes) -> str:
     return "image/jpeg" if data[:3] == b"\xff\xd8\xff" else "image/png"
 
 
+def _is_billing(exc: Exception) -> bool:
+    """True when the error means the account is out of credits/quota (permanent)."""
+    s = str(exc).lower()
+    return any(token in s for token in _BILLING)
+
+
 def _is_retryable(exc: Exception) -> bool:
     """True for transient API errors worth retrying (overload / rate limit)."""
+    if _is_billing(exc):  # a depleted-credits 429 won't recover on retry
+        return False
     s = str(exc).lower()
     return any(token in s for token in _RETRYABLE)
 
@@ -120,6 +137,11 @@ class GeminiImageModel(ImageModel):
                 # A real safety refusal — let the engine reformulate, don't retry blindly.
                 raise
             except Exception as exc:  # ANY other error -> backoff + fallback model
+                if _is_billing(exc):  # out of credits: retrying/failover can't help
+                    raise ModelQuotaError(
+                        "Gemini account is out of credits/quota — top up billing to "
+                        f"resume generation: {str(exc)[:120]}"
+                    ) from exc
                 last = exc
                 kind = "transient" if _is_retryable(exc) else "error"
                 if attempt < _MAX_GEN_ATTEMPTS - 1:

@@ -23,6 +23,14 @@ class ModelRefusalError(ModelError):
     """Model declined to generate (e.g., child-safety filter — §6)."""
 
 
+class ModelQuotaError(ModelError):
+    """Provider account is out of credits/quota — permanent until topped up.
+
+    Distinct from a transient ``429`` rate limit: retrying or failing over to
+    another model cannot help, so callers should fail fast and alert the admin.
+    """
+
+
 class ImageModel(ABC):
     """Abstract image model. Concrete providers live alongside this module."""
 
