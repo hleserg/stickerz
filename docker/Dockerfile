@@ -5,7 +5,9 @@
 FROM python:3.13-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-ENV UV_COMPILE_BYTECODE=1 \
+# Bytecode precompile disabled: on small VDS uv's 60s/file limit trips on numpy's
+# huge test modules and fails the build. Python compiles .pyc lazily at runtime.
+ENV UV_COMPILE_BYTECODE=0 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/app/.venv
 
