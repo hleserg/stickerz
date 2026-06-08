@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw
 from sticker_service.services.postprocess import (
     chroma_key,
     chroma_key_auto,
+    drop_outlier_fragments,
     drop_text_strips,
     encode_sticker,
     fit_to_512,
@@ -18,6 +19,7 @@ from sticker_service.services.postprocess import (
     process_sheet,
     slice_sheet,
 )
+from sticker_service.services.postprocess.slice_stickers import _clean_satellites, _opaque_area
 
 PINK = (240, 80, 160, 255)
 
@@ -117,6 +119,58 @@ def test_process_sheet_drops_text_only_sticker() -> None:
     draw.rectangle([60, 250, 190, 280], fill=(255, 255, 255, 255))  # detached caption line
     stickers = process_sheet(sheet)
     assert len(stickers) == 1  # only the character survives; text-only strip dropped
+
+
+def _tile_with_satellites() -> Image.Image:
+    """A keyed tile: central figure + a heart next to it + a far corner shard."""
+    tile = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(tile)
+    draw.rectangle([60, 40, 140, 170], fill=(0, 128, 255, 255))  # figure (10611 px)
+    draw.rectangle([142, 90, 160, 108], fill=(255, 0, 0, 255))  # heart, adjacent (361 px)
+    draw.rectangle([180, 5, 198, 23], fill=(0, 0, 0, 255))  # picture-frame corner (361 px)
+    return tile
+
+
+def test_clean_satellites_keeps_adjacent_drops_far_corner() -> None:
+    cleaned = _clean_satellites(_tile_with_satellites())
+    # figure (10611) + adjacent heart (361) kept; far corner shard (361) dropped.
+    assert _opaque_area(cleaned) == 10611 + 361
+    assert cleaned.size[0] <= 105  # trimmed box excludes the x≥180 corner
+
+
+def test_clean_satellites_single_component_is_noop() -> None:
+    tile = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    ImageDraw.Draw(tile).rectangle([20, 20, 80, 80], fill=(0, 128, 255, 255))
+    assert _opaque_area(_clean_satellites(tile)) == _opaque_area(tile)
+
+
+def test_drop_outlier_fragments_drops_lone_glyph() -> None:
+    # Two characters + one tall-but-small detached glyph (a lone «Я»): the glyph
+    # is NOT a short-wide strip, so drop_text_strips misses it — area catches it.
+    char = Image.new("RGBA", (300, 400), (0, 0, 0, 255))
+    glyph = Image.new("RGBA", (60, 250), (0, 0, 0, 255))  # tall, thin, small area
+    pieces = [char.copy(), char.copy(), glyph]
+    assert len(drop_text_strips(pieces)) == 3  # shape heuristic keeps the glyph
+    assert len(drop_outlier_fragments(pieces)) == 2  # area heuristic drops it
+
+
+def test_drop_outlier_fragments_respects_expected() -> None:
+    char = Image.new("RGBA", (300, 400), (0, 0, 0, 255))
+    glyph = Image.new("RGBA", (60, 250), (0, 0, 0, 255))
+    pieces = [char.copy(), char.copy(), glyph]
+    # expected already met by the real characters → never thin below it.
+    assert len(drop_outlier_fragments(pieces, expected=3)) == 3
+
+
+def test_process_sheet_drops_lone_letter_tile() -> None:
+    # Two characters in a 1×3 grid plus a lone letter-sized tile in the third cell.
+    sheet = Image.new("RGBA", (360, 200), MAGENTA)
+    draw = ImageDraw.Draw(sheet)
+    draw.rectangle([20, 20, 120, 180], fill=(0, 128, 255, 255))  # character
+    draw.rectangle([140, 20, 240, 180], fill=(0, 200, 0, 255))  # character
+    draw.rectangle([285, 60, 305, 140], fill=(0, 0, 0, 255))  # lone glyph «Я»
+    stickers = process_sheet(sheet, grid=(1, 3), expected=2)
+    assert len(stickers) == 2  # the letter-only tile is dropped
 
 
 def test_process_sheet_end_to_end() -> None:

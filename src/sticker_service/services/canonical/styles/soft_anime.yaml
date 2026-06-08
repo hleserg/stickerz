@@ -7,7 +7,7 @@ distance: medium
 # Same ladder as watercolor; only step 2 differs (soft anime / Ghibli look).
 pipeline:
   - step: 1
-    prompt: "Сделай из фото фотореалистичный цветной рисунок."
+    prompt: "Сделай из фото фотореалистичный цветной рисунок. Помести человека на простом однотонном фоне — без предметов, мебели, текста и сцены позади."
     refs: [photo]
     gate: vision_judge
   - step: 2
