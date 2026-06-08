@@ -28,6 +28,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sticker_service.db import Database
 from sticker_service.observability import tag_component
 from sticker_service.services.canonical.loader import StyleLoader
+from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import Orchestrator
 from sticker_service.services.postprocess import bundle_zip, compose_preview
 from sticker_service.services.publish.publisher import StickerInput
@@ -214,9 +215,14 @@ async def on_photo(message: Message, state: FSMContext) -> None:  # pragma: no c
 
 
 async def on_name(message: Message, state: FSMContext) -> None:
-    """Store the human name, then ask adult/child."""
+    """Store the human name (moderated), then ask adult/child."""
     tag_component("handlers.flow")
-    await state.update_data(name=(message.text or "").strip() or "Мой пак")
+    name = (message.text or "").strip()
+    reason = caption_rejection_reason(name)
+    if reason:
+        await message.answer(f"⚠️ Так назвать нельзя ({reason}). Введите другое имя.")
+        return
+    await state.update_data(name=name or "Мой пак")
     await state.set_state(NewPack.subject)
     await message.answer("Это взрослый или ребёнок?", reply_markup=subject_kb())
 
@@ -332,6 +338,10 @@ async def on_enter_custom(message: Message, state: FSMContext) -> None:  # pragm
     """Append a typed custom caption (capped at 24), then show the review list."""
     tag_component("handlers.flow")
     text = (message.text or "").strip()
+    reason = caption_rejection_reason(text)
+    if reason:
+        await message.answer(f"⚠️ Так нельзя ({reason}). Введите другой вариант.")
+        return
     data = await state.get_data()
     custom = list(data.get("custom", []))
     total = len(selected_captions(data.get("std_sel", []), custom))
