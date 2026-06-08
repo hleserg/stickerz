@@ -8,7 +8,6 @@ import pytest
 
 from sticker_service.services.canonical import (
     CanonicalEngine,
-    CanonicalGateError,
     Gate,
     GateResult,
     Style,
@@ -106,26 +105,12 @@ async def test_child_prompts_carry_age_anchor() -> None:
     assert all("ребёнок" in p and "6" in p for p in model.generate_calls)
 
 
-async def test_gate_slip_rolls_back_only_that_step() -> None:
-    # Low score -> gate always fails -> step 1 retried then raises.
+async def test_low_gate_score_does_not_reshoot() -> None:
+    # A low geometry score is advisory now: the frame is kept, no re-shoot, no raise.
     model = MockImageModel(judge_score=0.1)
-    engine = CanonicalEngine(model, max_step_retries=2)
-    with pytest.raises(CanonicalGateError):
-        await engine.run(_watercolor_like(), b"P", subject_type="adult")
-    # 3 attempts on the FIRST step only (retries are per-step, not whole chain).
-    assert len(model.generate_calls) == 3
-
-
-async def test_retry_prompt_gets_smaller_delta_nudge() -> None:
-    model = MockImageModel(judge_score=0.1)
-    with pytest.raises(CanonicalGateError):
-        await CanonicalEngine(model, max_step_retries=1).run(
-            _style([{"step": 1, "prompt": "base", "refs": ["photo"]}]),
-            b"P",
-            subject_type="adult",
-        )
-    assert model.generate_calls[0] == "base"
-    assert "SMALLER change" in model.generate_calls[1]
+    canonical = await CanonicalEngine(model).run(_watercolor_like(), b"P", subject_type="adult")
+    assert canonical.startswith(b"\x89PNG")
+    assert len(model.generate_calls) == 3  # one generate per step — never re-shot
 
 
 async def test_gate_none_skips_judge() -> None:

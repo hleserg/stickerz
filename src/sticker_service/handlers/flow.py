@@ -36,7 +36,7 @@ from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import Orchestrator
 from sticker_service.services.postprocess import bundle_zip, compose_preview
 from sticker_service.services.publish.publisher import StickerInput
-from sticker_service.services.stickers import STANDARD_BLOCK, selected_captions
+from sticker_service.services.stickers import MAX_CAPTIONS, STANDARD_BLOCK, selected_captions
 from sticker_service.services.strikes import register_strike
 
 logger = logging.getLogger(__name__)
@@ -337,7 +337,7 @@ async def _start_selection(msg: Message, state: FSMContext) -> None:  # pragma: 
     await state.set_state(NewPack.select_std)
     await msg.answer(
         "Выберите стандартные стикеры, которые надо включить в набор. Дальше "
-        "сможете добавить свои, но всего не больше 24.",
+        "сможете добавить свои, но всего не больше 15 (один лист).",
         reply_markup=std_checklist_kb(list(range(len(STANDARD_BLOCK))), 0),
     )
 
@@ -414,7 +414,7 @@ async def on_custom_no(callback: CallbackQuery, state: FSMContext) -> None:  # p
 async def on_enter_custom(
     message: Message, state: FSMContext, db: Database
 ) -> None:  # pragma: no cover
-    """Append a typed custom caption (capped at 24), then show the review list."""
+    """Append a typed custom caption (capped at MAX_CAPTIONS), then show the review list."""
     tag_component("handlers.flow")
     text = (message.text or "").strip()
     reason = caption_rejection_reason(text)
@@ -426,7 +426,7 @@ async def on_enter_custom(
     data = await state.get_data()
     custom = list(data.get("custom", []))
     total = len(selected_captions(data.get("std_sel", []), custom))
-    if text and total < 24:
+    if text and total < MAX_CAPTIONS:
         custom.append(text)
         await state.update_data(custom=custom)
     await _show_review(message, state)

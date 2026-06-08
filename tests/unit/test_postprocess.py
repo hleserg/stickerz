@@ -149,7 +149,7 @@ def test_min_area_filters_specks() -> None:
 
 def test_grid_for_balanced() -> None:
     assert grid_for(6) == (2, 3)
-    assert grid_for(15) == (4, 4)
+    assert grid_for(15) == (5, 3)  # 3-wide portrait sheet
     assert grid_for(1) == (1, 1)
 
 
