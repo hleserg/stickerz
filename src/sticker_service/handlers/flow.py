@@ -188,7 +188,9 @@ async def cmd_new(message: Message, state: FSMContext) -> None:
     await state.set_state(NewPack.consent)
     await message.answer(
         "Создаём новый пак. Подтверди: у тебя есть право на это фото и согласие "
-        "изображённого человека.",
+        "изображённого человека.\n\n"
+        "🐞 Заметишь любой косяк — пожалуйста, напиши /report с подробностями "
+        "(что делал, что не так): это очень помогает улучшать бота.",
         reply_markup=consent_kb(),
     )
 
@@ -243,7 +245,7 @@ async def _strike(
     db: Database, user_id: int, msg: Message, reason: str
 ) -> None:  # pragma: no cover
     """Record a moderation strike and tell the user (ban enforced by middleware)."""
-    count, until = await register_strike(db, user_id)
+    count, until = await register_strike(db, user_id, reason)
     text = f"⚠️ {reason}. Это нарушение правил (/rules). Страйков: {count}."
     if until is not None:
         text += " Вы временно заблокированы."
@@ -701,7 +703,10 @@ async def cmd_mypacks(message: Message, db: Database) -> None:
         mark = "✅" if pack.published else "📝"
         kb.button(text=f"{mark} {pack.title}", callback_data=f"pk:{pack.id}")
     kb.adjust(1)
-    await message.answer("Ваши паки:", reply_markup=kb.as_markup())
+    await message.answer(
+        "Ваши паки:\n\n🐞 Если что-то не так — напишите /report с подробностями.",
+        reply_markup=kb.as_markup(),
+    )
 
 
 async def on_pick_saved_pack(  # pragma: no cover

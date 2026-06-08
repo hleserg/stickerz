@@ -5,7 +5,8 @@ from __future__ import annotations
 from aiogram import Dispatcher
 
 from sticker_service.db import Database
-from sticker_service.handlers import admin, flow, start
+from sticker_service.handlers import admin, flow, report, start
+from sticker_service.handlers.errors import on_error
 from sticker_service.handlers.middleware import WhitelistMiddleware
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.orchestrator import Orchestrator
@@ -24,11 +25,13 @@ def build_dispatcher(
     Argument-optional so the dispatcher can be built and inspected in tests.
     """
     dp = Dispatcher()
+    dp.errors.register(on_error)
     if db is not None:
         dp["db"] = db
         dp.message.outer_middleware(WhitelistMiddleware(db))
         dp.callback_query.outer_middleware(WhitelistMiddleware(db))
         dp.include_router(admin.build_router())
+        dp.include_router(report.build_router())
     if orchestrator is not None:
         dp["orchestrator"] = orchestrator
         if loader is not None:

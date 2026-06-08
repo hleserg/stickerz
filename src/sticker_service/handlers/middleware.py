@@ -16,6 +16,7 @@ from aiogram.types import TelegramObject
 from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.observability import tag_component
+from sticker_service.services import modes
 
 DENIAL = "Доступ ограничен: бот в закрытом тестировании."
 
@@ -38,6 +39,17 @@ class WhitelistMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         is_admin = user.id in get_settings().admin_id_set
+
+        # Debug mode: only admins can use the bot; everyone else gets a soft notice.
+        mode = await self._db.get_config("mode", modes.DEFAULT)
+        if mode == modes.DEBUG and not is_admin:
+            answer = getattr(event, "answer", None)
+            if answer is not None:
+                await answer(
+                    "🛠 Бот сейчас в разработке — скоро мы всё покажем! Загляни чуть позже."
+                )
+            return None
+
         if is_admin:
             await self._db.allow(user.id, getattr(user, "username", None))
         elif not await self._db.is_allowed(user.id):

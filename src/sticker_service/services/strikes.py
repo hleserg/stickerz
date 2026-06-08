@@ -28,9 +28,11 @@ def ban_for_strikes(count: int) -> timedelta | None:
     return None
 
 
-async def register_strike(db: Database, user_id: int) -> tuple[int, datetime | None]:
-    """Record a strike; if a threshold is hit, set a ban. Returns (count, until)."""
-    count = await db.add_strike(user_id)
+async def register_strike(
+    db: Database, user_id: int, reason: str = ""
+) -> tuple[int, datetime | None]:
+    """Record a strike (with reason); if a threshold is hit, set a ban. (count, until)."""
+    count = await db.add_strike(user_id, reason)
     duration = ban_for_strikes(count)
     until: datetime | None = None
     if duration is not None:

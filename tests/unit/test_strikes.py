@@ -51,3 +51,27 @@ async def test_banned_until_none_when_expired(db: Database) -> None:
 
     await db.set_ban(5, datetime.now(UTC) - timedelta(hours=1))  # already past
     assert await db.banned_until(5) is None
+
+
+async def test_strike_reason_listed(db: Database) -> None:
+    await register_strike(db, 3, "На фото обнажёнка")
+    await register_strike(db, 3, "Так нельзя (мат…)")
+    strikes = await db.list_strikes(3)
+    reasons = [r for r, _ in strikes]
+    assert "На фото обнажёнка" in reasons
+    assert len(strikes) == 2
+
+
+async def test_list_bans_and_unban(db: Database) -> None:
+    from datetime import UTC, datetime
+
+    await db.set_ban(8, datetime.now(UTC) + timedelta(hours=1))
+    assert [uid for uid, _ in await db.list_bans()] == [8]
+    await db.unban(8)
+    assert await db.list_bans() == []
+
+
+async def test_config_get_set(db: Database) -> None:
+    assert await db.get_config("k", "def") == "def"
+    await db.set_config("k", "v")
+    assert await db.get_config("k") == "v"

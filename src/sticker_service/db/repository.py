@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS consents (
 CREATE TABLE IF NOT EXISTS strikes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS bans (
@@ -84,6 +85,10 @@ CREATE TABLE IF NOT EXISTS events (
     event      TEXT NOT NULL,
     detail     TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -125,6 +130,12 @@ class Database:
                 "ALTER TABLE packs ADD COLUMN published INTEGER NOT NULL DEFAULT 0"
             )
             await self._conn.execute("UPDATE packs SET published = 1")
+        async with self._conn.execute("PRAGMA table_info(strikes)") as cur:
+            strike_cols = {row["name"] for row in await cur.fetchall()}
+        if "reason" not in strike_cols:
+            await self._conn.execute(
+                "ALTER TABLE strikes ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
+            )
 
     async def close(self) -> None:
         await self._conn.close()
@@ -358,14 +369,25 @@ class Database:
 
     # --- strikes & bans (auto-moderation) ------------------------------------
 
-    async def add_strike(self, user_id: int) -> int:
-        """Record a strike; return the count of strikes active in the last 30 days."""
+    async def add_strike(self, user_id: int, reason: str = "") -> int:
+        """Record a strike (with reason); return strikes active in the last 30 days."""
         await self._conn.execute(
-            "INSERT INTO strikes (user_id, created_at) VALUES (?, ?)",
-            (user_id, _now().isoformat()),
+            "INSERT INTO strikes (user_id, reason, created_at) VALUES (?, ?, ?)",
+            (user_id, reason, _now().isoformat()),
         )
         await self._conn.commit()
         return await self.active_strikes(user_id)
+
+    async def list_strikes(self, user_id: int) -> list[tuple[str, str]]:
+        """Active (30-day) strikes for a user as (reason, created_at), newest first."""
+        cutoff = (_now() - timedelta(days=30)).isoformat()
+        async with self._conn.execute(
+            "SELECT reason, created_at FROM strikes WHERE user_id = ? AND created_at > ? "
+            "ORDER BY created_at DESC",
+            (user_id, cutoff),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [(r["reason"], r["created_at"]) for r in rows]
 
     async def active_strikes(self, user_id: int) -> int:
         """Strikes that have not yet expired (30-day window)."""
@@ -395,6 +417,35 @@ class Database:
             return None
         until = datetime.fromisoformat(row["until"])
         return until if until > _now() else None
+
+    async def list_bans(self) -> list[tuple[int, datetime]]:
+        """Currently-active bans as (user_id, until)."""
+        now = _now().isoformat()
+        async with self._conn.execute(
+            "SELECT user_id, until FROM bans WHERE until > ? ORDER BY until", (now,)
+        ) as cur:
+            rows = await cur.fetchall()
+        return [(r["user_id"], datetime.fromisoformat(r["until"])) for r in rows]
+
+    async def unban(self, user_id: int) -> None:
+        """Lift a ban (admin action)."""
+        await self._conn.execute("DELETE FROM bans WHERE user_id = ?", (user_id,))
+        await self._conn.commit()
+
+    # --- config (key/value) --------------------------------------------------
+
+    async def get_config(self, key: str, default: str = "") -> str:
+        async with self._conn.execute("SELECT value FROM config WHERE key = ?", (key,)) as cur:
+            row = await cur.fetchone()
+        return row["value"] if row else default
+
+    async def set_config(self, key: str, value: str) -> None:
+        await self._conn.execute(
+            "INSERT INTO config (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await self._conn.commit()
 
     # --- analytics events ----------------------------------------------------
 
