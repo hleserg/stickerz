@@ -43,10 +43,11 @@ FLASH = _IMAGE_FALLBACKS[0]  # gemini-3.1-flash-image
 LABEL = {PRO: "pro", FLASH: "flash"}
 STYLE_ID = "watercolor"
 
-# (filename, subject_type, child_age) — adult + children of varying ages.
+# (filename, subject_type, child_age) — user-provided adults + children for the
+# IMAGE_SAFETY axis (flash tends to refuse children).
 FIXTURES: list[tuple[str, SubjectType, int | None]] = [
-    ("test_adult.jpg", "adult", None),
-    ("test_girl.jpg", "child", 14),
+    ("ab_man.jpg", "adult", None),
+    ("ab_woman.jpg", "adult", None),
     ("test_child.jpg", "child", 6),
     ("test_child2.jpg", "child", 3),
 ]
