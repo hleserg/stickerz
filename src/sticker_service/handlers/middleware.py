@@ -1,8 +1,12 @@
-"""Whitelist access control as an outer middleware (§11.1, §B.4).
+"""Mode-aware access control as an outer middleware (§11.1, §B.4).
 
-Runs before any handler: a non-whitelisted user gets a polite refusal and the
-update is dropped. Admins (from config) are always allowed and auto-added to the
-whitelist on first contact. Identity key is the durable Telegram ``user_id``.
+Runs before any handler and gates purely on the bot's operating mode:
+- admins always pass (and are auto-whitelisted) — they bypass mode/ban gates;
+- in ``debug`` only admins pass; everyone else gets a soft "under construction";
+- in ``alpha`` everyone passes the middleware (pack creation is gated to approved
+  participants inside the handlers), except users under an auto-moderation ban.
+
+Identity key is the durable Telegram ``user_id``.
 """
 
 from __future__ import annotations
@@ -18,11 +22,9 @@ from sticker_service.db import Database
 from sticker_service.observability import tag_component
 from sticker_service.services import modes
 
-DENIAL = "Доступ ограничен: бот в закрытом тестировании."
-
 
 class WhitelistMiddleware(BaseMiddleware):
-    """Block updates from users who are not on the whitelist."""
+    """Gate updates by operating mode (debug → admins only; alpha → all but banned)."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
