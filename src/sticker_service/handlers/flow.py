@@ -733,6 +733,60 @@ async def on_rev_create(  # pragma: no cover
         custom=list(data.get("custom", [])),
         total=len(captions),
     )
+    await _generate_and_present(msg, state, orchestrator, db, user_id)
+
+
+# --- generation core + retry-on-overload (shared by create & retry) ----------
+
+_RETRY_DELAY_S = 20
+_bg_tasks: set[asyncio.Task[None]] = set()
+
+
+def _retry_kb(seconds_left: int) -> Any:
+    """Retry control: a live countdown while the model cools down, then an active button."""
+    kb = InlineKeyboardBuilder()
+    if seconds_left > 0:
+        kb.button(text=f"⏳ Попробовать ещё раз ({seconds_left})", callback_data="retry:wait")
+    else:
+        kb.button(text="🔄 Попробовать ещё раз", callback_data="retry:gen")
+    return kb.as_markup()
+
+
+def _arm_retry(msg: Message, *, delay: int = _RETRY_DELAY_S) -> None:  # pragma: no cover
+    """Attach a retry button that counts down ``delay`` s (inactive), then activates."""
+
+    async def _countdown() -> None:
+        for left in range(delay, 0, -1):
+            with contextlib.suppress(Exception):
+                await msg.edit_reply_markup(reply_markup=_retry_kb(left))
+            await asyncio.sleep(1)
+        with contextlib.suppress(Exception):
+            await msg.edit_reply_markup(reply_markup=_retry_kb(0))
+
+    task = asyncio.create_task(_countdown())
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+async def _generate_and_present(  # pragma: no cover
+    msg: Message,
+    state: FSMContext,
+    orchestrator: Orchestrator,
+    db: Database,
+    user_id: int,
+) -> None:
+    """Run generation from the saved flow state and show the preview.
+
+    Shared by the initial '✅ Создать' press and the '🔄 Попробовать ещё раз'
+    retry, so a transient overload can be retried with the exact same inputs
+    (which persist in the FSM state).
+    """
+    data = await state.get_data()
+    captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
+    if not captions:
+        return
+    mode = data.get("mode", "fresh")
+    cost = pricing.cost_for_mode(mode)
     started = time.monotonic()
     await state.set_state(NewPack.publish)
 
@@ -771,6 +825,8 @@ async def on_rev_create(  # pragma: no cover
             await msg.edit_text(_friendly_error(exc))
         if model_errors.is_quota(exc):
             await _alert_admins_quota(msg, exc)
+        if model_errors.is_retryable(exc):  # overload → offer a retry once it cools down
+            _arm_retry(msg)
         return
 
     await analytics.log(
@@ -797,6 +853,27 @@ async def on_rev_create(  # pragma: no cover
             for admin_id in get_settings().admin_id_list:
                 with contextlib.suppress(Exception):
                     await msg.bot.send_message(admin_id, alert)  # type: ignore[union-attr]
+
+
+async def on_retry(  # pragma: no cover
+    callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator, db: Database
+) -> None:
+    """Re-run generation after a transient overload (armed button finished its countdown)."""
+    tag_component("handlers.flow")
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    with contextlib.suppress(Exception):
+        await msg.edit_reply_markup(reply_markup=None)  # drop the button while retrying
+    await _generate_and_present(msg, state, orchestrator, db, user_id)
+
+
+async def on_retry_wait(callback: CallbackQuery) -> None:  # pragma: no cover
+    """User tapped the still-counting-down button — ask them to wait it out."""
+    tag_component("handlers.flow")
+    await callback.answer("Ещё секунду — идёт отсчёт, потом можно повторить.")
 
 
 async def _present_for_publish(  # pragma: no cover
@@ -1316,6 +1393,8 @@ def build_router() -> Router:
     router.callback_query.register(on_custom_no, F.data == "cust:no")
     router.message.register(on_enter_custom, NewPack.enter_custom)
     router.callback_query.register(on_rev_create, F.data == "rev:create")
+    router.callback_query.register(on_retry, F.data == "retry:gen")
+    router.callback_query.register(on_retry_wait, F.data == "retry:wait")
     router.callback_query.register(on_rev_add, F.data == "rev:add")
     router.callback_query.register(on_rev_remove, F.data == "rev:remove")
     router.callback_query.register(on_rev_show, F.data == "rev:show")
