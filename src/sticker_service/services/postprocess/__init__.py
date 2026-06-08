@@ -17,10 +17,13 @@ from sticker_service.services.postprocess.slice_stickers import (
     process_sheet,
     slice_sheet,
 )
+from sticker_service.services.postprocess.watermark import DEFAULT_TEXT, apply_watermark
 from sticker_service.services.postprocess.whatsapp import to_whatsapp, to_whatsapp_pack
 
 __all__ = [
     "CHROMA_DEFAULT",
+    "DEFAULT_TEXT",
+    "apply_watermark",
     "bundle_zip",
     "chroma_key",
     "chroma_key_auto",

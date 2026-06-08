@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     styles_dir: Path = _PACKAGE_DIR / "services" / "canonical" / "styles"
     redis_url: str = "redis://localhost:6379/0"
 
+    # --- Watermark (virality; off-switch for B2B) ---
+    watermark_enabled: bool = True
+    watermark_text: str = "@yuki_stickers_bot"
+
     # --- Sentry (disabled by default; empty DSN is a no-op) ---
     sentry_dsn: str = ""
     sentry_environment: str = "development"
