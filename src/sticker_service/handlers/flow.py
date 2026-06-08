@@ -588,16 +588,18 @@ async def on_rev_create(  # pragma: no cover
         msg, state, bundle.stickers, mode=mode, title=bundle.title, pack_id=bundle.pack_id
     )
 
-    # Alpha: charge the action's credits and tell the user the remaining balance.
-    if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
-        left = await db.consume_credits(user_id, cost)
-        await msg.answer(
-            f"Списано {pricing.format_packs(cost)} пак. Осталось: {pricing.format_packs(left)}."
-        )
-    for alert in await budget.pending_alerts(db):
-        for admin_id in get_settings().admin_id_list:
-            with contextlib.suppress(Exception):
-                await msg.bot.send_message(admin_id, alert)  # type: ignore[union-attr]
+    # Alpha-only: charge the action's credits and watch the USD budget. In debug
+    # mode there is no budget, so neither charge nor alert (avoids "-$0.70" noise).
+    if await modes.get_mode(db) == modes.ALPHA:
+        if not _is_admin(user_id):
+            left = await db.consume_credits(user_id, cost)
+            await msg.answer(
+                f"Списано {pricing.format_packs(cost)} пак. Осталось: {pricing.format_packs(left)}."
+            )
+        for alert in await budget.pending_alerts(db):
+            for admin_id in get_settings().admin_id_list:
+                with contextlib.suppress(Exception):
+                    await msg.bot.send_message(admin_id, alert)  # type: ignore[union-attr]
 
 
 async def _present_for_publish(  # pragma: no cover
