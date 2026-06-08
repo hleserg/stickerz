@@ -14,6 +14,7 @@ from aiogram import Bot
 
 from sticker_service.config import get_settings
 from sticker_service.db import Database
+from sticker_service.fsm_storage import SqliteStorage
 from sticker_service.handlers import build_dispatcher
 from sticker_service.observability import init_sentry
 from sticker_service.services.canonical.loader import StyleLoader
@@ -53,13 +54,16 @@ async def run() -> None:
         loader=loader,
         storage_dir=settings.data_dir,
     )
-    dp = build_dispatcher(db=db, orchestrator=orchestrator, loader=loader)
+    # Persist FSM state so an OOM/restart resumes flows instead of dropping them.
+    storage = await SqliteStorage.create(settings.data_dir / "fsm.sqlite")
+    dp = build_dispatcher(db=db, orchestrator=orchestrator, loader=loader, storage=storage)
     await _set_commands(bot)
 
     logger.info("Starting long-polling as @%s", me.username)
     try:
         await dp.start_polling(bot)
     finally:
+        await storage.close()
         await bot.session.close()
         await db.close()
 

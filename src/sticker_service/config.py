@@ -82,6 +82,13 @@ class Settings(BaseSettings):
     styles_dir: Path = _PACKAGE_DIR / "services" / "canonical" / "styles"
     redis_url: str = "redis://localhost:6379/0"
 
+    # --- Flow resilience (watchdog): per-step timeouts in seconds ---
+    # A hung automated step must not leave the user staring at a frozen flow. The
+    # photo check is short, so on timeout we just let the photo through; the
+    # generation step is long, so it gets a generous cap before we apologize.
+    photo_check_timeout_s: float = 60.0
+    generation_timeout_s: float = 600.0
+
     # --- Watermark (virality; off-switch for B2B) ---
     watermark_enabled: bool = True
     watermark_text: str = "@yuki_stickers_bot"
