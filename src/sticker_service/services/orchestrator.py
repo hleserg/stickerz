@@ -341,7 +341,7 @@ class Orchestrator:
                 subject_type=character.subject_type,
                 child_age=character.child_age,
             )
-            stickers.extend(process_sheet(sheet, grid=grid_for(len(page))))
+            stickers.extend(process_sheet(sheet, grid=grid_for(len(page)), expected=len(page)))
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
         await self._stage(on_stage, "slice")
