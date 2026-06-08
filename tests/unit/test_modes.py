@@ -20,9 +20,10 @@ async def db() -> AsyncIterator[Database]:
 
 
 def test_implemented_modes() -> None:
+    # Only debug and alpha are implemented so far; prod/beta cannot be switched to.
     assert modes.is_implemented(modes.DEBUG)
-    assert modes.is_implemented(modes.PROD)
-    assert not modes.is_implemented(modes.ALPHA)
+    assert modes.is_implemented(modes.ALPHA)
+    assert not modes.is_implemented(modes.PROD)
     assert not modes.is_implemented(modes.BETA)
 
 

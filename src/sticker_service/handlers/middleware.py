@@ -38,37 +38,33 @@ class WhitelistMiddleware(BaseMiddleware):
         if user is None:  # service updates without a user — let aiogram handle
             return await handler(event, data)
 
+        answer = getattr(event, "answer", None)
         is_admin = user.id in get_settings().admin_id_set
-
-        # Debug mode: only admins can use the bot; everyone else gets a soft notice.
         mode = await self._db.get_config("mode", modes.DEFAULT)
-        if mode == modes.DEBUG and not is_admin:
-            answer = getattr(event, "answer", None)
+
+        # Admins always pass (and are auto-whitelisted), bypassing mode/ban gates.
+        if is_admin:
+            await self._db.allow(user.id, getattr(user, "username", None))
+            return await handler(event, data)
+
+        # Debug: only admins; everyone else gets a soft notice.
+        if mode == modes.DEBUG:
             if answer is not None:
                 await answer(
                     "🛠 Бот сейчас в разработке — скоро мы всё покажем! Загляни чуть позже."
                 )
             return None
 
-        if is_admin:
-            await self._db.allow(user.id, getattr(user, "username", None))
-        elif not await self._db.is_allowed(user.id):
-            answer = getattr(event, "answer", None)
+        # Temporary ban (auto-moderation) applies in any non-debug mode.
+        until = await self._db.banned_until(user.id)
+        if until is not None:
             if answer is not None:
-                await answer(DENIAL)
+                await answer(
+                    "🚫 Вы временно заблокированы за нарушение правил (/rules) до "
+                    f"{until.astimezone():%d.%m %H:%M}."
+                )
             return None
 
-        # Temporary ban from auto-moderation (admins are exempt).
-        if not is_admin:
-            until = await self._db.banned_until(user.id)
-            if until is not None:
-                answer = getattr(event, "answer", None)
-                if answer is not None:
-                    local = until.astimezone()
-                    await answer(
-                        "🚫 Вы временно заблокированы за нарушение правил (/rules) до "
-                        f"{local:%d.%m %H:%M}."
-                    )
-                return None
-
+        # Alpha (the only other implemented mode): everyone passes the middleware;
+        # pack creation is gated to approved participants in the handlers.
         return await handler(event, data)

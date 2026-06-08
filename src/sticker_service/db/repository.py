@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import aiosqlite
 
 from sticker_service.db.models import (
+    Application,
     Character,
     Order,
     Pack,
@@ -22,6 +23,8 @@ from sticker_service.db.models import (
     SubjectType,
     WhitelistEntry,
 )
+
+DEFAULT_GENERATIONS = 3
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -89,6 +92,17 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS config (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS applications (
+    user_id    INTEGER PRIMARY KEY,
+    username   TEXT,
+    source     TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE TABLE IF NOT EXISTS quotas (
+    user_id   INTEGER PRIMARY KEY,
+    remaining INTEGER NOT NULL
 );
 """
 
@@ -446,6 +460,67 @@ class Database:
             (key, value),
         )
         await self._conn.commit()
+
+    # --- applications (§alpha) -----------------------------------------------
+
+    async def add_application(self, user_id: int, username: str | None, source: str) -> None:
+        """Create or reset an application to 'pending'."""
+        await self._conn.execute(
+            "INSERT INTO applications (user_id, username, source, created_at, status) "
+            "VALUES (?, ?, ?, ?, 'pending') "
+            "ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, "
+            "source = excluded.source, created_at = excluded.created_at, status = 'pending'",
+            (user_id, username, source, _now().isoformat()),
+        )
+        await self._conn.commit()
+
+    async def get_application(self, user_id: int) -> Application | None:
+        async with self._conn.execute(
+            "SELECT * FROM applications WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return Application(**dict(row)) if row else None
+
+    async def list_applications(self, status: str) -> list[Application]:
+        async with self._conn.execute(
+            "SELECT * FROM applications WHERE status = ? ORDER BY created_at", (status,)
+        ) as cur:
+            rows = await cur.fetchall()
+        return [Application(**dict(r)) for r in rows]
+
+    async def set_application_status(self, user_id: int, status: str) -> None:
+        await self._conn.execute(
+            "UPDATE applications SET status = ? WHERE user_id = ?", (status, user_id)
+        )
+        await self._conn.commit()
+
+    # --- generation quotas (§alpha) ------------------------------------------
+
+    async def generations_left(self, user_id: int) -> int:
+        async with self._conn.execute(
+            "SELECT remaining FROM quotas WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["remaining"]) if row else DEFAULT_GENERATIONS
+
+    async def set_generations(self, user_id: int, remaining: int) -> None:
+        remaining = max(0, remaining)
+        await self._conn.execute(
+            "INSERT INTO quotas (user_id, remaining) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET remaining = excluded.remaining",
+            (user_id, remaining),
+        )
+        await self._conn.commit()
+
+    async def add_generations(self, user_id: int, delta: int) -> int:
+        """Add (or subtract) from the user's remaining generations; returns new value."""
+        new_value = max(0, await self.generations_left(user_id) + delta)
+        await self.set_generations(user_id, new_value)
+        return new_value
+
+    async def consume_generation(self, user_id: int) -> int:
+        """Decrement remaining by 1 if > 0; returns the new remaining."""
+        return await self.add_generations(user_id, -1)
 
     # --- analytics events ----------------------------------------------------
 

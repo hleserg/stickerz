@@ -1,12 +1,12 @@
 """Conversational pack-building flow (§3.1): new/existing character, extend.
 
-This is the aiogram I/O shell that drives the user through consent → photo →
-params → style → canonical → confirm → published pack, and the "add to pack"
-branch. Business logic lives in the tested service layer (orchestrator, engine,
+This is the aiogram I/O shell that drives the user through photo → params →
+style → canonical → confirm → published pack, and the "add to pack" branch.
+Business logic lives in the tested service layer (orchestrator, engine,
 postprocess); this module wires Telegram interaction to it.
 
 Invariants enforced here and covered by tests:
-- consent (fact + timestamp) is recorded BEFORE a photo is accepted (§15.2);
+- consent (fact + timestamp) is recorded implicitly when /new starts (§15.2);
 - age is asked ONLY for children, never for adults (§B.4 / {age_clause}).
 """
 
@@ -26,9 +26,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.observability import tag_component
-from sticker_service.services import analytics, photo_check
+from sticker_service.services import analytics, budget, modes, photo_check
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import Orchestrator
@@ -81,7 +82,6 @@ async def _typing(message: Message) -> AsyncIterator[None]:
 class NewPack(StatesGroup):
     """FSM states for building a brand-new pack with a new character."""
 
-    consent = State()
     photo = State()
     name = State()
     subject = State()
@@ -95,12 +95,6 @@ class NewPack(StatesGroup):
 
 
 # --- keyboards (pure) --------------------------------------------------------
-
-
-def consent_kb() -> Any:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Подтверждаю", callback_data="consent:yes")
-    return kb.as_markup()
 
 
 def subject_kb() -> Any:
@@ -181,29 +175,56 @@ def review_kb(total: int) -> Any:
 # --- handlers ----------------------------------------------------------------
 
 
-async def cmd_new(message: Message, state: FSMContext) -> None:
-    """Start a new pack: ask for photo-rights consent first (§15.2)."""
+def _is_admin(user_id: int) -> bool:
+    return user_id in get_settings().admin_id_set
+
+
+async def _alpha_gate(db: Database, user_id: int) -> str | None:  # pragma: no cover
+    """In alpha, non-approved users must apply first."""
+    if _is_admin(user_id) or await modes.get_mode(db) != modes.ALPHA:
+        return None
+    if not await db.is_allowed(user_id):
+        return "🔒 Бот в альфа-тесте. Оставьте заявку через /start — мы пригласим вас."
+    return None
+
+
+async def _generation_gate(db: Database, user_id: int) -> str | None:  # pragma: no cover
+    """Budget + per-user generation limits for approved alpha participants."""
+    if _is_admin(user_id) or await modes.get_mode(db) != modes.ALPHA:
+        return None
+    if not await budget.enough_for(db, 2):
+        return (
+            "⛔ Тестирование временно приостановлено из-за исчерпания бюджета. "
+            "Скоро либо пополним бюджет, либо перейдём в бета-стадию — ждите уведомлений."
+        )
+    if await db.generations_left(user_id) <= 0:
+        return (
+            "К сожалению, генерации для тестирования закончились. "
+            "Огромное спасибо за участие в альфе проекта! 🙏"
+        )
+    return None
+
+
+async def cmd_new(message: Message, state: FSMContext, db: Database) -> None:
+    """Start a new pack: record implicit photo-rights consent, then ask for a photo.
+
+    Sending a photo to the bot is itself the consent act (§15.2): we record the
+    fact + timestamp here instead of nagging with a separate confirmation step.
+    """
     tag_component("handlers.flow")
+    uid = message.from_user.id if message.from_user else 0
+    if (hint := await _alpha_gate(db, uid)) is not None:
+        await message.answer(hint)
+        return
     await state.clear()
-    await state.set_state(NewPack.consent)
-    await message.answer(
-        "Создаём новый пак. Подтверди: у тебя есть право на это фото и согласие "
-        "изображённого человека.\n\n"
-        "🐞 Заметишь любой косяк — пожалуйста, напиши /report с подробностями "
-        "(что делал, что не так): это очень помогает улучшать бота.",
-        reply_markup=consent_kb(),
-    )
-
-
-async def on_consent(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
-    """Record consent (fact + timestamp) and only then ask for the photo."""
-    tag_component("handlers.flow")
-    if callback.from_user is not None:
-        await db.record_consent(callback.from_user.id)
+    if uid:
+        await db.record_consent(uid)
     await state.set_state(NewPack.photo)
-    if isinstance(callback.message, Message):
-        await callback.message.answer("Пришли фото человека.")
-    await callback.answer()
+    await message.answer(
+        "Создаём новый пак. Пришли фото человека.\n\n"
+        "🐞 Заметишь любой косяк — пожалуйста, напиши /report с подробностями "
+        "(что делал, что не так): это очень помогает улучшать бота."
+    )
 
 
 _PHOTO_HINTS = {
@@ -471,6 +492,9 @@ async def on_rev_create(  # pragma: no cover
     if not captions:
         await msg.answer("Выберите хотя бы один стикер.")
         return
+    if (hint := await _generation_gate(db, user_id)) is not None:
+        await msg.answer(hint)
+        return
 
     std_names = [STANDARD_BLOCK[i] for i in sorted(set(data.get("std_sel", [])))]
     await analytics.log(
@@ -551,6 +575,14 @@ async def on_rev_create(  # pragma: no cover
     with contextlib.suppress(Exception):
         await status.delete()
     await _present_for_publish(msg, state, stickers, mode=mode, title=title, pack_id=pack_id)
+
+    # Alpha: one generation consumed per delivered review; alert admins on low budget.
+    if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
+        await db.consume_generation(user_id)
+    for alert in await budget.pending_alerts(db):
+        for admin_id in get_settings().admin_id_list:
+            with contextlib.suppress(Exception):
+                await msg.bot.send_message(admin_id, alert)  # type: ignore[union-attr]
 
 
 async def _present_for_publish(  # pragma: no cover
@@ -651,6 +683,9 @@ async def cmd_mychars(message: Message, db: Database) -> None:
     """List saved characters; selecting one starts a new pack about them (§3.2)."""
     tag_component("handlers.flow")
     user_id = message.from_user.id if message.from_user else 0
+    if (hint := await _alpha_gate(db, user_id)) is not None:
+        await message.answer(hint)
+        return
     characters = await db.list_characters(user_id)
     if not characters:
         await message.answer("Пока нет сохранённых персонажей. Создай пак: /new")
@@ -676,6 +711,9 @@ async def cmd_addto(message: Message, db: Database) -> None:
     """List the user's PUBLISHED packs; selecting one appends to that same set (§3.2)."""
     tag_component("handlers.flow")
     user_id = message.from_user.id if message.from_user else 0
+    if (hint := await _alpha_gate(db, user_id)) is not None:
+        await message.answer(hint)
+        return
     packs = [p for p in await db.list_packs(user_id) if p.published]
     if not packs:
         await message.answer("Пока нет опубликованных паков для дополнения. Создай пак: /new")
@@ -694,6 +732,9 @@ async def cmd_mypacks(message: Message, db: Database) -> None:
     """List saved packs: published → open/download, drafts → publish/download."""
     tag_component("handlers.flow")
     user_id = message.from_user.id if message.from_user else 0
+    if (hint := await _alpha_gate(db, user_id)) is not None:
+        await message.answer(hint)
+        return
     packs = await db.list_packs(user_id)
     if not packs:
         await message.answer("Пока нет сохранённых паков. Создай: /new")
@@ -811,7 +852,6 @@ def build_router() -> Router:
     router.message.register(cmd_mychars, Command("mychars"))
     router.message.register(cmd_mypacks, Command("mypacks"))
     router.message.register(cmd_addto, Command("addto"))
-    router.callback_query.register(on_consent, F.data == "consent:yes")
     router.message.register(on_photo, NewPack.photo)
     router.message.register(on_name, NewPack.name)
     router.callback_query.register(on_subject, F.data.startswith("subject:"))

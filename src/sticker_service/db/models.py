@@ -81,3 +81,13 @@ class WhitelistEntry(BaseModel):
     user_id: int
     username: str | None
     added_at: datetime
+
+
+class Application(BaseModel):
+    """A test-participation application (§alpha)."""
+
+    user_id: int
+    username: str | None
+    source: str  # where the user heard about the bot
+    created_at: datetime
+    status: str  # pending | rejected | approved

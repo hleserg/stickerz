@@ -108,6 +108,7 @@ omit = [
     "src/sticker_service/handlers/admin.py",
     "src/sticker_service/handlers/report.py",
     "src/sticker_service/handlers/errors.py",
+    "src/sticker_service/handlers/apply.py",
 ]
 
 [tool.coverage.report]

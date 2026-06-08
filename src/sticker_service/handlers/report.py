@@ -14,6 +14,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sticker_service.config import get_settings
 from sticker_service.db import Database
@@ -51,8 +52,13 @@ async def on_report_text(message: Message, state: FSMContext, db: Database, bot:
             f"Режим: {modes.DISPLAY.get(mode, mode)}\n\n"
             f"{text}"
         )
+        kb = InlineKeyboardBuilder()
+        kb.button(
+            text="✅ Баг подтверждён (+генерации)",
+            callback_data=f"bug:{message.from_user.id}",
+        )
         with contextlib.suppress(Exception):
-            await bot.send_message(admin, report, parse_mode="HTML")
+            await bot.send_message(admin, report, parse_mode="HTML", reply_markup=kb.as_markup())
     await message.answer("Спасибо! Отчёт отправлен команде. 🙌")
 
 

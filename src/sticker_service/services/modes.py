@@ -19,7 +19,7 @@ BETA = "beta"
 PROD = "prod"
 
 MODES: tuple[str, ...] = (DEBUG, ALPHA, BETA, PROD)
-IMPLEMENTED: frozenset[str] = frozenset({DEBUG, PROD})
+IMPLEMENTED: frozenset[str] = frozenset({DEBUG, ALPHA})
 DISPLAY: dict[str, str] = {
     DEBUG: "Отладка",
     ALPHA: "Альфа-тест",

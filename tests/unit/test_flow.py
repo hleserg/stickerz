@@ -1,4 +1,4 @@
-"""Tests for the FSM flow's invariant transitions (consent-first, age-if-child).
+"""Tests for the FSM flow's invariant transitions (implicit consent, age-if-child).
 
 flow.py is the aiogram I/O shell (excluded from coverage like bot.py/cli.py),
 but the invariant-bearing transitions are verified here.
@@ -25,7 +25,6 @@ from sticker_service.handlers.flow import (
     cmd_mypacks,
     cmd_new,
     on_age,
-    on_consent,
     on_name,
     on_subject,
 )
@@ -50,23 +49,14 @@ def loader() -> StyleLoader:
     return StyleLoader(get_settings().styles_dir)
 
 
-async def test_cmd_new_asks_consent_first() -> None:
+async def test_cmd_new_records_consent_and_asks_photo(db: Database) -> None:
     state = _state()
     message = AsyncMock()
-    await cmd_new(message, state)
-    assert await state.get_state() == NewPack.consent.state
+    message.from_user = SimpleNamespace(id=55)
+    await cmd_new(message, state, db)
+    assert await db.has_consent(55) is True  # consent recorded implicitly (§15.2)
+    assert await state.get_state() == NewPack.photo.state  # straight to photo
     message.answer.assert_awaited_once()
-
-
-async def test_consent_recorded_before_photo(db: Database) -> None:
-    state = _state()
-    await state.set_state(NewPack.consent)
-    callback = AsyncMock()
-    callback.from_user = SimpleNamespace(id=55)
-    await on_consent(callback, state, db)
-    assert await db.has_consent(55) is True  # consent fact persisted (§15.2)
-    assert await state.get_state() == NewPack.photo.state  # only now ask for photo
-    callback.answer.assert_awaited_once()
 
 
 async def test_name_advances_to_subject(db: Database) -> None:

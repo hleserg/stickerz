@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sticker_service.db.models import (
+    Application,
     Character,
     Order,
     Pack,
@@ -10,9 +11,11 @@ from sticker_service.db.models import (
     SubjectType,
     WhitelistEntry,
 )
-from sticker_service.db.repository import Database, open_database
+from sticker_service.db.repository import DEFAULT_GENERATIONS, Database, open_database
 
 __all__ = [
+    "DEFAULT_GENERATIONS",
+    "Application",
     "Character",
     "Database",
     "Order",

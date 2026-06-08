@@ -9,10 +9,12 @@ from __future__ import annotations
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.observability import tag_component
-from sticker_service.services import analytics
+from sticker_service.services import analytics, modes
 
 WELCOME = (
     "Привет! Я делаю персональные стикерпаки из фото: твой человек "
@@ -42,10 +44,33 @@ RULES = (
 
 
 async def cmd_start(message: Message, db: Database) -> None:
-    """Greet the user and outline what the bot does."""
+    """Greet the user; in alpha, gate behind an application."""
     tag_component("handlers.start")
-    if message.from_user is not None:
-        await analytics.track_start(db, message.from_user.id)
+    user = message.from_user
+    if user is None:
+        await message.answer(WELCOME, parse_mode="HTML")
+        return
+    await analytics.track_start(db, user.id)
+
+    mode = await modes.get_mode(db)
+    is_admin = user.id in get_settings().admin_id_set
+    approved = await db.is_allowed(user.id)
+    if mode == modes.ALPHA and not is_admin and not approved:
+        app = await db.get_application(user.id)
+        if app is not None and app.status == "pending":
+            await message.answer("⏳ Ваша заявка на участие в тесте на рассмотрении. Спасибо!")
+            return
+        if app is not None and app.status == "rejected":
+            await message.answer("К сожалению, заявка на участие отклонена. Спасибо за интерес!")
+            return
+        kb = InlineKeyboardBuilder()
+        kb.button(text="📝 Оставить заявку", callback_data="apply:new")
+        await message.answer(
+            "🤖 Бот сейчас в закрытом альфа-тестировании. Оставьте заявку на участие — "
+            "и мы пригласим вас, как только появится место.",
+            reply_markup=kb.as_markup(),
+        )
+        return
     await message.answer(WELCOME, parse_mode="HTML")
 
 
