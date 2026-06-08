@@ -275,3 +275,11 @@ def test_review_text_numbers_captions_and_handles_empty() -> None:
     listing = _review_text(["Привет", "Пока"])
     assert "1. Привет" in listing and "2. Пока" in listing
     assert "ничего не выбрано" in _review_text([])
+
+
+def test_review_text_shows_limit_notice_only_when_full() -> None:
+    from sticker_service.services.stickers.sets import MAX_CAPTIONS
+
+    full = [f"c{i}" for i in range(MAX_CAPTIONS)]
+    assert "максимум" in _review_text(full)  # at the cap → explain the 15-per-pass limit
+    assert "максимум" not in _review_text(full[:-1])  # one below → no notice

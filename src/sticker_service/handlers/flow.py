@@ -236,11 +236,17 @@ def review_kb(total: int) -> Any:
 
 
 def _review_text(captions: list[str]) -> str:
-    """Numbered caption list for the review screen."""
+    """Numbered caption list for the review screen (+ limit notice when full)."""
     if not captions:
         return "Пока ничего не выбрано. Добавьте хотя бы один стикер."
     listing = "\n".join(f"{i}. {c}" for i, c in enumerate(captions, start=1))
-    return f"Стикеры ({len(captions)}):\n{listing}"
+    text = f"Стикеры ({len(captions)}):\n{listing}"
+    if len(captions) >= MAX_CAPTIONS:
+        text += (
+            f"\n\n⚠️ Это максимум — {MAX_CAPTIONS} стикеров за один проход (один лист). "
+            "Больше за раз не добавить; уберите лишний, чтобы освободить место."
+        )
+    return text
 
 
 # --- screen rendering + back navigation (pure) -------------------------------
