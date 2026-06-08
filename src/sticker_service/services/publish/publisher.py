@@ -46,6 +46,10 @@ class Publisher:
         self._bot = bot
         self._bot_username = bot_username
 
+    @property
+    def bot_username(self) -> str:
+        return self._bot_username
+
     async def create_pack(
         self,
         *,

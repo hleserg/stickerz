@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS packs (
     owner_id     INTEGER NOT NULL,
     set_name     TEXT NOT NULL UNIQUE,
     title        TEXT NOT NULL,
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    published    INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS stickers (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,7 +105,19 @@ class Database:
 
     async def _init_schema(self) -> None:
         await self._conn.executescript(_SCHEMA)
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        """Lightweight migrations for already-created databases."""
+        async with self._conn.execute("PRAGMA table_info(packs)") as cur:
+            columns = {row["name"] for row in await cur.fetchall()}
+        if "published" not in columns:
+            # Existing packs were all created at publish time → mark them published.
+            await self._conn.execute(
+                "ALTER TABLE packs ADD COLUMN published INTEGER NOT NULL DEFAULT 0"
+            )
+            await self._conn.execute("UPDATE packs SET published = 1")
 
     async def close(self) -> None:
         await self._conn.close()
@@ -197,14 +210,20 @@ class Database:
     # --- packs ---------------------------------------------------------------
 
     async def add_pack(
-        self, *, character_id: int, owner_id: int, set_name: str, title: str
+        self,
+        *,
+        character_id: int,
+        owner_id: int,
+        set_name: str,
+        title: str,
+        published: bool = False,
     ) -> Pack:
-        """Create a pack bound to a character (one character → many packs)."""
+        """Create a pack (draft by default) bound to a character (§3.2)."""
         created = _now()
         cur = await self._conn.execute(
-            "INSERT INTO packs (character_id, owner_id, set_name, title, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (character_id, owner_id, set_name, title, created.isoformat()),
+            "INSERT INTO packs (character_id, owner_id, set_name, title, created_at, published) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (character_id, owner_id, set_name, title, created.isoformat(), int(published)),
         )
         await self._conn.commit()
         return Pack(
@@ -214,7 +233,22 @@ class Database:
             set_name=set_name,
             title=title,
             created_at=created,
+            published=published,
         )
+
+    async def update_pack(
+        self, pack_id: int, *, set_name: str | None = None, published: bool | None = None
+    ) -> None:
+        """Update a pack's set_name and/or published flag (e.g. on publishing a draft)."""
+        if set_name is not None:
+            await self._conn.execute(
+                "UPDATE packs SET set_name = ? WHERE id = ?", (set_name, pack_id)
+            )
+        if published is not None:
+            await self._conn.execute(
+                "UPDATE packs SET published = ? WHERE id = ?", (int(published), pack_id)
+            )
+        await self._conn.commit()
 
     async def get_pack(self, pack_id: int) -> Pack | None:
         async with self._conn.execute("SELECT * FROM packs WHERE id = ?", (pack_id,)) as cur:

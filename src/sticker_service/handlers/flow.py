@@ -509,6 +509,12 @@ async def on_rev_create(  # pragma: no cover
             stickers = await orchestrator.build_stickers(
                 character, captions=captions, on_stage=on_stage
             )
+            if mode != "extend":
+                # Save as a draft so it survives and can be published/downloaded later.
+                draft = await orchestrator.save_draft(
+                    owner_id=user_id, character=character, title=title, stickers=stickers
+                )
+                pack_id = draft.id
     except Exception as exc:
         logger.exception("generation failed")
         await status.edit_text(_friendly_error(exc))
@@ -516,9 +522,7 @@ async def on_rev_create(  # pragma: no cover
 
     with contextlib.suppress(Exception):
         await status.delete()
-    await _present_for_publish(
-        msg, state, stickers, mode=mode, character_id=character.id, title=title, pack_id=pack_id
-    )
+    await _present_for_publish(msg, state, stickers, mode=mode, title=title, pack_id=pack_id)
 
 
 async def _present_for_publish(  # pragma: no cover
@@ -527,14 +531,11 @@ async def _present_for_publish(  # pragma: no cover
     stickers: list[StickerInput],
     *,
     mode: str,
-    character_id: int,
     title: str,
     pack_id: int | None = None,
 ) -> None:
     """Send the transparent preview sheet(s) and offer publish/download."""
-    await state.update_data(
-        stickers=stickers, mode=mode, character_id=character_id, pack_id=pack_id, pub_title=title
-    )
+    await state.update_data(stickers=stickers, mode=mode, pack_id=pack_id, pub_title=title)
     await state.set_state(NewPack.publish)
     for i, sheet in enumerate(compose_preview([img for img, _ in stickers]), start=1):
         await msg.answer_document(BufferedInputFile(sheet, filename=f"preview_{i}.png"))
@@ -564,22 +565,16 @@ async def on_publish_yes(  # pragma: no cover
     status = await msg.answer("📦 Публикую пак в Telegram…")
     try:
         async with _typing(msg):
+            pack = await db.get_pack(int(data["pack_id"])) if data.get("pack_id") else None
+            if pack is None:
+                raise RuntimeError("pack not found")
             if data.get("mode") == "extend":
-                pack = await db.get_pack(int(data["pack_id"]))
-                if pack is None:
-                    raise RuntimeError("pack not found")
                 result = await orchestrator.publish_extend(
                     owner_id=user_id, pack=pack, stickers=stickers
                 )
             else:
-                character = await db.get_character(int(data["character_id"]))
-                if character is None:
-                    raise RuntimeError("character not found")
-                result = await orchestrator.publish_new(
-                    owner_id=user_id,
-                    character=character,
-                    stickers=stickers,
-                    title=data.get("pub_title"),
+                result = await orchestrator.publish_draft(
+                    owner_id=user_id, pack=pack, stickers=stickers
                 )
     except Exception as exc:
         logger.exception("publish failed")
@@ -644,12 +639,12 @@ async def on_pick_char(callback: CallbackQuery, state: FSMContext) -> None:  # p
 
 
 async def cmd_addto(message: Message, db: Database) -> None:
-    """List the user's packs; selecting one adds stickers to that same set (§3.2)."""
+    """List the user's PUBLISHED packs; selecting one appends to that same set (§3.2)."""
     tag_component("handlers.flow")
     user_id = message.from_user.id if message.from_user else 0
-    packs = await db.list_packs(user_id)
+    packs = [p for p in await db.list_packs(user_id) if p.published]
     if not packs:
-        await message.answer("Пока нет паков для дополнения. Создай пак: /new")
+        await message.answer("Пока нет опубликованных паков для дополнения. Создай пак: /new")
         return
     kb = InlineKeyboardBuilder()
     for pack in packs:
@@ -659,6 +654,100 @@ async def cmd_addto(message: Message, db: Database) -> None:
         "Дополнить пак (тем же персонажем — новое фото нельзя, иначе пак станет разнородным):",
         reply_markup=kb.as_markup(),
     )
+
+
+async def cmd_mypacks(message: Message, db: Database) -> None:
+    """List saved packs: published → open/download, drafts → publish/download."""
+    tag_component("handlers.flow")
+    user_id = message.from_user.id if message.from_user else 0
+    packs = await db.list_packs(user_id)
+    if not packs:
+        await message.answer("Пока нет сохранённых паков. Создай: /new")
+        return
+    kb = InlineKeyboardBuilder()
+    for pack in packs:
+        mark = "✅" if pack.published else "📝"
+        kb.button(text=f"{mark} {pack.title}", callback_data=f"pk:{pack.id}")
+    kb.adjust(1)
+    await message.answer("Ваши паки:", reply_markup=kb.as_markup())
+
+
+async def on_pick_saved_pack(  # pragma: no cover
+    callback: CallbackQuery, db: Database
+) -> None:
+    """Show actions for a saved pack: open/download (published) or publish/download (draft)."""
+    tag_component("handlers.flow")
+    pack_id = int((callback.data or "pk:0").split(":", 1)[-1])
+    pack = await db.get_pack(pack_id)
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    if pack is None:
+        await msg.answer("Пак не найден")
+        return
+    kb = InlineKeyboardBuilder()
+    if pack.published:
+        kb.button(text="🔗 Открыть", url=pack.link)
+    else:
+        kb.button(text="✅ Опубликовать", callback_data=f"pkpub:{pack.id}")
+    kb.button(text="⬇️ Скачать (zip)", callback_data=f"pkdl:{pack.id}")
+    kb.adjust(1)
+    status = "опубликован" if pack.published else "черновик"
+    await msg.answer(f"«{pack.title}» — {status}.", reply_markup=kb.as_markup())
+
+
+async def on_saved_download(  # pragma: no cover
+    callback: CallbackQuery, db: Database, orchestrator: Orchestrator
+) -> None:
+    """Download a saved pack's stickers as a ZIP (any number of times)."""
+    tag_component("handlers.flow")
+    pack_id = int((callback.data or "pkdl:0").split(":", 1)[-1])
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    stickers = await orchestrator.load_pack_stickers(pack_id)
+    if not stickers:
+        await msg.answer("У этого пака нет сохранённых стикеров.")
+        return
+    archive = bundle_zip([img for img, _ in stickers])
+    await msg.answer_document(
+        BufferedInputFile(archive, filename="stickers.zip"),
+        caption="Готовые стикеры (PNG, 512px, прозрачный фон).",
+    )
+
+
+async def on_saved_publish(  # pragma: no cover
+    callback: CallbackQuery, db: Database, orchestrator: Orchestrator
+) -> None:
+    """Publish a saved draft pack (only if not already published)."""
+    tag_component("handlers.flow")
+    pack_id = int((callback.data or "pkpub:0").split(":", 1)[-1])
+    user_id = callback.from_user.id if callback.from_user else 0
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    pack = await db.get_pack(pack_id)
+    if pack is None:
+        await msg.answer("Пак не найден")
+        return
+    if pack.published:
+        await msg.answer(f"Уже опубликован: {pack.link}")
+        return
+    stickers = await orchestrator.load_pack_stickers(pack_id)
+    status = await msg.answer("📦 Публикую пак в Telegram…")
+    try:
+        async with _typing(msg):
+            result = await orchestrator.publish_draft(
+                owner_id=user_id, pack=pack, stickers=stickers
+            )
+    except Exception as exc:
+        logger.exception("publish failed")
+        await status.edit_text(_friendly_error(exc))
+        return
+    await status.edit_text(f"✅ Готово! Пак: {result.link}")
 
 
 async def on_pick_pack(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
@@ -676,6 +765,7 @@ def build_router() -> Router:
     router = Router(name="flow")
     router.message.register(cmd_new, Command("new"))
     router.message.register(cmd_mychars, Command("mychars"))
+    router.message.register(cmd_mypacks, Command("mypacks"))
     router.message.register(cmd_addto, Command("addto"))
     router.callback_query.register(on_consent, F.data == "consent:yes")
     router.message.register(on_photo, NewPack.photo)
@@ -698,4 +788,7 @@ def build_router() -> Router:
     router.callback_query.register(on_publish_no, F.data == "pub:no")
     router.callback_query.register(on_pick_char, F.data.startswith("char:"))
     router.callback_query.register(on_pick_pack, F.data.startswith("extend:"))
+    router.callback_query.register(on_pick_saved_pack, F.data.startswith("pk:"))
+    router.callback_query.register(on_saved_publish, F.data.startswith("pkpub:"))
+    router.callback_query.register(on_saved_download, F.data.startswith("pkdl:"))
     return router

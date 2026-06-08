@@ -22,6 +22,7 @@ from sticker_service.handlers.flow import (
     NewPack,
     cmd_addto,
     cmd_mychars,
+    cmd_mypacks,
     cmd_new,
     on_age,
     on_consent,
@@ -136,6 +137,27 @@ async def test_mychars_lists_saved(db: Database) -> None:
     assert message.answer.await_args.kwargs.get("reply_markup") is not None
 
 
+async def test_mypacks_empty_prompts_new(db: Database) -> None:
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=1)
+    await cmd_mypacks(message, db)
+    assert "/new" in message.answer.await_args.args[0]
+
+
+async def test_mypacks_lists_packs(db: Database) -> None:
+    char = await db.add_character(
+        owner_id=1, name="A", style_id="watercolor", subject_type="adult", canonical_path="/x"
+    )
+    await db.add_pack(character_id=char.id, owner_id=1, set_name="d_by_bot", title="Черновик")
+    await db.add_pack(
+        character_id=char.id, owner_id=1, set_name="p_by_bot", title="Опубл", published=True
+    )
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=1)
+    await cmd_mypacks(message, db)
+    assert message.answer.await_args.kwargs.get("reply_markup") is not None
+
+
 async def test_addto_empty_prompts_new(db: Database) -> None:
     message = AsyncMock()
     message.from_user = SimpleNamespace(id=1)
@@ -147,7 +169,9 @@ async def test_addto_lists_packs(db: Database) -> None:
     char = await db.add_character(
         owner_id=1, name="A", style_id="watercolor", subject_type="adult", canonical_path="/x"
     )
-    await db.add_pack(character_id=char.id, owner_id=1, set_name="s_by_bot", title="Мой пак")
+    await db.add_pack(
+        character_id=char.id, owner_id=1, set_name="s_by_bot", title="Мой пак", published=True
+    )
     message = AsyncMock()
     message.from_user = SimpleNamespace(id=1)
     await cmd_addto(message, db)

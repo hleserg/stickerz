@@ -23,6 +23,7 @@ from sticker_service.services.canonical.schema import Style
 from sticker_service.services.models.base import ImageModel
 from sticker_service.services.postprocess import grid_for, process_sheet
 from sticker_service.services.publish import Publisher
+from sticker_service.services.publish.naming import build_set_name
 from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers import (
     MAX_CAPTIONS,
@@ -145,11 +146,53 @@ class Orchestrator:
             user_id=owner_id, title=title, stickers=list(stickers)
         )
         pack = await self._db.add_pack(
-            character_id=character.id, owner_id=owner_id, set_name=set_name, title=title
+            character_id=character.id,
+            owner_id=owner_id,
+            set_name=set_name,
+            title=title,
+            published=True,
         )
         await self._persist_pairs(pack, stickers, start=0)
         logger.info("publish: done set=%s stickers=%d", set_name, len(stickers))
         return PackResult(set_name, self._publisher.link(set_name), len(stickers))
+
+    async def save_draft(
+        self,
+        *,
+        owner_id: int,
+        character: Character,
+        title: str,
+        stickers: list[StickerInput],
+    ) -> Pack:
+        """Persist generated stickers as an UNPUBLISHED pack for later publish/download."""
+        # Hidden machine name reserved now; replaced with the real one on publish.
+        placeholder = build_set_name(title, self._publisher.bot_username)
+        pack = await self._db.add_pack(
+            character_id=character.id,
+            owner_id=owner_id,
+            set_name=placeholder,
+            title=title,
+            published=False,
+        )
+        await self._persist_pairs(pack, stickers, start=0)
+        logger.info("draft saved: pack=%s stickers=%d", pack.id, len(stickers))
+        return pack
+
+    async def publish_draft(
+        self, *, owner_id: int, pack: Pack, stickers: list[StickerInput]
+    ) -> PackResult:
+        """Publish a previously-saved draft pack to Telegram and mark it published."""
+        set_name = await self._publisher.create_pack(
+            user_id=owner_id, title=pack.title, stickers=list(stickers)
+        )
+        await self._db.update_pack(pack.id, set_name=set_name, published=True)
+        logger.info("publish draft: pack=%s set=%s", pack.id, set_name)
+        return PackResult(set_name, self._publisher.link(set_name), len(stickers))
+
+    async def load_pack_stickers(self, pack_id: int) -> list[StickerInput]:
+        """Read a pack's persisted sticker files + emoji from disk."""
+        rows = await self._db.list_stickers(pack_id)
+        return [(Path(s.file_path).read_bytes(), s.emoji) for s in rows]
 
     async def publish_extend(
         self, *, owner_id: int, pack: Pack, stickers: list[StickerInput]

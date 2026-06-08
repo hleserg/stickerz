@@ -247,6 +247,36 @@ async def test_publish_extend_split(db: Database, loader: StyleLoader, tmp_path:
     assert await db.count_stickers(pack.id) == 2 * EXPECTED
 
 
+async def test_draft_lifecycle(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
+    bot = _FakeBot()
+    orch = _orchestrator(db, loader, bot, tmp_path)
+    char = await orch.save_character(
+        owner_id=3,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(EXPECTED),
+    )
+    stickers = await orch.build_stickers(char)
+    # Save as a draft — persisted but not published.
+    pack = await orch.save_draft(owner_id=3, character=char, title="A", stickers=stickers)
+    assert pack.published is False
+    assert bot.created == []
+    assert await db.count_stickers(pack.id) == EXPECTED
+
+    # Re-load stickers from disk (e.g. next session).
+    loaded = await orch.load_pack_stickers(pack.id)
+    assert len(loaded) == EXPECTED
+
+    # Publish the draft → becomes published with a real set name.
+    result = await orch.publish_draft(owner_id=3, pack=pack, stickers=loaded)
+    assert len(bot.created) == 1
+    refreshed = await db.get_pack(pack.id)
+    assert refreshed is not None and refreshed.published is True
+    assert refreshed.set_name == result.set_name
+
+
 async def test_unknown_style_raises(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
     orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
     with pytest.raises(OrchestratorError, match="unknown"):

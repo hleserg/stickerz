@@ -40,7 +40,7 @@ class Character(BaseModel):
 
 
 class Pack(BaseModel):
-    """One published Telegram sticker set, bound to a character."""
+    """A sticker pack bound to a character; may be a draft or published."""
 
     id: int
     character_id: int
@@ -48,6 +48,12 @@ class Pack(BaseModel):
     set_name: str  # machine name, ends with _by_<botusername>
     title: str  # human name (cyrillic/emoji ok)
     created_at: datetime
+    published: bool = False  # whether it's live on Telegram
+
+    @property
+    def link(self) -> str:
+        """Public add link for the set (valid once published)."""
+        return f"https://t.me/addstickers/{self.set_name}"
 
 
 class Sticker(BaseModel):
