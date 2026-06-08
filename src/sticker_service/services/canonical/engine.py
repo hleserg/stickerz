@@ -34,6 +34,14 @@ StepCallback = Callable[[int, int], Awaitable[None]]
 #: Advisory geometry threshold: below this we log an alert (no re-shoot).
 DEFAULT_ALERT_THRESHOLD = 0.25
 
+#: Resolves ``{clean_bg}`` — the pipeline-wide instruction to isolate the
+#: subject on a plain background (no props/furniture/text/scenery). It is a
+#: product-wide constraint, not a per-style choice, so it lives here once
+#: instead of being duplicated across every style's first-step prompt.
+CLEAN_BACKGROUND_CLAUSE = (
+    "Помести человека на простом однотонном фоне — без предметов, мебели, текста и сцены позади."
+)
+
 # Appended on a child-safety refusal to steer past the filter (§6). The empty
 # first element means "try the plain prompt first". Russian — matches the prompts
 # and empirically clears IMAGE_SAFETY on both pro and flash.
@@ -219,4 +227,6 @@ class CanonicalEngine:
     @staticmethod
     def _resolve(prompt: str, age_clause: str) -> str:
         # Only known placeholders are substituted (schema already validated them).
-        return prompt.replace("{age_clause}", age_clause)
+        return prompt.replace("{age_clause}", age_clause).replace(
+            "{clean_bg}", CLEAN_BACKGROUND_CLAUSE
+        )

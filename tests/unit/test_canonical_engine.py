@@ -105,6 +105,18 @@ async def test_child_prompts_carry_age_anchor() -> None:
     assert all("ребёнок" in p and "6" in p for p in model.generate_calls)
 
 
+async def test_clean_bg_placeholder_resolved_to_shared_clause() -> None:
+    # {clean_bg} is the pipeline-wide "plain background" clause shared by every
+    # style's first step; the engine substitutes it from one place, not the YAML.
+    from sticker_service.services.canonical.engine import CLEAN_BACKGROUND_CLAUSE
+
+    model = MockImageModel()
+    style = _style([{"step": 1, "prompt": "draw {clean_bg}", "refs": ["photo"]}])
+    await CanonicalEngine(model).run(style, b"P", subject_type="adult")
+    assert all("{clean_bg}" not in p for p in model.generate_calls)  # placeholder resolved
+    assert any(CLEAN_BACKGROUND_CLAUSE in p for p in model.generate_calls)
+
+
 async def test_low_gate_score_does_not_reshoot() -> None:
     # A low geometry score is advisory now: the frame is kept, no re-shoot, no raise.
     model = MockImageModel(judge_score=0.1)

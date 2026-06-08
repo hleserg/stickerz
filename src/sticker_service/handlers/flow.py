@@ -111,6 +111,16 @@ async def _typing(message: Message) -> AsyncIterator[None]:
             await task
 
 
+def _photo_check_timeout() -> asyncio.Timeout:
+    """Cap the photo vision check so a stalled provider can't freeze the flow."""
+    return asyncio.timeout(get_settings().photo_check_timeout_s)
+
+
+def _generation_timeout() -> asyncio.Timeout:
+    """Cap a long generation run so a hung model surfaces instead of hanging."""
+    return asyncio.timeout(get_settings().generation_timeout_s)
+
+
 class NewPack(StatesGroup):
     """FSM states for building a brand-new pack with a new character."""
 
@@ -450,7 +460,7 @@ async def on_photo(  # pragma: no cover
     photo = file.read() if file else b""
     uid = message.from_user.id if message.from_user else 0
     try:
-        async with asyncio.timeout(get_settings().photo_check_timeout_s):
+        async with _photo_check_timeout():
             code = await orchestrator.validate_photo(photo)
     except Exception as exc:  # vision check failed/stalled — let it through rather than block
         logger.warning("photo check failed: %s", str(exc)[:100])
@@ -801,7 +811,7 @@ async def _generate_and_present(  # pragma: no cover
     with contextlib.suppress(Exception):
         await msg.edit_text("🎨 Рисую персонажа…")
     try:
-        async with _typing(msg), asyncio.timeout(get_settings().generation_timeout_s):
+        async with _typing(msg), _generation_timeout():
             bundle = await orchestrator.build_for_review(
                 mode=mode,
                 owner_id=user_id,
@@ -1158,7 +1168,7 @@ async def on_redraw_photo(  # pragma: no cover
     file = await message.bot.download(message.photo[-1].file_id)  # type: ignore[union-attr]
     photo = file.read() if file else b""
     try:
-        async with asyncio.timeout(get_settings().photo_check_timeout_s):
+        async with _photo_check_timeout():
             code = await orchestrator.validate_photo(photo)
     except Exception as exc:  # vision check failed/stalled — let it through rather than block
         logger.warning("photo check failed: %s", str(exc)[:100])
@@ -1180,7 +1190,7 @@ async def on_redraw_photo(  # pragma: no cover
             await status.edit_text(f"🎨 Перерисовываю… {_progress_bar(done, total)} {done}/{total}")
 
     try:
-        async with _typing(message), asyncio.timeout(get_settings().generation_timeout_s):
+        async with _typing(message), _generation_timeout():
             canonical = await orchestrator.redraw_canonical(char, photo, on_step=on_step)
     except Exception as exc:
         logger.exception("redraw failed")

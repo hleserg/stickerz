@@ -213,20 +213,22 @@ def _clean_satellites(
     if count <= 1:
         return _trim_transparent(image)
     slices = ndimage.find_objects(labeled)
-    areas = [int((labeled == idx).sum()) for idx in range(1, count + 1)]
-    main = int(np.argmax(areas)) + 1
-    main_area = areas[main - 1]
+    # One pass over the label image yields every component's area; index 0 is the
+    # background, so labels line up with ``areas[label]`` (no 1-based bookkeeping).
+    areas = np.bincount(labeled.ravel(), minlength=count + 1)
+    main = int(np.argmax(areas[1:])) + 1
+    main_area = int(areas[main])
     mr, mc = slices[main - 1]
     height, width = arr.shape[:2]
     margin_y, margin_x = margin_frac * height, margin_frac * width
-    keep = labeled == main
-    for idx in range(1, count + 1):
-        if idx == main or slices[idx - 1] is None:
+    kept = [main]
+    for idx, sl in enumerate(slices, start=1):
+        if idx == main or sl is None:
             continue
-        if areas[idx - 1] >= keep_frac * main_area:
-            keep |= labeled == idx
+        if int(areas[idx]) >= keep_frac * main_area:
+            kept.append(idx)
             continue
-        rr, cc = slices[idx - 1]
+        rr, cc = sl
         near = (
             rr.start <= mr.stop + margin_y
             and rr.stop >= mr.start - margin_y
@@ -234,8 +236,9 @@ def _clean_satellites(
             and cc.stop >= mc.start - margin_x
         )
         if near:
-            keep |= labeled == idx
-    arr[..., 3] = np.where(keep, arr[..., 3], 0)
+            kept.append(idx)
+    # Build the keep-mask once instead of OR-ing a full-image mask per component.
+    arr[..., 3] = np.where(np.isin(labeled, kept), arr[..., 3], 0)
     return _trim_transparent(Image.fromarray(arr, mode="RGBA"))
 
 
@@ -302,6 +305,8 @@ def drop_outlier_fragments(
     """
     if len(pieces) < 2:
         return pieces
+    if expected is not None and len(pieces) <= expected:
+        return pieces  # already at/under target — nothing to drop, skip the scan
     areas = [_opaque_area(p) for p in pieces]
     median = sorted(areas)[len(areas) // 2]
     if median == 0:
