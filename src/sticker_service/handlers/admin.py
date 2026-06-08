@@ -7,6 +7,8 @@ resolution happens on first contact (post-MVP convenience).
 
 from __future__ import annotations
 
+import contextlib
+
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -36,8 +38,6 @@ def _is_first_admin(user_id: int) -> bool:
 
 async def _broadcast_admins(bot: Bot, text: str) -> None:
     """Send a message to every admin (e.g. budget alerts)."""
-    import contextlib
-
     for admin_id in get_settings().admin_id_list:
         with contextlib.suppress(Exception):
             await bot.send_message(admin_id, text)
@@ -91,7 +91,9 @@ async def cmd_stats(message: Message, db: Database) -> None:
         ("Скачано", await db.count_events(analytics.DOWNLOADED)),
     ]
     png = charts.render_bar_chart("Воронка Stickerz", items)
-    await message.answer_photo(BufferedInputFile(png, filename="stats.png"))
+    await message.answer_photo(
+        BufferedInputFile(png, filename="stats.png"), caption=await budget.summary_line(db)
+    )
 
 
 async def cmd_bans(message: Message, db: Database) -> None:
@@ -321,8 +323,6 @@ async def on_app_approve(callback: CallbackQuery, db: Database, bot: Bot) -> Non
     await db.allow(user_id)
     await db.set_generations(user_id, DEFAULT_GENERATIONS)
     await callback.answer("Одобрено")
-    import contextlib
-
     with contextlib.suppress(Exception):
         await bot.send_message(
             user_id,
@@ -356,8 +356,6 @@ async def on_bug_confirm(callback: CallbackQuery, db: Database, bot: Bot) -> Non
     user_id = int((callback.data or "bug:0").split(":", 1)[-1])
     left = await db.add_generations(user_id, BUG_BONUS)
     await callback.answer("Засчитано")
-    import contextlib
-
     with contextlib.suppress(Exception):
         await bot.send_message(
             user_id, f"🐞 Спасибо за найденный баг! Начислили +{BUG_BONUS} генерации."

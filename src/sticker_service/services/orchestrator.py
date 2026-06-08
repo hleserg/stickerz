@@ -53,6 +53,17 @@ class PackResult:
     count: int
 
 
+@dataclass(frozen=True)
+class ReviewBundle:
+    """Everything the review/preview step needs after generation, before publish."""
+
+    character: Character
+    stickers: list[StickerInput]
+    title: str
+    pack_id: int | None
+    mode: str
+
+
 class Orchestrator:
     """Coordinates canonical generation, sheet build, slicing, and publishing."""
 
@@ -130,6 +141,75 @@ class Orchestrator:
         """
         stickers, emojis = await self._generate_stickers(character, captions, on_stage)
         return list(zip(stickers, emojis, strict=True))
+
+    async def build_for_review(
+        self,
+        *,
+        mode: str,
+        owner_id: int,
+        captions: list[str],
+        on_step: StepCallback | None = None,
+        on_stage: StageCallback | None = None,
+        photo: bytes | None = None,
+        style_id: str | None = None,
+        subject_type: SubjectType | None = None,
+        child_age: int | None = None,
+        name: str | None = None,
+        character_id: int | None = None,
+        pack_id: int | None = None,
+    ) -> ReviewBundle:
+        """Resolve the character (fresh/reuse/extend), generate stickers, save a draft.
+
+        Centralises the three-mode branching that the conversational flow used to
+        inline, so the generate→draft path is testable end-to-end (e.g. with the
+        mock model). ``extend`` appends to an existing pack and does not save a new
+        draft; ``fresh``/``reuse`` persist an unpublished draft for later publish.
+        """
+        if mode == "extend":
+            if pack_id is None:
+                raise OrchestratorError("extend mode needs a pack_id")
+            pack = await self._db.get_pack(pack_id)
+            if pack is None:
+                raise OrchestratorError("pack not found")
+            character = await self._db.get_character(pack.character_id)
+            title: str = pack.title
+        elif mode == "reuse":
+            if character_id is None:
+                raise OrchestratorError("reuse mode needs a character_id")
+            character = await self._db.get_character(character_id)
+            title = character.name if character else ""
+            pack_id = None
+        else:  # fresh — build the canonical now
+            if photo is None or style_id is None or subject_type is None:
+                raise OrchestratorError("fresh mode needs photo, style_id and subject_type")
+            canonical = await self.build_canonical(
+                photo=photo,
+                style_id=style_id,
+                subject_type=subject_type,
+                child_age=child_age,
+                on_step=on_step,
+            )
+            character = await self.save_character(
+                owner_id=owner_id,
+                name=name or "Мой пак",
+                style_id=style_id,
+                subject_type=subject_type,
+                child_age=child_age,
+                canonical=canonical,
+            )
+            title = character.name
+            pack_id = None
+        if character is None:
+            raise OrchestratorError("character not found")
+        stickers = await self.build_stickers(character, captions=captions, on_stage=on_stage)
+        if mode != "extend":
+            draft = await self.save_draft(
+                owner_id=owner_id, character=character, title=title, stickers=stickers
+            )
+            pack_id = draft.id
+        return ReviewBundle(
+            character=character, stickers=stickers, title=title, pack_id=pack_id, mode=mode
+        )
 
     async def publish_new(
         self,

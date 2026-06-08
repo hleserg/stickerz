@@ -71,6 +71,16 @@ async def test_budget_remaining_and_enough(db: Database) -> None:
     assert await budget.enough_for(db, 5) is False  # 5*0.7=3.5 > 3.0
 
 
+async def test_budget_forecast_and_summary(db: Database) -> None:
+    await budget.set_budget(db, 7)
+    # 7 / 0.7 = 10 generations forecast at the start.
+    assert await budget.forecast_generations(db) == 10
+    await _add_generations_events(db, 8)  # spent 5.6, remaining 1.4 → 2 more
+    assert await budget.forecast_generations(db) == 2
+    line = await budget.summary_line(db)
+    assert "$1.40" in line and "~2 генераций" in line
+
+
 async def test_budget_alerts_fire_once_and_rearm(db: Database) -> None:
     await budget.set_budget(db, 20)
     assert await budget.pending_alerts(db) == []  # remaining 20 > 10

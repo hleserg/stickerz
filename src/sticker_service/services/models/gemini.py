@@ -14,6 +14,7 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
+from sticker_service.services.models import errors as model_errors
 from sticker_service.services.models.base import (
     ImageModel,
     ModelError,
@@ -31,21 +32,6 @@ _IMAGE_FALLBACKS = ("gemini-3.1-flash-image", "gemini-2.5-flash-image")
 VISION_MODEL = "gemini-2.5-flash"
 
 _MAX_GEN_ATTEMPTS = 6
-_RETRYABLE = (
-    "503",
-    "500",
-    "unavailable",
-    "internal",
-    "overload",
-    "high demand",
-    "resource_exhausted",
-    "429",
-)
-
-#: Permanent billing/quota signals inside a 429 — retrying or failing over to
-#: another model can't help, so we fail fast instead of burning the retry budget.
-_BILLING = ("credits are depleted", "prepayment", "billing", "out of credits")
-
 _REFUSAL_REASONS = ("SAFETY", "PROHIBITED", "BLOCK", "RECITATION")
 _FLOAT_RE = re.compile(r"\d+(?:\.\d+)?|\.\d+")
 # Emoji-ish codepoint ranges, mirrors stickers.emoji validation.
@@ -56,18 +42,9 @@ def _mime(data: bytes) -> str:
     return "image/jpeg" if data[:3] == b"\xff\xd8\xff" else "image/png"
 
 
-def _is_billing(exc: Exception) -> bool:
-    """True when the error means the account is out of credits/quota (permanent)."""
-    s = str(exc).lower()
-    return any(token in s for token in _BILLING)
-
-
-def _is_retryable(exc: Exception) -> bool:
-    """True for transient API errors worth retrying (overload / rate limit)."""
-    if _is_billing(exc):  # a depleted-credits 429 won't recover on retry
-        return False
-    s = str(exc).lower()
-    return any(token in s for token in _RETRYABLE)
+# Thin wrappers over the shared taxonomy (single source of retry/billing policy).
+_is_billing = model_errors.is_quota
+_is_retryable = model_errors.is_retryable
 
 
 def image_model_for_attempt(attempt: int) -> str:
