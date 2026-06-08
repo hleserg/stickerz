@@ -4,11 +4,14 @@ Built for the "save my test generations as ``Kate_<style>``" request: it runs th
 canonical pipeline for every installed style against one photo and persists each
 result as a reusable character for the given owner (default: the first admin).
 
-Why a script and not inline: live generation needs the model credentials and a
-real photo, which only exist on the deployment host — never in git. Run it there
-*after* a deploy (and after topping up Gemini billing), e.g.::
+Why a module and not inline: live generation needs the model credentials and a
+real photo, which only exist on the deployment host — never in git. It ships
+inside the image so it runs in the container with the bot's exact env + DB. Run
+it *after* a deploy (and after topping up Gemini billing), e.g.::
 
-    uv run python scripts/seed_kate.py --photo /app/data/kate.jpg
+    docker compose cp kate.jpg bot:/app/data/kate.jpg
+    docker compose exec bot python -m sticker_service.maintenance.seed_kate \
+        --photo /app/data/kate.jpg
 
 Idempotent: a style whose ``<prefix>_<style>`` character already exists for the
 owner is skipped, so re-running after a partial failure only fills the gaps.

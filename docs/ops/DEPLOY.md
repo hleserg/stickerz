@@ -16,8 +16,7 @@ where Telegram is reachable. Docker Compose brings up the bot + Redis.
 
 ```bash
 git clone https://github.com/hleserg/stickerz.git
-cd stickerz
-git checkout claude/ultracode-mode-setup-2VAa4   # until merged to main
+cd stickerz                       # main has everything; no branch checkout needed
 
 cp .env.example .env
 ```
@@ -44,15 +43,34 @@ docker compose logs -f bot        # watch "Starting long-polling as @<bot>"
 
 1. Open `https://t.me/<your_bot_username>` and send `/start`.
 2. As admin you're auto-whitelisted; allow others with `/allow <user_id>`.
-3. Send `/new` → confirm consent → photo → name → adult/child(+age) → style →
-   confirm the canonical → the pack is generated and published; you get a
-   `t.me/addstickers/...` link.
-4. `/mychars` — new pack about a saved character. `/addto` — extend a pack.
+   The bot starts in **debug** mode (admins only); switch to **alpha** with
+   `/mode` (first admin only) to open applications + free generations.
+3. Send `/new` → photo → name → adult/child(+age) → style → pick captions →
+   preview the transparent stickers → **«Опубликовать в Telegram?»**; on confirm
+   you get a `t.me/addstickers/...` link (or download the pack as a zip).
+4. `/mychars` — new pack about a saved character. `/mypacks` — publish/download a
+   saved pack. `/addto` — extend a published pack.
+
+## Seeding `Kate_<style>` characters (optional)
+
+To pre-generate one canonical per style from a photo and save them to an owner's
+character list (default: the first admin), run the seeder **inside the container**
+(it reuses the bot's env + DB). Needs live Gemini credits:
+
+```bash
+docker compose cp kate.jpg bot:/app/data/kate.jpg
+docker compose exec bot python -m sticker_service.maintenance.seed_kate \
+    --photo /app/data/kate.jpg            # --subject child --age 14 for a minor
+```
+
+Idempotent: existing `Kate_<style>` characters are skipped, so re-running fills gaps.
 
 ## Notes
 
 - `gemini-3-pro-image` occasionally returns `503 high demand`; retry.
+- A `429 … prepayment credits are depleted` means the **Gemini account is out of
+  credits** — top up billing; the bot fails fast and tells users to retry later.
 - Generated data (sqlite, photos, sheets, stickers) lives in the named volume
   `sticker-data` (owned by the container's appuser). Inspect/back up with
   `docker compose cp bot:/app/data ./data-backup`.
-- To update: `git pull`, then `docker compose up -d --build`.
+- To update: `git checkout main && git pull`, then `docker compose up -d --build`.
