@@ -26,6 +26,7 @@ class Character(BaseModel):
     subject_type: SubjectType
     child_age: int | None
     canonical_path: str
+    photo_path: str | None = None
     created_at: datetime
 
     @model_validator(mode="after")

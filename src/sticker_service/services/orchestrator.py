@@ -82,7 +82,7 @@ class Orchestrator:
         self._publisher = publisher
         self._loader = loader
         self._storage = Path(storage_dir)
-        self._engine = engine or CanonicalEngine(model, gate_threshold=0.5, max_step_retries=1)
+        self._engine = engine or CanonicalEngine(model)
 
     async def build_canonical(
         self,
@@ -114,9 +114,19 @@ class Orchestrator:
         subject_type: SubjectType,
         child_age: int | None,
         canonical: bytes,
+        photo: bytes | None = None,
     ) -> Character:
-        """Persist the confirmed canonical as a reusable Character (§3.2)."""
+        """Persist the confirmed canonical as a reusable Character (§3.2).
+
+        The source ``photo`` is kept too (alpha) so the canonical can be inspected
+        and redrawn later.
+        """
         path = self._write(self._storage / "canonical" / f"{owner_id}_{name}.png", canonical)
+        photo_path = (
+            str(self._write(self._storage / "photos" / f"{owner_id}_{name}.jpg", photo))
+            if photo
+            else None
+        )
         return await self._db.add_character(
             owner_id=owner_id,
             name=name,
@@ -124,7 +134,34 @@ class Orchestrator:
             subject_type=subject_type,
             child_age=child_age,
             canonical_path=str(path),
+            photo_path=photo_path,
         )
+
+    async def redraw_canonical(
+        self,
+        character: Character,
+        photo: bytes,
+        *,
+        on_step: StepCallback | None = None,
+    ) -> bytes:
+        """Rebuild a character's canonical from a fresh photo, replacing the old one."""
+        canonical = await self.build_canonical(
+            photo=photo,
+            style_id=character.style_id,
+            subject_type=character.subject_type,
+            child_age=character.child_age,
+            on_step=on_step,
+        )
+        path = self._write(
+            self._storage / "canonical" / f"{character.owner_id}_{character.name}.png", canonical
+        )
+        photo_path = self._write(
+            self._storage / "photos" / f"{character.owner_id}_{character.name}.jpg", photo
+        )
+        await self._db.update_character_canonical(
+            character.id, canonical_path=str(path), photo_path=str(photo_path)
+        )
+        return canonical
 
     async def build_stickers(
         self,
@@ -196,6 +233,7 @@ class Orchestrator:
                 subject_type=subject_type,
                 child_age=child_age,
                 canonical=canonical,
+                photo=photo,
             )
             title = character.name
             pack_id = None

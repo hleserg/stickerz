@@ -134,8 +134,12 @@ def encode_sticker(image: Image.Image, *, max_bytes: int = _MAX_BYTES) -> bytes:
 
 
 def grid_for(n: int) -> tuple[int, int]:
-    """Pick a balanced ``(rows, cols)`` grid for ``n`` stickers."""
-    cols = math.ceil(math.sqrt(n))
+    """Pick a 3-wide portrait ``(rows, cols)`` grid for ``n`` stickers.
+
+    Three columns matches the phone-friendly sheet the model draws best (e.g. 15
+    stickers → 5×3); fewer than three stickers shrink the columns to fit.
+    """
+    cols = min(3, max(1, n))
     rows = math.ceil(n / cols)
     return rows, cols
 

@@ -24,7 +24,10 @@ from sticker_service.db.models import (
     WhitelistEntry,
 )
 
-DEFAULT_GENERATIONS = 3
+# Generation credits are stored in HALF-PACKS (1 pack = 2 credits) so a
+# half-pack action (adding stickers) is a whole integer — no float drift.
+CREDITS_PER_PACK = 2
+DEFAULT_CREDITS = 3 * CREDITS_PER_PACK  # new alpha tester budget = 3 packs
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,6 +46,7 @@ CREATE TABLE IF NOT EXISTS characters (
     subject_type   TEXT NOT NULL,
     child_age      INTEGER,
     canonical_path TEXT NOT NULL,
+    photo_path     TEXT,
     created_at     TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS packs (
@@ -150,6 +154,24 @@ class Database:
             await self._conn.execute(
                 "ALTER TABLE strikes ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
             )
+        async with self._conn.execute("PRAGMA table_info(characters)") as cur:
+            char_cols = {row["name"] for row in await cur.fetchall()}
+        if "photo_path" not in char_cols:
+            # Source photo kept (alpha) so a canonical can be inspected/redrawn.
+            await self._conn.execute("ALTER TABLE characters ADD COLUMN photo_path TEXT")
+        # Quotas moved from whole packs to half-packs (1 pack = 2 credits): double
+        # existing balances once so old testers keep the same number of packs.
+        async with self._conn.execute(
+            "SELECT value FROM config WHERE key = 'quota_credits_v2'"
+        ) as cur:
+            migrated = await cur.fetchone()
+        if migrated is None:
+            await self._conn.execute("UPDATE quotas SET remaining = remaining * 2")
+            await self._conn.execute(
+                "INSERT INTO config (key, value) VALUES ('quota_credits_v2', '1') "
+                "ON CONFLICT(key) DO UPDATE SET value = '1'"
+            )
+        await self._conn.commit()
 
     async def close(self) -> None:
         await self._conn.close()
@@ -196,13 +218,15 @@ class Database:
         subject_type: SubjectType,
         canonical_path: str,
         child_age: int | None = None,
+        photo_path: str | None = None,
     ) -> Character:
         """Persist a confirmed canonical character and return it with its id."""
         created = _now()
         cur = await self._conn.execute(
             "INSERT INTO characters "
-            "(owner_id, name, style_id, subject_type, child_age, canonical_path, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(owner_id, name, style_id, subject_type, child_age, canonical_path, "
+            "photo_path, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 owner_id,
                 name,
@@ -210,6 +234,7 @@ class Database:
                 subject_type,
                 child_age,
                 canonical_path,
+                photo_path,
                 created.isoformat(),
             ),
         )
@@ -222,8 +247,19 @@ class Database:
             subject_type=subject_type,
             child_age=child_age,
             canonical_path=canonical_path,
+            photo_path=photo_path,
             created_at=created,
         )
+
+    async def update_character_canonical(
+        self, character_id: int, *, canonical_path: str, photo_path: str | None = None
+    ) -> None:
+        """Replace a character's canonical (and source photo) after a redraw."""
+        await self._conn.execute(
+            "UPDATE characters SET canonical_path = ?, photo_path = ? WHERE id = ?",
+            (canonical_path, photo_path, character_id),
+        )
+        await self._conn.commit()
 
     async def get_character(self, character_id: int) -> Character | None:
         async with self._conn.execute(
@@ -494,16 +530,17 @@ class Database:
         )
         await self._conn.commit()
 
-    # --- generation quotas (§alpha) ------------------------------------------
+    # --- generation credits (§alpha; stored in half-packs) -------------------
 
-    async def generations_left(self, user_id: int) -> int:
+    async def credits_left(self, user_id: int) -> int:
+        """Remaining credits in half-packs (1 pack = 2). New users get the default."""
         async with self._conn.execute(
             "SELECT remaining FROM quotas WHERE user_id = ?", (user_id,)
         ) as cur:
             row = await cur.fetchone()
-        return int(row["remaining"]) if row else DEFAULT_GENERATIONS
+        return int(row["remaining"]) if row else DEFAULT_CREDITS
 
-    async def set_generations(self, user_id: int, remaining: int) -> None:
+    async def set_credits(self, user_id: int, remaining: int) -> None:
         remaining = max(0, remaining)
         await self._conn.execute(
             "INSERT INTO quotas (user_id, remaining) VALUES (?, ?) "
@@ -512,15 +549,15 @@ class Database:
         )
         await self._conn.commit()
 
-    async def add_generations(self, user_id: int, delta: int) -> int:
-        """Add (or subtract) from the user's remaining generations; returns new value."""
-        new_value = max(0, await self.generations_left(user_id) + delta)
-        await self.set_generations(user_id, new_value)
+    async def add_credits(self, user_id: int, delta: int) -> int:
+        """Add (or subtract) credits in half-packs; clamps at 0; returns new value."""
+        new_value = max(0, await self.credits_left(user_id) + delta)
+        await self.set_credits(user_id, new_value)
         return new_value
 
-    async def consume_generation(self, user_id: int) -> int:
-        """Decrement remaining by 1 if > 0; returns the new remaining."""
-        return await self.add_generations(user_id, -1)
+    async def consume_credits(self, user_id: int, amount: int) -> int:
+        """Spend ``amount`` credits (half-packs) if available; returns new balance."""
+        return await self.add_credits(user_id, -abs(amount))
 
     # --- analytics events ----------------------------------------------------
 

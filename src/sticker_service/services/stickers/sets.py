@@ -40,9 +40,9 @@ STANDARD_EMOJI: dict[str, str] = {
     "Пока!": "👋",
 }
 
-# Pack limits: up to 24 stickers, laid out 12 per sheet (3×4), max 2 sheets.
-MAX_CAPTIONS = 24
-PER_PAGE = 12
+# Pack limit: up to 15 stickers on a single 3-wide sheet (5×3) — one generation.
+MAX_CAPTIONS = 15
+PER_PAGE = 15
 
 # Example personal block for a child (Russian humour, §6.1).
 CHILD_PERSONAL_EXAMPLE: tuple[str, ...] = (

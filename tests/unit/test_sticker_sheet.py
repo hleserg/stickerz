@@ -68,9 +68,11 @@ def test_selected_captions_merges_sorted_and_caps() -> None:
 
     out = selected_captions([2, 0, 0, 99], ["Своё1", "Своё2"])
     assert out == [STANDARD_BLOCK[0], STANDARD_BLOCK[2], "Своё1", "Своё2"]  # sorted, deduped
-    # caps at 24
+    # caps at MAX_CAPTIONS (one sheet)
+    from sticker_service.services.stickers.sets import MAX_CAPTIONS
+
     big = selected_captions(list(range(len(STANDARD_BLOCK))), [f"c{i}" for i in range(30)])
-    assert len(big) == 24
+    assert len(big) == MAX_CAPTIONS
 
 
 def test_build_caption_set_with_personal_and_limit() -> None:
