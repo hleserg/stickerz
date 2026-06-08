@@ -29,8 +29,18 @@ def test_build_dispatcher_registers_start_router() -> None:
 
 
 async def test_cmd_start_answers() -> None:
-    message = AsyncMock()
-    await cmd_start(message)
-    message.answer.assert_awaited_once()
-    text = message.answer.await_args.args[0]
-    assert "стикер" in text.lower()
+    from types import SimpleNamespace
+
+    from sticker_service.db import Database
+
+    db = await Database.connect(":memory:")
+    try:
+        message = AsyncMock()
+        message.from_user = SimpleNamespace(id=1)
+        await cmd_start(message, db)
+        message.answer.assert_awaited_once()
+        text = message.answer.await_args.args[0]
+        assert "стикер" in text.lower()
+        assert await db.has_events(1)  # start event recorded
+    finally:
+        await db.close()

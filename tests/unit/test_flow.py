@@ -1,4 +1,4 @@
-"""Tests for the FSM flow's invariant transitions (consent-first, age-if-child).
+"""Tests for the FSM flow's invariant transitions (implicit consent, age-if-child).
 
 flow.py is the aiogram I/O shell (excluded from coverage like bot.py/cli.py),
 but the invariant-bearing transitions are verified here.
@@ -22,9 +22,9 @@ from sticker_service.handlers.flow import (
     NewPack,
     cmd_addto,
     cmd_mychars,
+    cmd_mypacks,
     cmd_new,
     on_age,
-    on_consent,
     on_name,
     on_subject,
 )
@@ -49,32 +49,34 @@ def loader() -> StyleLoader:
     return StyleLoader(get_settings().styles_dir)
 
 
-async def test_cmd_new_asks_consent_first() -> None:
+async def test_cmd_new_records_consent_and_asks_photo(db: Database) -> None:
     state = _state()
     message = AsyncMock()
-    await cmd_new(message, state)
-    assert await state.get_state() == NewPack.consent.state
+    message.from_user = SimpleNamespace(id=55)
+    await cmd_new(message, state, db)
+    assert await db.has_consent(55) is True  # consent recorded implicitly (§15.2)
+    assert await state.get_state() == NewPack.photo.state  # straight to photo
     message.answer.assert_awaited_once()
 
 
-async def test_consent_recorded_before_photo(db: Database) -> None:
-    state = _state()
-    await state.set_state(NewPack.consent)
-    callback = AsyncMock()
-    callback.from_user = SimpleNamespace(id=55)
-    await on_consent(callback, state, db)
-    assert await db.has_consent(55) is True  # consent fact persisted (§15.2)
-    assert await state.get_state() == NewPack.photo.state  # only now ask for photo
-    callback.answer.assert_awaited_once()
-
-
-async def test_name_advances_to_subject() -> None:
+async def test_name_advances_to_subject(db: Database) -> None:
     state = _state()
     message = AsyncMock()
     message.text = "Лёшик 🎨"
-    await on_name(message, state)
+    message.from_user = SimpleNamespace(id=1)
+    await on_name(message, state, db)
     assert (await state.get_data())["name"] == "Лёшик 🎨"
     assert await state.get_state() == NewPack.subject.state
+
+
+async def test_name_profane_is_struck(db: Database) -> None:
+    state = _state()
+    message = AsyncMock()
+    message.text = "хуй"
+    message.from_user = SimpleNamespace(id=1)
+    await on_name(message, state, db)
+    assert await state.get_state() != NewPack.subject.state  # rejected
+    assert await db.active_strikes(1) == 1  # a strike was recorded
 
 
 async def test_child_is_asked_age(loader: StyleLoader) -> None:
@@ -125,6 +127,27 @@ async def test_mychars_lists_saved(db: Database) -> None:
     assert message.answer.await_args.kwargs.get("reply_markup") is not None
 
 
+async def test_mypacks_empty_prompts_new(db: Database) -> None:
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=1)
+    await cmd_mypacks(message, db)
+    assert "/new" in message.answer.await_args.args[0]
+
+
+async def test_mypacks_lists_packs(db: Database) -> None:
+    char = await db.add_character(
+        owner_id=1, name="A", style_id="watercolor", subject_type="adult", canonical_path="/x"
+    )
+    await db.add_pack(character_id=char.id, owner_id=1, set_name="d_by_bot", title="Черновик")
+    await db.add_pack(
+        character_id=char.id, owner_id=1, set_name="p_by_bot", title="Опубл", published=True
+    )
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=1)
+    await cmd_mypacks(message, db)
+    assert message.answer.await_args.kwargs.get("reply_markup") is not None
+
+
 async def test_addto_empty_prompts_new(db: Database) -> None:
     message = AsyncMock()
     message.from_user = SimpleNamespace(id=1)
@@ -136,7 +159,9 @@ async def test_addto_lists_packs(db: Database) -> None:
     char = await db.add_character(
         owner_id=1, name="A", style_id="watercolor", subject_type="adult", canonical_path="/x"
     )
-    await db.add_pack(character_id=char.id, owner_id=1, set_name="s_by_bot", title="Мой пак")
+    await db.add_pack(
+        character_id=char.id, owner_id=1, set_name="s_by_bot", title="Мой пак", published=True
+    )
     message = AsyncMock()
     message.from_user = SimpleNamespace(id=1)
     await cmd_addto(message, db)

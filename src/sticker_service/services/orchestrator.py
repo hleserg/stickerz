@@ -23,7 +23,11 @@ from sticker_service.services.canonical.schema import Style
 from sticker_service.services.models.base import ImageModel
 from sticker_service.services.postprocess import grid_for, process_sheet
 from sticker_service.services.publish import Publisher
+from sticker_service.services.publish.naming import build_set_name
+from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers import (
+    MAX_CAPTIONS,
+    PER_PAGE,
     assign_emojis,
     build_caption_set,
     generate_sheet,
@@ -84,6 +88,12 @@ class Orchestrator:
             style, photo, subject_type=subject_type, child_age=child_age, on_step=on_step
         )
 
+    async def validate_photo(self, image: bytes) -> str | None:
+        """Vision foolproof check on upload; returns a problem code or None."""
+        from sticker_service.services.photo_check import validate_photo
+
+        return await validate_photo(self._model, image)
+
     async def save_character(
         self,
         *,
@@ -105,79 +115,157 @@ class Orchestrator:
             canonical_path=str(path),
         )
 
+    async def build_stickers(
+        self,
+        character: Character,
+        *,
+        captions: list[str] | None = None,
+        on_stage: StageCallback | None = None,
+    ) -> list[StickerInput]:
+        """Generate the sliced stickers (sheet → slice → emoji) WITHOUT publishing.
+
+        ``captions`` lets the caller pass an explicit set (selected standard +
+        custom). Pages of >12 are generated as separate sheets. Used to show a
+        preview before the user confirms publication.
+        """
+        stickers, emojis = await self._generate_stickers(character, captions, on_stage)
+        return list(zip(stickers, emojis, strict=True))
+
+    async def publish_new(
+        self,
+        *,
+        owner_id: int,
+        character: Character,
+        stickers: list[StickerInput],
+        title: str | None = None,
+    ) -> PackResult:
+        """Publish already-generated stickers as a new Telegram set + persist."""
+        title = title or character.name
+        logger.info("publish: creating set owner=%s title=%s", owner_id, title)
+        set_name = await self._publisher.create_pack(
+            user_id=owner_id, title=title, stickers=list(stickers)
+        )
+        pack = await self._db.add_pack(
+            character_id=character.id,
+            owner_id=owner_id,
+            set_name=set_name,
+            title=title,
+            published=True,
+        )
+        await self._persist_pairs(pack, stickers, start=0)
+        logger.info("publish: done set=%s stickers=%d", set_name, len(stickers))
+        return PackResult(set_name, self._publisher.link(set_name), len(stickers))
+
+    async def save_draft(
+        self,
+        *,
+        owner_id: int,
+        character: Character,
+        title: str,
+        stickers: list[StickerInput],
+    ) -> Pack:
+        """Persist generated stickers as an UNPUBLISHED pack for later publish/download."""
+        # Hidden machine name reserved now; replaced with the real one on publish.
+        placeholder = build_set_name(title, self._publisher.bot_username)
+        pack = await self._db.add_pack(
+            character_id=character.id,
+            owner_id=owner_id,
+            set_name=placeholder,
+            title=title,
+            published=False,
+        )
+        await self._persist_pairs(pack, stickers, start=0)
+        logger.info("draft saved: pack=%s stickers=%d", pack.id, len(stickers))
+        return pack
+
+    async def publish_draft(
+        self, *, owner_id: int, pack: Pack, stickers: list[StickerInput]
+    ) -> PackResult:
+        """Publish a previously-saved draft pack to Telegram and mark it published."""
+        set_name = await self._publisher.create_pack(
+            user_id=owner_id, title=pack.title, stickers=list(stickers)
+        )
+        await self._db.update_pack(pack.id, set_name=set_name, published=True)
+        logger.info("publish draft: pack=%s set=%s", pack.id, set_name)
+        return PackResult(set_name, self._publisher.link(set_name), len(stickers))
+
+    async def load_pack_stickers(self, pack_id: int) -> list[StickerInput]:
+        """Read a pack's persisted sticker files + emoji from disk."""
+        rows = await self._db.list_stickers(pack_id)
+        return [(Path(s.file_path).read_bytes(), s.emoji) for s in rows]
+
+    async def publish_extend(
+        self, *, owner_id: int, pack: Pack, stickers: list[StickerInput]
+    ) -> PackResult:
+        """Append already-generated stickers to an existing set + persist."""
+        current = await self._db.count_stickers(pack.id)
+        await self._publisher.add_to_pack(
+            user_id=owner_id, set_name=pack.set_name, stickers=list(stickers), current_count=current
+        )
+        await self._persist_pairs(pack, stickers, start=current)
+        return PackResult(pack.set_name, self._publisher.link(pack.set_name), len(stickers))
+
     async def create_pack(
         self,
         *,
         owner_id: int,
         character: Character,
         title: str | None = None,
-        personal: list[str] | None = None,
+        captions: list[str] | None = None,
         on_stage: StageCallback | None = None,
     ) -> PackResult:
-        """New pack with this character: generate, slice, emoji, publish, persist."""
-        title = title or character.name
-        stickers, emojis = await self._generate_stickers(character, personal, on_stage)
+        """Convenience: generate + publish a new pack in one shot."""
+        stickers = await self.build_stickers(character, captions=captions, on_stage=on_stage)
         await self._stage(on_stage, "publish")
-        logger.info("publish: creating set owner=%s title=%s", owner_id, title)
-        set_name = await self._publisher.create_pack(
-            user_id=owner_id, title=title, stickers=list(zip(stickers, emojis, strict=True))
+        return await self.publish_new(
+            owner_id=owner_id, character=character, stickers=stickers, title=title
         )
-        pack = await self._db.add_pack(
-            character_id=character.id, owner_id=owner_id, set_name=set_name, title=title
-        )
-        await self._persist_stickers(pack, stickers, emojis, start=0)
-        logger.info("publish: done set=%s stickers=%d", set_name, len(stickers))
-        return PackResult(set_name, self._publisher.link(set_name), len(stickers))
 
     async def extend_pack(
         self,
         *,
         owner_id: int,
         pack: Pack,
-        personal: list[str] | None = None,
+        captions: list[str] | None = None,
         on_stage: StageCallback | None = None,
     ) -> PackResult:
-        """Add stickers of the pack's existing character to the same set (§3.2)."""
+        """Convenience: generate + append to an existing pack in one shot (§3.2)."""
         character = await self._db.get_character(pack.character_id)
         if character is None:  # pragma: no cover - referential integrity
             raise OrchestratorError(f"pack {pack.id} references missing character")
-        stickers, emojis = await self._generate_stickers(character, personal, on_stage)
+        stickers = await self.build_stickers(character, captions=captions, on_stage=on_stage)
         await self._stage(on_stage, "publish")
-        current = await self._db.count_stickers(pack.id)
-        await self._publisher.add_to_pack(
-            user_id=owner_id,
-            set_name=pack.set_name,
-            stickers=list(zip(stickers, emojis, strict=True)),
-            current_count=current,
-        )
-        await self._persist_stickers(pack, stickers, emojis, start=current)
-        return PackResult(pack.set_name, self._publisher.link(pack.set_name), len(stickers))
+        return await self.publish_extend(owner_id=owner_id, pack=pack, stickers=stickers)
 
     # --- internals -----------------------------------------------------------
 
     async def _generate_stickers(
         self,
         character: Character,
-        personal: list[str] | None,
+        captions: list[str] | None,
         on_stage: StageCallback | None = None,
     ) -> tuple[list[bytes], list[str]]:
         style = self._require_style(character.style_id)
         canonical = Path(character.canonical_path).read_bytes()
-        captions = build_caption_set(personal=personal)
+        captions = (captions if captions is not None else build_caption_set())[:MAX_CAPTIONS]
+        pages = [captions[i : i + PER_PAGE] for i in range(0, len(captions), PER_PAGE)]
         await self._stage(on_stage, "sheet")
-        sheet = await generate_sheet(
-            self._model,
-            canonical,
-            style,
-            captions,
-            subject_type=character.subject_type,
-            child_age=character.child_age,
-        )
-        await self._stage(on_stage, "slice")
-        stickers = process_sheet(sheet, grid=grid_for(len(captions)))
+        stickers: list[bytes] = []
+        for page_no, page in enumerate(pages, start=1):
+            logger.info("sheet: page %d/%d (%d captions)", page_no, len(pages), len(page))
+            sheet = await generate_sheet(
+                self._model,
+                canonical,
+                style,
+                page,
+                subject_type=character.subject_type,
+                child_age=character.child_age,
+            )
+            stickers.extend(process_sheet(sheet, grid=grid_for(len(page))))
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
-        logger.info("slice: produced %d stickers", len(stickers))
+        await self._stage(on_stage, "slice")
+        logger.info("slice: produced %d stickers total", len(stickers))
         await self._stage(on_stage, "emoji")
         emojis = await assign_emojis(self._model, stickers)
         return stickers, emojis
@@ -188,10 +276,8 @@ class Orchestrator:
         if on_stage is not None:
             await on_stage(label)
 
-    async def _persist_stickers(
-        self, pack: Pack, stickers: list[bytes], emojis: list[str], *, start: int
-    ) -> None:
-        for offset, (image, emoji) in enumerate(zip(stickers, emojis, strict=True)):
+    async def _persist_pairs(self, pack: Pack, stickers: list[StickerInput], *, start: int) -> None:
+        for offset, (image, emoji) in enumerate(stickers):
             position = start + offset
             path = self._write(
                 self._storage / "stickers" / pack.set_name / f"{position:03d}.png", image

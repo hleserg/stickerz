@@ -1,8 +1,12 @@
-"""Whitelist access control as an outer middleware (§11.1, §B.4).
+"""Mode-aware access control as an outer middleware (§11.1, §B.4).
 
-Runs before any handler: a non-whitelisted user gets a polite refusal and the
-update is dropped. Admins (from config) are always allowed and auto-added to the
-whitelist on first contact. Identity key is the durable Telegram ``user_id``.
+Runs before any handler and gates purely on the bot's operating mode:
+- admins always pass (and are auto-whitelisted) — they bypass mode/ban gates;
+- in ``debug`` only admins pass; everyone else gets a soft "under construction";
+- in ``alpha`` everyone passes the middleware (pack creation is gated to approved
+  participants inside the handlers), except users under an auto-moderation ban.
+
+Identity key is the durable Telegram ``user_id``.
 """
 
 from __future__ import annotations
@@ -16,12 +20,11 @@ from aiogram.types import TelegramObject
 from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.observability import tag_component
-
-DENIAL = "Доступ ограничен: бот в закрытом тестировании."
+from sticker_service.services import modes
 
 
 class WhitelistMiddleware(BaseMiddleware):
-    """Block updates from users who are not on the whitelist."""
+    """Gate updates by operating mode (debug → admins only; alpha → all but banned)."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
@@ -37,14 +40,33 @@ class WhitelistMiddleware(BaseMiddleware):
         if user is None:  # service updates without a user — let aiogram handle
             return await handler(event, data)
 
-        if user.id in get_settings().admin_id_set:
+        answer = getattr(event, "answer", None)
+        is_admin = user.id in get_settings().admin_id_set
+        mode = await self._db.get_config("mode", modes.DEFAULT)
+
+        # Admins always pass (and are auto-whitelisted), bypassing mode/ban gates.
+        if is_admin:
             await self._db.allow(user.id, getattr(user, "username", None))
             return await handler(event, data)
 
-        if await self._db.is_allowed(user.id):
-            return await handler(event, data)
+        # Debug: only admins; everyone else gets a soft notice.
+        if mode == modes.DEBUG:
+            if answer is not None:
+                await answer(
+                    "🛠 Бот сейчас в разработке — скоро мы всё покажем! Загляни чуть позже."
+                )
+            return None
 
-        answer = getattr(event, "answer", None)
-        if answer is not None:
-            await answer(DENIAL)
-        return None
+        # Temporary ban (auto-moderation) applies in any non-debug mode.
+        until = await self._db.banned_until(user.id)
+        if until is not None:
+            if answer is not None:
+                await answer(
+                    "🚫 Вы временно заблокированы за нарушение правил (/rules) до "
+                    f"{until.astimezone():%d.%m %H:%M}."
+                )
+            return None
+
+        # Alpha (the only other implemented mode): everyone passes the middleware;
+        # pack creation is gated to approved participants in the handlers.
+        return await handler(event, data)

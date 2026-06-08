@@ -89,14 +89,25 @@ class Settings(BaseSettings):
     sentry_traces_sample_rate: float = 0.0
 
     @property
-    def admin_id_set(self) -> frozenset[int]:
-        """Parse ``admin_ids`` into a set of integers (ignores blanks)."""
-        out: set[int] = set()
+    def admin_id_list(self) -> list[int]:
+        """Parse ``admin_ids`` into an ordered list of integers (ignores blanks)."""
+        out: list[int] = []
         for chunk in self.admin_ids.split(","):
             chunk = chunk.strip()
             if chunk:
-                out.add(int(chunk))
-        return frozenset(out)
+                out.append(int(chunk))
+        return out
+
+    @property
+    def admin_id_set(self) -> frozenset[int]:
+        """Admin ids as a set (membership checks)."""
+        return frozenset(self.admin_id_list)
+
+    @property
+    def first_admin_id(self) -> int | None:
+        """The first admin id (owner): receives reports/errors, switches mode."""
+        ids = self.admin_id_list
+        return ids[0] if ids else None
 
 
 @lru_cache(maxsize=1)

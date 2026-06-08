@@ -52,6 +52,7 @@ class _FakeBot:
     def __init__(self, *, occupied_first: bool = False) -> None:
         self.created: list[dict[str, object]] = []
         self.added: list[dict[str, object]] = []
+        self.thumbnails: list[str] = []
         self._occupied_first = occupied_first
 
     async def create_new_sticker_set(self, **kwargs: object) -> None:
@@ -63,6 +64,19 @@ class _FakeBot:
     async def add_sticker_to_set(self, **kwargs: object) -> None:
         self.added.append(kwargs)
 
+    async def set_sticker_set_thumbnail(self, **kwargs: object) -> None:
+        self.thumbnails.append(str(kwargs["name"]))
+
+
+def _real_png() -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGBA", (200, 240), (10, 120, 200, 255)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
 
 async def test_create_pack_owner_is_user() -> None:
     bot = _FakeBot()
@@ -72,6 +86,13 @@ async def test_create_pack_owner_is_user() -> None:
     success = bot.created[-1]
     assert success["user_id"] == 42  # owner = user, not bot (§B.4)
     assert success["name"] == name
+
+
+async def test_create_pack_sets_cover() -> None:
+    bot = _FakeBot()
+    pub = Publisher(bot, "yourbot")
+    name = await pub.create_pack(user_id=42, title="Лёшик", stickers=[(_real_png(), "🙂")])
+    assert bot.thumbnails == [name]  # a cover thumbnail was set for the new set
 
 
 async def test_create_pack_retries_on_occupied() -> None:

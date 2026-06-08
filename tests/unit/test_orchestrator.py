@@ -20,7 +20,7 @@ from sticker_service.services.publish import Publisher
 MAGENTA = (255, 0, 255, 255)
 
 
-def _sheet_bytes(n: int = 12) -> bytes:
+def _sheet_bytes(n: int = 15) -> bytes:
     """A clean magenta sheet of ``n`` well-separated squares (chroma-sliceable)."""
     from sticker_service.services.postprocess import grid_for
 
@@ -41,22 +41,22 @@ def _sheet_bytes(n: int = 12) -> bytes:
     return buffer.getvalue()
 
 
-# build_caption_set() yields the 12-item standard block.
-EXPECTED = 12
+# build_caption_set() yields the standard block.
+EXPECTED = 13  # 12 reactions + «Пока!»
 
 
 class _SheetModel(ImageModel):
-    """Returns a real 12-sticker magenta sheet for any prompt."""
+    """Returns a magenta sheet sized to the number of captions in the prompt."""
 
     name = "sheet"
 
     def __init__(self) -> None:
-        self._sheet = _sheet_bytes(EXPECTED)
         self.generate_calls: list[str] = []
 
     async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
         self.generate_calls.append(prompt)
-        return self._sheet
+        n = prompt.count('"') // 2 or 1  # captions are quoted in the sheet prompt
+        return _sheet_bytes(n)
 
     async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:
         return 0.95
@@ -75,6 +75,9 @@ class _FakeBot:
 
     async def add_sticker_to_set(self, **kwargs: object) -> None:
         self.added.append(kwargs)
+
+    async def set_sticker_set_thumbnail(self, **kwargs: object) -> None:
+        pass
 
 
 @pytest_asyncio.fixture
@@ -199,6 +202,79 @@ async def test_extend_pack_appends(db: Database, loader: StyleLoader, tmp_path: 
     assert result.set_name == pack.set_name
     assert len(bot.added) == EXPECTED  # appended via add_sticker_to_set
     assert await db.count_stickers(pack.id) == 2 * EXPECTED  # appended, positions continue
+
+
+async def test_build_then_publish_split(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
+    bot = _FakeBot()
+    orch = _orchestrator(db, loader, bot, tmp_path)
+    char = await orch.save_character(
+        owner_id=5,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(EXPECTED),
+    )
+    # 1) generate without publishing — nothing created yet.
+    stickers = await orch.build_stickers(char)
+    assert len(stickers) == EXPECTED
+    assert bot.created == []
+    assert await db.list_packs(5) == []
+    # 2) publish the already-generated stickers.
+    result = await orch.publish_new(owner_id=5, character=char, stickers=stickers)
+    assert result.count == EXPECTED
+    assert len(bot.created) == 1
+    assert await db.count_stickers((await db.list_packs(5))[0].id) == EXPECTED
+
+
+async def test_publish_extend_split(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
+    bot = _FakeBot()
+    orch = _orchestrator(db, loader, bot, tmp_path)
+    char = await orch.save_character(
+        owner_id=9,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(EXPECTED),
+    )
+    await orch.create_pack(owner_id=9, character=char)
+    pack = (await db.list_packs(9))[0]
+    stickers = await orch.build_stickers(char)
+    result = await orch.publish_extend(owner_id=9, pack=pack, stickers=stickers)
+    assert result.set_name == pack.set_name
+    assert len(bot.added) == EXPECTED
+    assert await db.count_stickers(pack.id) == 2 * EXPECTED
+
+
+async def test_draft_lifecycle(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
+    bot = _FakeBot()
+    orch = _orchestrator(db, loader, bot, tmp_path)
+    char = await orch.save_character(
+        owner_id=3,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(EXPECTED),
+    )
+    stickers = await orch.build_stickers(char)
+    # Save as a draft — persisted but not published.
+    pack = await orch.save_draft(owner_id=3, character=char, title="A", stickers=stickers)
+    assert pack.published is False
+    assert bot.created == []
+    assert await db.count_stickers(pack.id) == EXPECTED
+
+    # Re-load stickers from disk (e.g. next session).
+    loaded = await orch.load_pack_stickers(pack.id)
+    assert len(loaded) == EXPECTED
+
+    # Publish the draft → becomes published with a real set name.
+    result = await orch.publish_draft(owner_id=3, pack=pack, stickers=loaded)
+    assert len(bot.created) == 1
+    refreshed = await db.get_pack(pack.id)
+    assert refreshed is not None and refreshed.published is True
+    assert refreshed.set_name == result.set_name
 
 
 async def test_unknown_style_raises(db: Database, loader: StyleLoader, tmp_path: Path) -> None:

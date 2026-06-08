@@ -44,6 +44,7 @@ async def test_blocks_unlisted_user(db: Database) -> None:
 
 
 async def test_allows_whitelisted_user(db: Database) -> None:
+    await db.set_config("mode", "prod")
     await db.allow(5)
     mw = WhitelistMiddleware(db)
     handler = AsyncMock(return_value="ok")
@@ -51,6 +52,17 @@ async def test_allows_whitelisted_user(db: Database) -> None:
     result = await mw(handler, event, {"event_from_user": _user(5)})
     handler.assert_awaited_once()
     assert result == "ok"
+
+
+async def test_debug_mode_blocks_non_admin(db: Database) -> None:
+    # Default mode is debug → even a whitelisted non-admin gets the dev notice.
+    await db.allow(5)
+    mw = WhitelistMiddleware(db)
+    handler = AsyncMock()
+    event = AsyncMock()
+    await mw(handler, event, {"event_from_user": _user(5)})
+    handler.assert_not_called()
+    event.answer.assert_awaited_once()
 
 
 async def test_admin_passes_and_is_auto_added(
@@ -63,6 +75,32 @@ async def test_admin_passes_and_is_auto_added(
     await mw(handler, AsyncMock(), {"event_from_user": _user(99, "boss")})
     handler.assert_awaited_once()
     assert await db.is_allowed(99) is True  # auto-added
+
+
+async def test_banned_user_blocked(db: Database) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    await db.set_config("mode", "prod")
+    await db.allow(5)
+    await db.set_ban(5, datetime.now(UTC) + timedelta(hours=1))
+    mw = WhitelistMiddleware(db)
+    handler = AsyncMock()
+    event = AsyncMock()
+    await mw(handler, event, {"event_from_user": _user(5)})
+    handler.assert_not_called()  # blocked by active ban
+    event.answer.assert_awaited_once()
+
+
+async def test_admin_exempt_from_ban(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    monkeypatch.setenv("APP_ADMIN_IDS", "9")
+    get_settings.cache_clear()
+    await db.set_ban(9, datetime.now(UTC) + timedelta(hours=1))
+    mw = WhitelistMiddleware(db)
+    handler = AsyncMock()
+    await mw(handler, AsyncMock(), {"event_from_user": _user(9)})
+    handler.assert_awaited_once()  # admins bypass bans
 
 
 async def test_service_update_without_user_passes(db: Database) -> None:

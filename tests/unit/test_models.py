@@ -111,6 +111,16 @@ def test_gemini_is_retryable() -> None:
     assert not _is_retryable(RuntimeError("400 invalid argument"))
 
 
+def test_gemini_billing_is_not_retryable() -> None:
+    # A depleted-credits 429 is permanent: classify as billing, never retry.
+    from sticker_service.services.models.gemini import _is_billing, _is_retryable
+
+    depleted = RuntimeError("429 RESOURCE_EXHAUSTED: Your prepayment credits are depleted.")
+    assert _is_billing(depleted)
+    assert not _is_retryable(depleted)  # billing short-circuits the retry classification
+    assert not _is_billing(RuntimeError("429 RESOURCE_EXHAUSTED: rate limit, retry"))
+
+
 def test_gemini_image_model_fallback_sequence() -> None:
     from sticker_service.services.models.gemini import IMAGE_MODEL, image_model_for_attempt
 

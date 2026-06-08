@@ -14,3 +14,5 @@ Claude Code does not read `AGENTS.md` automatically, so this file imports it.
   `docs/development/PLAYBOOK_MARKERS.md`) rather than only describing it in chat.
 - Keep edits to this file and `AGENTS.md` minimal and high-signal; push detail
   into `docs/development/DEVELOPMENT_STANDARD.md`.
+- When more than one task is pending, track them as a checklist and finish all
+  current tasks before starting the next batch; close them one by one.

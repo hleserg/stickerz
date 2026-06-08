@@ -8,13 +8,14 @@ simple for the MVP. Handlers call these methods; they never write raw SQL.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiosqlite
 
 from sticker_service.db.models import (
+    Application,
     Character,
     Order,
     Pack,
@@ -22,6 +23,8 @@ from sticker_service.db.models import (
     SubjectType,
     WhitelistEntry,
 )
+
+DEFAULT_GENERATIONS = 3
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -48,7 +51,8 @@ CREATE TABLE IF NOT EXISTS packs (
     owner_id     INTEGER NOT NULL,
     set_name     TEXT NOT NULL UNIQUE,
     title        TEXT NOT NULL,
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    published    INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS stickers (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,6 +71,38 @@ CREATE TABLE IF NOT EXISTS consents (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_id  INTEGER NOT NULL,
     agreed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS strikes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bans (
+    user_id INTEGER PRIMARY KEY,
+    until   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    event      TEXT NOT NULL,
+    detail     TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS applications (
+    user_id    INTEGER PRIMARY KEY,
+    username   TEXT,
+    source     TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE TABLE IF NOT EXISTS quotas (
+    user_id   INTEGER PRIMARY KEY,
+    remaining INTEGER NOT NULL
 );
 """
 
@@ -95,7 +131,25 @@ class Database:
 
     async def _init_schema(self) -> None:
         await self._conn.executescript(_SCHEMA)
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        """Lightweight migrations for already-created databases."""
+        async with self._conn.execute("PRAGMA table_info(packs)") as cur:
+            columns = {row["name"] for row in await cur.fetchall()}
+        if "published" not in columns:
+            # Existing packs were all created at publish time → mark them published.
+            await self._conn.execute(
+                "ALTER TABLE packs ADD COLUMN published INTEGER NOT NULL DEFAULT 0"
+            )
+            await self._conn.execute("UPDATE packs SET published = 1")
+        async with self._conn.execute("PRAGMA table_info(strikes)") as cur:
+            strike_cols = {row["name"] for row in await cur.fetchall()}
+        if "reason" not in strike_cols:
+            await self._conn.execute(
+                "ALTER TABLE strikes ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
+            )
 
     async def close(self) -> None:
         await self._conn.close()
@@ -188,14 +242,20 @@ class Database:
     # --- packs ---------------------------------------------------------------
 
     async def add_pack(
-        self, *, character_id: int, owner_id: int, set_name: str, title: str
+        self,
+        *,
+        character_id: int,
+        owner_id: int,
+        set_name: str,
+        title: str,
+        published: bool = False,
     ) -> Pack:
-        """Create a pack bound to a character (one character → many packs)."""
+        """Create a pack (draft by default) bound to a character (§3.2)."""
         created = _now()
         cur = await self._conn.execute(
-            "INSERT INTO packs (character_id, owner_id, set_name, title, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (character_id, owner_id, set_name, title, created.isoformat()),
+            "INSERT INTO packs (character_id, owner_id, set_name, title, created_at, published) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (character_id, owner_id, set_name, title, created.isoformat(), int(published)),
         )
         await self._conn.commit()
         return Pack(
@@ -205,7 +265,22 @@ class Database:
             set_name=set_name,
             title=title,
             created_at=created,
+            published=published,
         )
+
+    async def update_pack(
+        self, pack_id: int, *, set_name: str | None = None, published: bool | None = None
+    ) -> None:
+        """Update a pack's set_name and/or published flag (e.g. on publishing a draft)."""
+        if set_name is not None:
+            await self._conn.execute(
+                "UPDATE packs SET set_name = ? WHERE id = ?", (set_name, pack_id)
+            )
+        if published is not None:
+            await self._conn.execute(
+                "UPDATE packs SET published = ? WHERE id = ?", (int(published), pack_id)
+            )
+        await self._conn.commit()
 
     async def get_pack(self, pack_id: int) -> Pack | None:
         async with self._conn.execute("SELECT * FROM packs WHERE id = ?", (pack_id,)) as cur:
@@ -305,6 +380,171 @@ class Database:
             "SELECT 1 FROM consents WHERE owner_id = ? LIMIT 1", (owner_id,)
         ) as cur:
             return await cur.fetchone() is not None
+
+    # --- strikes & bans (auto-moderation) ------------------------------------
+
+    async def add_strike(self, user_id: int, reason: str = "") -> int:
+        """Record a strike (with reason); return strikes active in the last 30 days."""
+        await self._conn.execute(
+            "INSERT INTO strikes (user_id, reason, created_at) VALUES (?, ?, ?)",
+            (user_id, reason, _now().isoformat()),
+        )
+        await self._conn.commit()
+        return await self.active_strikes(user_id)
+
+    async def list_strikes(self, user_id: int) -> list[tuple[str, str]]:
+        """Active (30-day) strikes for a user as (reason, created_at), newest first."""
+        cutoff = (_now() - timedelta(days=30)).isoformat()
+        async with self._conn.execute(
+            "SELECT reason, created_at FROM strikes WHERE user_id = ? AND created_at > ? "
+            "ORDER BY created_at DESC",
+            (user_id, cutoff),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [(r["reason"], r["created_at"]) for r in rows]
+
+    async def active_strikes(self, user_id: int) -> int:
+        """Strikes that have not yet expired (30-day window)."""
+        cutoff = (_now() - timedelta(days=30)).isoformat()
+        async with self._conn.execute(
+            "SELECT COUNT(*) AS n FROM strikes WHERE user_id = ? AND created_at > ?",
+            (user_id, cutoff),
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def set_ban(self, user_id: int, until: datetime) -> None:
+        await self._conn.execute(
+            "INSERT INTO bans (user_id, until) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET until = excluded.until",
+            (user_id, until.isoformat()),
+        )
+        await self._conn.commit()
+
+    async def banned_until(self, user_id: int) -> datetime | None:
+        """Return the ban expiry if the user is currently banned, else None."""
+        async with self._conn.execute(
+            "SELECT until FROM bans WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        until = datetime.fromisoformat(row["until"])
+        return until if until > _now() else None
+
+    async def list_bans(self) -> list[tuple[int, datetime]]:
+        """Currently-active bans as (user_id, until)."""
+        now = _now().isoformat()
+        async with self._conn.execute(
+            "SELECT user_id, until FROM bans WHERE until > ? ORDER BY until", (now,)
+        ) as cur:
+            rows = await cur.fetchall()
+        return [(r["user_id"], datetime.fromisoformat(r["until"])) for r in rows]
+
+    async def unban(self, user_id: int) -> None:
+        """Lift a ban (admin action)."""
+        await self._conn.execute("DELETE FROM bans WHERE user_id = ?", (user_id,))
+        await self._conn.commit()
+
+    # --- config (key/value) --------------------------------------------------
+
+    async def get_config(self, key: str, default: str = "") -> str:
+        async with self._conn.execute("SELECT value FROM config WHERE key = ?", (key,)) as cur:
+            row = await cur.fetchone()
+        return row["value"] if row else default
+
+    async def set_config(self, key: str, value: str) -> None:
+        await self._conn.execute(
+            "INSERT INTO config (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await self._conn.commit()
+
+    # --- applications (§alpha) -----------------------------------------------
+
+    async def add_application(self, user_id: int, username: str | None, source: str) -> None:
+        """Create or reset an application to 'pending'."""
+        await self._conn.execute(
+            "INSERT INTO applications (user_id, username, source, created_at, status) "
+            "VALUES (?, ?, ?, ?, 'pending') "
+            "ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, "
+            "source = excluded.source, created_at = excluded.created_at, status = 'pending'",
+            (user_id, username, source, _now().isoformat()),
+        )
+        await self._conn.commit()
+
+    async def get_application(self, user_id: int) -> Application | None:
+        async with self._conn.execute(
+            "SELECT * FROM applications WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return Application(**dict(row)) if row else None
+
+    async def list_applications(self, status: str) -> list[Application]:
+        async with self._conn.execute(
+            "SELECT * FROM applications WHERE status = ? ORDER BY created_at", (status,)
+        ) as cur:
+            rows = await cur.fetchall()
+        return [Application(**dict(r)) for r in rows]
+
+    async def set_application_status(self, user_id: int, status: str) -> None:
+        await self._conn.execute(
+            "UPDATE applications SET status = ? WHERE user_id = ?", (status, user_id)
+        )
+        await self._conn.commit()
+
+    # --- generation quotas (§alpha) ------------------------------------------
+
+    async def generations_left(self, user_id: int) -> int:
+        async with self._conn.execute(
+            "SELECT remaining FROM quotas WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["remaining"]) if row else DEFAULT_GENERATIONS
+
+    async def set_generations(self, user_id: int, remaining: int) -> None:
+        remaining = max(0, remaining)
+        await self._conn.execute(
+            "INSERT INTO quotas (user_id, remaining) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET remaining = excluded.remaining",
+            (user_id, remaining),
+        )
+        await self._conn.commit()
+
+    async def add_generations(self, user_id: int, delta: int) -> int:
+        """Add (or subtract) from the user's remaining generations; returns new value."""
+        new_value = max(0, await self.generations_left(user_id) + delta)
+        await self.set_generations(user_id, new_value)
+        return new_value
+
+    async def consume_generation(self, user_id: int) -> int:
+        """Decrement remaining by 1 if > 0; returns the new remaining."""
+        return await self.add_generations(user_id, -1)
+
+    # --- analytics events ----------------------------------------------------
+
+    async def add_event(self, user_id: int, event: str, detail: dict[str, object]) -> None:
+        """Append an analytics event (JSON detail)."""
+        await self._conn.execute(
+            "INSERT INTO events (user_id, event, detail, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, event, json.dumps(detail, ensure_ascii=False), _now().isoformat()),
+        )
+        await self._conn.commit()
+
+    async def has_events(self, user_id: int) -> bool:
+        """True if the user has any prior recorded event (returning user)."""
+        async with self._conn.execute(
+            "SELECT 1 FROM events WHERE user_id = ? LIMIT 1", (user_id,)
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    async def count_events(self, event: str) -> int:
+        async with self._conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE event = ?", (event,)
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
 
 
 async def open_database(paths: Sequence[str | Path] | None = None) -> Database:  # pragma: no cover
