@@ -55,6 +55,41 @@ async def assign_emoji(model: ImageModel, image: bytes) -> str:
     return DEFAULT_EMOJI
 
 
-async def assign_emojis(model: ImageModel, images: Sequence[bytes]) -> list[str]:
-    """Assign an emoji to each sticker image."""
-    return [await assign_emoji(model, image) for image in images]
+def extract_emoji(text: str) -> str | None:
+    """Return the first emoji already present in ``text`` (with joiners), else None."""
+    chars = list(text)
+    for i, ch in enumerate(chars):
+        if _is_emoji_codepoint(ch):
+            cluster = ch
+            j = i + 1
+            while j < len(chars) and ord(chars[j]) in _JOINERS:
+                cluster += chars[j]
+                j += 1
+            return cluster if is_single_emoji(cluster) else None
+    return None
+
+
+def emoji_for_caption(caption: str) -> str | None:
+    """A known emoji for ``caption`` without a model call, or None if unknown.
+
+    Tries the standard-caption map first, then any emoji the user typed into a
+    custom caption (e.g. "Огонь 🔥"). Returns None for plain custom captions, so
+    the caller falls back to the vision model only when it actually helps.
+    """
+    from sticker_service.services.stickers.sets import STANDARD_EMOJI
+
+    known = STANDARD_EMOJI.get(caption.strip())
+    return known if known else extract_emoji(caption)
+
+
+async def assign_emojis(
+    model: ImageModel, images: Sequence[bytes], captions: Sequence[str] | None = None
+) -> list[str]:
+    """Assign an emoji to each sticker, skipping the vision call when the caption
+    already implies one (standard block or an emoji typed by the user)."""
+    caps = list(captions) if captions is not None else []
+    out: list[str] = []
+    for i, image in enumerate(images):
+        known = emoji_for_caption(caps[i]) if i < len(caps) else None
+        out.append(known if known else await assign_emoji(model, image))
+    return out

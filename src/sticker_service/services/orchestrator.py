@@ -347,7 +347,7 @@ class Orchestrator:
         await self._stage(on_stage, "slice")
         logger.info("slice: produced %d stickers total", len(stickers))
         await self._stage(on_stage, "emoji")
-        emojis = await assign_emojis(self._model, stickers)
+        emojis = await assign_emojis(self._model, stickers, captions)
         return stickers, emojis
 
     @staticmethod

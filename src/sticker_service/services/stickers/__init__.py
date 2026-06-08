@@ -6,6 +6,8 @@ from sticker_service.services.stickers.emoji import (
     DEFAULT_EMOJI,
     assign_emoji,
     assign_emojis,
+    emoji_for_caption,
+    extract_emoji,
     is_single_emoji,
 )
 from sticker_service.services.stickers.generate import (
@@ -33,6 +35,8 @@ __all__ = [
     "assign_emojis",
     "build_caption_set",
     "build_sheet_prompt",
+    "emoji_for_caption",
+    "extract_emoji",
     "generate_sheet",
     "is_single_emoji",
     "selected_captions",

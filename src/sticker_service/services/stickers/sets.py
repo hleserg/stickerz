@@ -23,6 +23,23 @@ STANDARD_BLOCK: tuple[str, ...] = (
     "Пока!",
 )
 
+# Known emoji per standard caption — lets us skip a per-sticker vision call (§9).
+STANDARD_EMOJI: dict[str, str] = {
+    "Привет!": "👋",
+    "Класс!": "👍",
+    "Ха-ха-ха": "😂",
+    "Грустно": "😢",
+    "Шок!": "😱",
+    "Люблю": "❤️",
+    "Задумался": "🤔",
+    "Устал": "😮‍💨",
+    "Окей 😉": "😉",
+    "Фейспалм": "🤦",
+    "Ты!": "👉",
+    "Я крутой": "😎",
+    "Пока!": "👋",
+}
+
 # Pack limits: up to 24 stickers, laid out 12 per sheet (3×4), max 2 sheets.
 MAX_CAPTIONS = 24
 PER_PAGE = 12
