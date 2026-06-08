@@ -8,7 +8,7 @@ simple for the MVP. Handlers call these methods; they never write raw SQL.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -67,6 +67,15 @@ CREATE TABLE IF NOT EXISTS consents (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_id  INTEGER NOT NULL,
     agreed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS strikes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bans (
+    user_id INTEGER PRIMARY KEY,
+    until   TEXT NOT NULL
 );
 """
 
@@ -305,6 +314,46 @@ class Database:
             "SELECT 1 FROM consents WHERE owner_id = ? LIMIT 1", (owner_id,)
         ) as cur:
             return await cur.fetchone() is not None
+
+    # --- strikes & bans (auto-moderation) ------------------------------------
+
+    async def add_strike(self, user_id: int) -> int:
+        """Record a strike; return the count of strikes active in the last 30 days."""
+        await self._conn.execute(
+            "INSERT INTO strikes (user_id, created_at) VALUES (?, ?)",
+            (user_id, _now().isoformat()),
+        )
+        await self._conn.commit()
+        return await self.active_strikes(user_id)
+
+    async def active_strikes(self, user_id: int) -> int:
+        """Strikes that have not yet expired (30-day window)."""
+        cutoff = (_now() - timedelta(days=30)).isoformat()
+        async with self._conn.execute(
+            "SELECT COUNT(*) AS n FROM strikes WHERE user_id = ? AND created_at > ?",
+            (user_id, cutoff),
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def set_ban(self, user_id: int, until: datetime) -> None:
+        await self._conn.execute(
+            "INSERT INTO bans (user_id, until) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET until = excluded.until",
+            (user_id, until.isoformat()),
+        )
+        await self._conn.commit()
+
+    async def banned_until(self, user_id: int) -> datetime | None:
+        """Return the ban expiry if the user is currently banned, else None."""
+        async with self._conn.execute(
+            "SELECT until FROM bans WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        until = datetime.fromisoformat(row["until"])
+        return until if until > _now() else None
 
 
 async def open_database(paths: Sequence[str | Path] | None = None) -> Database:  # pragma: no cover

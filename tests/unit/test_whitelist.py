@@ -65,6 +65,31 @@ async def test_admin_passes_and_is_auto_added(
     assert await db.is_allowed(99) is True  # auto-added
 
 
+async def test_banned_user_blocked(db: Database) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    await db.allow(5)
+    await db.set_ban(5, datetime.now(UTC) + timedelta(hours=1))
+    mw = WhitelistMiddleware(db)
+    handler = AsyncMock()
+    event = AsyncMock()
+    await mw(handler, event, {"event_from_user": _user(5)})
+    handler.assert_not_called()  # blocked by active ban
+    event.answer.assert_awaited_once()
+
+
+async def test_admin_exempt_from_ban(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    monkeypatch.setenv("APP_ADMIN_IDS", "9")
+    get_settings.cache_clear()
+    await db.set_ban(9, datetime.now(UTC) + timedelta(hours=1))
+    mw = WhitelistMiddleware(db)
+    handler = AsyncMock()
+    await mw(handler, AsyncMock(), {"event_from_user": _user(9)})
+    handler.assert_awaited_once()  # admins bypass bans
+
+
 async def test_service_update_without_user_passes(db: Database) -> None:
     mw = WhitelistMiddleware(db)
     handler = AsyncMock()

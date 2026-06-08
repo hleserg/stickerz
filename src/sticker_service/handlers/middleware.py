@@ -37,14 +37,26 @@ class WhitelistMiddleware(BaseMiddleware):
         if user is None:  # service updates without a user — let aiogram handle
             return await handler(event, data)
 
-        if user.id in get_settings().admin_id_set:
+        is_admin = user.id in get_settings().admin_id_set
+        if is_admin:
             await self._db.allow(user.id, getattr(user, "username", None))
-            return await handler(event, data)
+        elif not await self._db.is_allowed(user.id):
+            answer = getattr(event, "answer", None)
+            if answer is not None:
+                await answer(DENIAL)
+            return None
 
-        if await self._db.is_allowed(user.id):
-            return await handler(event, data)
+        # Temporary ban from auto-moderation (admins are exempt).
+        if not is_admin:
+            until = await self._db.banned_until(user.id)
+            if until is not None:
+                answer = getattr(event, "answer", None)
+                if answer is not None:
+                    local = until.astimezone()
+                    await answer(
+                        "🚫 Вы временно заблокированы за нарушение правил (/rules) до "
+                        f"{local:%d.%m %H:%M}."
+                    )
+                return None
 
-        answer = getattr(event, "answer", None)
-        if answer is not None:
-            await answer(DENIAL)
-        return None
+        return await handler(event, data)

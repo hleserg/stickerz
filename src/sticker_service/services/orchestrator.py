@@ -87,6 +87,12 @@ class Orchestrator:
             style, photo, subject_type=subject_type, child_age=child_age, on_step=on_step
         )
 
+    async def validate_photo(self, image: bytes) -> str | None:
+        """Vision foolproof check on upload; returns a problem code or None."""
+        from sticker_service.services.photo_check import validate_photo
+
+        return await validate_photo(self._model, image)
+
     async def save_character(
         self,
         *,

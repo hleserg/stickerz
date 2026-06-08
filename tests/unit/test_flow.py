@@ -68,13 +68,24 @@ async def test_consent_recorded_before_photo(db: Database) -> None:
     callback.answer.assert_awaited_once()
 
 
-async def test_name_advances_to_subject() -> None:
+async def test_name_advances_to_subject(db: Database) -> None:
     state = _state()
     message = AsyncMock()
     message.text = "Лёшик 🎨"
-    await on_name(message, state)
+    message.from_user = SimpleNamespace(id=1)
+    await on_name(message, state, db)
     assert (await state.get_data())["name"] == "Лёшик 🎨"
     assert await state.get_state() == NewPack.subject.state
+
+
+async def test_name_profane_is_struck(db: Database) -> None:
+    state = _state()
+    message = AsyncMock()
+    message.text = "хуй"
+    message.from_user = SimpleNamespace(id=1)
+    await on_name(message, state, db)
+    assert await state.get_state() != NewPack.subject.state  # rejected
+    assert await db.active_strikes(1) == 1  # a strike was recorded
 
 
 async def test_child_is_asked_age(loader: StyleLoader) -> None:

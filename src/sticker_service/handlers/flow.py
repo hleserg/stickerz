@@ -27,12 +27,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sticker_service.db import Database
 from sticker_service.observability import tag_component
+from sticker_service.services import photo_check
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import Orchestrator
 from sticker_service.services.postprocess import bundle_zip, compose_preview
 from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers import STANDARD_BLOCK, selected_captions
+from sticker_service.services.strikes import register_strike
 
 logger = logging.getLogger(__name__)
 
@@ -201,26 +203,64 @@ async def on_consent(callback: CallbackQuery, state: FSMContext, db: Database) -
     await callback.answer()
 
 
-async def on_photo(message: Message, state: FSMContext) -> None:  # pragma: no cover
-    """Accept the photo (only valid after consent), then ask for a name."""
+_PHOTO_HINTS = {
+    photo_check.NO_PERSON: "Не вижу человека на фото. Пришли фото, где есть человек.",
+    photo_check.MULTI: "На фото больше одного человека. Нужен ровно один.",
+    photo_check.SMALL: "Человек слишком мелкий — пусть занимает хотя бы 1/5 кадра.",
+}
+
+
+async def on_photo(  # pragma: no cover
+    message: Message, state: FSMContext, orchestrator: Orchestrator, db: Database
+) -> None:
+    """Accept + validate the photo (vision foolproof check), then ask for a name."""
     tag_component("handlers.flow")
     if not message.photo:
         await message.answer("Нужно именно фото. Пришли изображение человека.")
         return
     bot = message.bot
     file = await bot.download(message.photo[-1].file_id)  # type: ignore[union-attr]
-    await state.update_data(photo=file.read() if file else b"")
+    photo = file.read() if file else b""
+    uid = message.from_user.id if message.from_user else 0
+    try:
+        code = await orchestrator.validate_photo(photo)
+    except Exception as exc:  # vision check failed — let it through rather than block
+        logger.warning("photo check failed: %s", str(exc)[:100])
+        code = None
+    if code == photo_check.NUDE:
+        await _strike(db, uid, message, "На фото обнажёнка")
+        return
+    if code is not None:
+        await message.answer(_PHOTO_HINTS.get(code, "Фото не подходит, пришли другое."))
+        return
+    await state.update_data(photo=photo)
     await state.set_state(NewPack.name)
     await message.answer("Как назвать пак/персонажа? (можно кириллицу и эмодзи)")
 
 
-async def on_name(message: Message, state: FSMContext) -> None:
+async def _strike(
+    db: Database, user_id: int, msg: Message, reason: str
+) -> None:  # pragma: no cover
+    """Record a moderation strike and tell the user (ban enforced by middleware)."""
+    count, until = await register_strike(db, user_id)
+    text = f"⚠️ {reason}. Это нарушение правил (/rules). Страйков: {count}."
+    if until is not None:
+        text += " Вы временно заблокированы."
+    await msg.answer(text)
+
+
+async def on_name(message: Message, state: FSMContext, db: Database) -> None:
     """Store the human name (moderated), then ask adult/child."""
     tag_component("handlers.flow")
     name = (message.text or "").strip()
     reason = caption_rejection_reason(name)
     if reason:
-        await message.answer(f"⚠️ Так назвать нельзя ({reason}). Введите другое имя.")
+        await _strike(
+            db,
+            message.from_user.id if message.from_user else 0,
+            message,
+            f"Так назвать нельзя ({reason})",
+        )
         return
     await state.update_data(name=name or "Мой пак")
     await state.set_state(NewPack.subject)
@@ -334,13 +374,17 @@ async def on_custom_no(callback: CallbackQuery, state: FSMContext) -> None:  # p
         await _show_review(callback.message, state)
 
 
-async def on_enter_custom(message: Message, state: FSMContext) -> None:  # pragma: no cover
+async def on_enter_custom(
+    message: Message, state: FSMContext, db: Database
+) -> None:  # pragma: no cover
     """Append a typed custom caption (capped at 24), then show the review list."""
     tag_component("handlers.flow")
     text = (message.text or "").strip()
     reason = caption_rejection_reason(text)
     if reason:
-        await message.answer(f"⚠️ Так нельзя ({reason}). Введите другой вариант.")
+        await _strike(
+            db, message.from_user.id if message.from_user else 0, message, f"Так нельзя ({reason})"
+        )
         return
     data = await state.get_data()
     custom = list(data.get("custom", []))
