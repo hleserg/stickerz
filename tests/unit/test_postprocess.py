@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw
 from sticker_service.services.postprocess import (
     chroma_key,
     chroma_key_auto,
+    drop_text_strips,
     encode_sticker,
     fit_to_512,
     grid_for,
@@ -92,6 +93,32 @@ def test_encode_sticker_under_limit() -> None:
     assert len(data) <= 512 * 1024
 
 
+def test_drop_text_strips_removes_short_wide_fragments() -> None:
+    def blank(w: int, h: int) -> Image.Image:
+        return Image.new("RGBA", (w, h), (0, 0, 0, 255))
+
+    # Two character pieces (tall) + one detached caption line (short, wide).
+    pieces = [blank(300, 400), blank(280, 420), blank(320, 60)]
+    kept = drop_text_strips(pieces)
+    assert len(kept) == 2  # the 320×60 text strip is dropped
+    assert all(p.size[1] > 100 for p in kept)
+
+
+def test_drop_text_strips_keeps_uniform_pieces() -> None:
+    same = [Image.new("RGBA", (300, 400), (0, 0, 0, 255)) for _ in range(3)]
+    assert len(drop_text_strips(same)) == 3  # nothing is an outlier → keep all
+
+
+def test_process_sheet_drops_text_only_sticker() -> None:
+    # A character square per row plus a detached caption strip floating in the gap.
+    sheet = Image.new("RGBA", (240, 320), MAGENTA)
+    draw = ImageDraw.Draw(sheet)
+    draw.rectangle([40, 10, 200, 170], fill=(0, 128, 255, 255))  # tall character
+    draw.rectangle([60, 250, 190, 280], fill=(255, 255, 255, 255))  # detached caption line
+    stickers = process_sheet(sheet)
+    assert len(stickers) == 1  # only the character survives; text-only strip dropped
+
+
 def test_process_sheet_end_to_end() -> None:
     buffer = BytesIO()
     _make_sheet().save(buffer, format="PNG")
@@ -148,3 +175,17 @@ def test_process_sheet_grid_fallback_when_chroma_fails() -> None:
     assert len(stickers) == 6
     for data in stickers:
         assert max(Image.open(BytesIO(data)).size) == 512
+
+
+def test_process_sheet_keeps_clean_chroma_when_expected_met() -> None:
+    # 14 well-separated magenta stickers in a 4×4 grid (16 cells): chroma slicing
+    # finds all 14, so we must NOT fall back to the grid just because 14 < 16.
+    cell = 100
+    sheet = Image.new("RGBA", (4 * cell, 4 * cell), MAGENTA)
+    draw = ImageDraw.Draw(sheet)
+    for i in range(14):
+        r, c = divmod(i, 4)
+        x, y = c * cell + 20, r * cell + 20
+        draw.rectangle([x, y, x + 60, y + 60], fill=(0, 120, 200, 255))
+    stickers = process_sheet(sheet, grid=(4, 4), expected=14)
+    assert len(stickers) == 14  # clean chroma result kept, no junky grid fallback

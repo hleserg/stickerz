@@ -199,6 +199,25 @@ def grid_slice(
     return out
 
 
+def drop_text_strips(pieces: list[Image.Image]) -> list[Image.Image]:
+    """Remove detached caption-only fragments so every sticker keeps the character.
+
+    When the model renders a caption in the background gap (not on the figure),
+    connected-component slicing cuts that line of text into its own piece — a
+    text-only "sticker", which is never valid: a sticker must depict the drawn
+    character (a caption that sits *on* the character stays part of its taller
+    component and is preserved). A detached caption is a short, wide strip, so we
+    drop pieces that are much shorter than the typical piece and clearly wide.
+    Never returns an empty list.
+    """
+    if len(pieces) < 2:
+        return pieces
+    heights = sorted(p.size[1] for p in pieces)
+    median_h = heights[len(heights) // 2]
+    kept = [p for p in pieces if not (p.size[1] < 0.5 * median_h and p.size[0] > 1.6 * p.size[1])]
+    return kept or pieces
+
+
 def process_sheet(
     sheet: bytes | Image.Image,
     *,
@@ -206,17 +225,28 @@ def process_sheet(
     tolerance: float = 80.0,
     min_area: int = 256,
     grid: tuple[int, int] | None = None,
+    expected: int | None = None,
 ) -> list[bytes]:
-    """Full pipeline: chroma-key → slice → fit 512 → encode. Returns PNG/WebP bytes.
+    """Full pipeline: chroma-key → slice → drop text strips → fit 512 → encode.
 
-    If ``grid`` is given and chroma slicing under-performs (model used an off
-    background or left no gaps), fall back to cutting that regular grid.
+    Detached caption-only fragments are dropped first so no sticker is text without
+    a character. Only when connected-component slicing falls short of the expected
+    number of stickers do we fall back to cutting the regular ``grid`` (for sheets
+    where the model used an off background or left no gaps); we then keep whichever
+    result is closest to ``expected``. ``expected`` defaults to ``rows*cols-1`` so
+    callers that don't know the exact count keep the previous behaviour.
     """
     image = sheet if isinstance(sheet, Image.Image) else Image.open(BytesIO(sheet))
     keyed = chroma_key(image, chroma=chroma, tolerance=tolerance)
-    pieces = slice_sheet(keyed, min_area=min_area)
+    pieces = drop_text_strips(slice_sheet(keyed, min_area=min_area))
     if grid is not None:
         rows, cols = grid
-        if len(pieces) < rows * cols - 1:
-            pieces = grid_slice(image, rows, cols)
+        target = expected if expected is not None else rows * cols - 1
+        if len(pieces) < target:
+            grid_pieces = drop_text_strips(grid_slice(image, rows, cols))
+            if expected is not None:
+                # Keep whichever slicing landed closest to the real caption count.
+                pieces = min((pieces, grid_pieces), key=lambda ps: abs(len(ps) - expected))
+            else:
+                pieces = grid_pieces
     return [encode_sticker(fit_to_512(piece)) for piece in pieces]

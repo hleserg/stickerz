@@ -42,8 +42,11 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
     return (
         f"Draw the SAME character as in the reference image as a sheet of {len(captions)} "
         f"stickers arranged in a regular, even grid of exactly {rows} rows by {cols} columns. "
-        f"Each sticker shows the character in a "
+        f"EVERY sticker MUST clearly depict the drawn character in a "
         f"different emotion or pose with a Russian caption, in this order: {caption_list}. "
+        f"Never make a tile that is only text — text alone is not a sticker. "
+        f"Place each caption directly ON the character (overlapping the lower part of the "
+        f"figure), not floating alone in the background gap. "
         f"All captions strictly in Russian (Cyrillic) only — no other language; "
         f"render the text cleanly, with no character artifacts. "
         f"The background MUST be a solid flat {CHROMA} magenta everywhere between and around "
