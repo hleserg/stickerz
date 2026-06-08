@@ -24,6 +24,7 @@ from sticker_service.handlers.flow import (
     _generation_gate,
     _prev_state,
     _progress_bar,
+    _retry_kb,
     _review_text,
     _screen_for,
     cmd_addto,
@@ -275,6 +276,15 @@ def test_review_text_numbers_captions_and_handles_empty() -> None:
     listing = _review_text(["Привет", "Пока"])
     assert "1. Привет" in listing and "2. Пока" in listing
     assert "ничего не выбрано" in _review_text([])
+
+
+def test_retry_kb_counts_down_then_activates() -> None:
+    # While counting down the button is inactive (a "wait" callback) and shows the
+    # remaining seconds; at zero it becomes the live "try again" retry button.
+    waiting = _retry_kb(20).inline_keyboard[0][0]
+    assert "20" in waiting.text and waiting.callback_data == "retry:wait"
+    ready = _retry_kb(0).inline_keyboard[0][0]
+    assert "ещё раз" in ready.text.lower() and ready.callback_data == "retry:gen"
 
 
 def test_review_text_shows_limit_notice_only_when_full() -> None:
