@@ -15,13 +15,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from sticker_service.config import get_settings
 from sticker_service.db import Character, Database, Pack
 from sticker_service.db.models import SubjectType
 from sticker_service.services.canonical.engine import CanonicalEngine
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.canonical.schema import Style
 from sticker_service.services.models.base import ImageModel
-from sticker_service.services.postprocess import grid_for, process_sheet
+from sticker_service.services.postprocess import apply_watermark, grid_for, process_sheet
 from sticker_service.services.publish import Publisher
 from sticker_service.services.publish.naming import build_set_name
 from sticker_service.services.publish.publisher import StickerInput
@@ -382,6 +383,9 @@ class Orchestrator:
             stickers.extend(process_sheet(sheet, grid=grid_for(len(page)), expected=len(page)))
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
+        settings = get_settings()
+        if settings.watermark_enabled:
+            stickers = [apply_watermark(s, text=settings.watermark_text) for s in stickers]
         await self._stage(on_stage, "slice")
         logger.info("slice: produced %d stickers total", len(stickers))
         await self._stage(on_stage, "emoji")
