@@ -17,6 +17,7 @@ import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from aiogram import F, Router
@@ -29,14 +30,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.observability import tag_component
-from sticker_service.services import analytics, budget, modes, photo_check
+from sticker_service.services import analytics, budget, modes, photo_check, pricing
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.models import errors as model_errors
 from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import Orchestrator
 from sticker_service.services.postprocess import bundle_zip, compose_preview
 from sticker_service.services.publish.publisher import StickerInput
-from sticker_service.services.stickers import STANDARD_BLOCK, selected_captions
+from sticker_service.services.stickers import MAX_CAPTIONS, STANDARD_BLOCK, selected_captions
 from sticker_service.services.strikes import register_strike
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,12 @@ class NewPack(StatesGroup):
     enter_custom = State()  # awaiting a custom caption (force reply)
     review = State()  # numbered list + create/add/remove
     publish = State()  # stickers generated, preview shown, awaiting publish/download
+
+
+class Redraw(StatesGroup):
+    """FSM for redrawing an existing character's canonical from a new photo."""
+
+    photo = State()
 
 
 # --- keyboards (pure) --------------------------------------------------------
@@ -189,8 +196,8 @@ async def _alpha_gate(db: Database, user_id: int) -> str | None:  # pragma: no c
     return None
 
 
-async def _generation_gate(db: Database, user_id: int) -> str | None:  # pragma: no cover
-    """Budget + per-user generation limits for approved alpha participants."""
+async def _generation_gate(db: Database, user_id: int, cost: int) -> str | None:  # pragma: no cover
+    """Budget + per-user credit check for an action costing ``cost`` credits."""
     if _is_admin(user_id) or await modes.get_mode(db) != modes.ALPHA:
         return None
     if not await budget.enough_for(db, 2):
@@ -198,9 +205,11 @@ async def _generation_gate(db: Database, user_id: int) -> str | None:  # pragma:
             "⛔ Тестирование временно приостановлено из-за исчерпания бюджета. "
             "Скоро либо пополним бюджет, либо перейдём в бета-стадию — ждите уведомлений."
         )
-    if await db.generations_left(user_id) <= 0:
+    left = await db.credits_left(user_id)
+    if left < cost:
         return (
-            "К сожалению, генерации для тестирования закончились. "
+            f"Недостаточно паков: действие стоит {pricing.format_packs(cost)}, "
+            f"а осталось {pricing.format_packs(left)}. "
             "Огромное спасибо за участие в альфе проекта! 🙏"
         )
     return None
@@ -337,7 +346,7 @@ async def _start_selection(msg: Message, state: FSMContext) -> None:  # pragma: 
     await state.set_state(NewPack.select_std)
     await msg.answer(
         "Выберите стандартные стикеры, которые надо включить в набор. Дальше "
-        "сможете добавить свои, но всего не больше 24.",
+        "сможете добавить свои, но всего не больше 15 (один лист).",
         reply_markup=std_checklist_kb(list(range(len(STANDARD_BLOCK))), 0),
     )
 
@@ -414,7 +423,7 @@ async def on_custom_no(callback: CallbackQuery, state: FSMContext) -> None:  # p
 async def on_enter_custom(
     message: Message, state: FSMContext, db: Database
 ) -> None:  # pragma: no cover
-    """Append a typed custom caption (capped at 24), then show the review list."""
+    """Append a typed custom caption (capped at MAX_CAPTIONS), then show the review list."""
     tag_component("handlers.flow")
     text = (message.text or "").strip()
     reason = caption_rejection_reason(text)
@@ -426,7 +435,7 @@ async def on_enter_custom(
     data = await state.get_data()
     custom = list(data.get("custom", []))
     total = len(selected_captions(data.get("std_sel", []), custom))
-    if text and total < 24:
+    if text and total < MAX_CAPTIONS:
         custom.append(text)
         await state.update_data(custom=custom)
     await _show_review(message, state)
@@ -501,9 +510,19 @@ async def on_rev_create(  # pragma: no cover
     if not captions:
         await msg.answer("Выберите хотя бы один стикер.")
         return
-    if (hint := await _generation_gate(db, user_id)) is not None:
+    mode = data.get("mode", "fresh")
+    cost = pricing.cost_for_mode(mode)
+    if (hint := await _generation_gate(db, user_id, cost)) is not None:
         await msg.answer(hint)
         return
+
+    # Inform of the price before doing the (paid) work, for alpha participants.
+    if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
+        have = await db.credits_left(user_id)
+        await msg.answer(
+            f"💸 Это действие спишет {pricing.format_packs(cost)} пак "
+            f"(сейчас у тебя {pricing.format_packs(have)})."
+        )
 
     std_names = [STANDARD_BLOCK[i] for i in sorted(set(data.get("std_sel", [])))]
     await analytics.log(
@@ -527,7 +546,6 @@ async def on_rev_create(  # pragma: no cover
         with contextlib.suppress(Exception):
             await status.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
 
-    mode = data.get("mode", "fresh")
     try:
         async with _typing(msg):
             bundle = await orchestrator.build_for_review(
@@ -568,9 +586,12 @@ async def on_rev_create(  # pragma: no cover
         msg, state, bundle.stickers, mode=mode, title=bundle.title, pack_id=bundle.pack_id
     )
 
-    # Alpha: one generation consumed per delivered review; alert admins on low budget.
+    # Alpha: charge the action's credits and tell the user the remaining balance.
     if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
-        await db.consume_generation(user_id)
+        left = await db.consume_credits(user_id, cost)
+        await msg.answer(
+            f"Списано {pricing.format_packs(cost)} пак. Осталось: {pricing.format_packs(left)}."
+        )
     for alert in await budget.pending_alerts(db):
         for admin_id in get_settings().admin_id_list:
             with contextlib.suppress(Exception):
@@ -696,17 +717,155 @@ async def cmd_mychars(message: Message, db: Database) -> None:
     for char in characters:
         kb.button(text=f"{char.name} ({char.style_id})", callback_data=f"char:{char.id}")
     kb.adjust(1)
-    await message.answer("Новый пак про сохранённого персонажа:", reply_markup=kb.as_markup())
+    await message.answer(
+        "Твои персонажи. Выбери, чтобы посмотреть каноникл, добавить стикеры "
+        "(0.5 пака) или перерисовать (1 пак):",
+        reply_markup=kb.as_markup(),
+    )
 
 
-async def on_pick_char(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
-    """Reuse a saved character → caption selection → create."""
+async def on_pick_char(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
+    """Show actions for a saved character: show canonical / add stickers / redraw."""
     tag_component("handlers.flow")
     char_id = int((callback.data or "char:0").split(":", 1)[-1])
+    char = await db.get_character(char_id)
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    if char is None:
+        await msg.answer("Персонаж не найден.")
+        return
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🖼 Показать каноникл", callback_data=f"canon:{char_id}")
+    kb.button(
+        text=f"➕ Добавить стикеры ({pricing.format_packs(pricing.COST_ADD_STICKERS)} пака)",
+        callback_data=f"cadd:{char_id}",
+    )
+    kb.button(
+        text=f"🔄 Перерисовать ({pricing.format_packs(pricing.COST_REDRAW)} пак)",
+        callback_data=f"credraw:{char_id}",
+    )
+    kb.adjust(1)
+    await msg.answer(f"«{char.name}» ({char.style_id}). Что сделать?", reply_markup=kb.as_markup())
+
+
+async def on_show_canonical(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
+    """Send the character's saved canonical image."""
+    tag_component("handlers.flow")
+    char_id = int((callback.data or "canon:0").split(":", 1)[-1])
+    char = await db.get_character(char_id)
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    if char is None:
+        await msg.answer("Персонаж не найден.")
+        return
+    try:
+        data = Path(char.canonical_path).read_bytes()
+    except OSError:
+        await msg.answer("Каноникл недоступен. Попробуй перерисовать его.")
+        return
+    await msg.answer_document(
+        BufferedInputFile(data, filename=f"{char.name}.png"),
+        caption=f"Каноникл «{char.name}» ({char.style_id}).",
+    )
+
+
+async def on_char_add(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    """Add stickers to a saved character → caption selection → create (0.5 pack)."""
+    tag_component("handlers.flow")
+    char_id = int((callback.data or "cadd:0").split(":", 1)[-1])
     await state.update_data(mode="reuse", character_id=char_id)
     await callback.answer()
     if isinstance(callback.message, Message):
         await _start_selection(callback.message, state)
+
+
+async def on_char_redraw(  # pragma: no cover
+    callback: CallbackQuery, state: FSMContext, db: Database
+) -> None:
+    """Start redrawing a character's canonical: charge gate, then ask for a new photo."""
+    tag_component("handlers.flow")
+    char_id = int((callback.data or "credraw:0").split(":", 1)[-1])
+    user_id = callback.from_user.id if callback.from_user else 0
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    char = await db.get_character(char_id)
+    if char is None:
+        await msg.answer("Персонаж не найден.")
+        return
+    if (hint := await _generation_gate(db, user_id, pricing.COST_REDRAW)) is not None:
+        await msg.answer(hint)
+        return
+    await state.clear()
+    await state.update_data(redraw_char_id=char_id)
+    await state.set_state(Redraw.photo)
+    await msg.answer(
+        f"🔄 Перерисовка «{char.name}» спишет {pricing.format_packs(pricing.COST_REDRAW)} пак. "
+        "Пришли новое фото человека."
+    )
+
+
+async def on_redraw_photo(  # pragma: no cover
+    message: Message, state: FSMContext, orchestrator: Orchestrator, db: Database
+) -> None:
+    """Receive the new photo, rebuild the canonical, replace it, and charge a pack."""
+    tag_component("handlers.flow")
+    if not message.photo:
+        await message.answer("Нужно именно фото. Пришли изображение человека.")
+        return
+    data = await state.get_data()
+    char = await db.get_character(int(data.get("redraw_char_id", 0)))
+    user_id = message.from_user.id if message.from_user else 0
+    if char is None:
+        await state.clear()
+        await message.answer("Персонаж не найден. Начни заново: /mychars")
+        return
+    file = await message.bot.download(message.photo[-1].file_id)  # type: ignore[union-attr]
+    photo = file.read() if file else b""
+    try:
+        code = await orchestrator.validate_photo(photo)
+    except Exception as exc:  # vision check failed — let it through rather than block
+        logger.warning("photo check failed: %s", str(exc)[:100])
+        code = None
+    if code == photo_check.NUDE:
+        await _strike(db, user_id, message, "На фото обнажёнка")
+        return
+    if code is not None:
+        await message.answer(_PHOTO_HINTS.get(code, "Фото не подходит, пришли другое."))
+        return
+    status = await message.answer("🎨 Перерисовываю персонажа…")
+
+    async def on_step(done: int, total: int) -> None:
+        with contextlib.suppress(Exception):
+            await status.edit_text(f"🎨 Перерисовываю… {_progress_bar(done, total)} {done}/{total}")
+
+    try:
+        async with _typing(message):
+            canonical = await orchestrator.redraw_canonical(char, photo, on_step=on_step)
+    except Exception as exc:
+        logger.exception("redraw failed")
+        await status.edit_text(_friendly_error(exc))
+        if model_errors.is_quota(exc):
+            await _alert_admins_quota(message, exc)
+        return
+    await state.clear()
+    with contextlib.suppress(Exception):
+        await status.delete()
+    await message.answer_document(
+        BufferedInputFile(canonical, filename=f"{char.name}.png"),
+        caption=f"✅ Готово, новый каноникл «{char.name}».",
+    )
+    if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
+        left = await db.consume_credits(user_id, pricing.COST_REDRAW)
+        await message.answer(
+            f"Списано {pricing.format_packs(pricing.COST_REDRAW)} пак. "
+            f"Осталось: {pricing.format_packs(left)}."
+        )
 
 
 async def cmd_addto(message: Message, db: Database) -> None:
@@ -747,7 +906,9 @@ async def cmd_mypacks(message: Message, db: Database) -> None:
         kb.button(text=f"{mark} {pack.title}", callback_data=f"pk:{pack.id}")
     kb.adjust(1)
     await message.answer(
-        "Ваши паки:\n\n🐞 Если что-то не так — напишите /report с подробностями.",
+        "Ваши паки. Выберите пак, чтобы открыть, опубликовать или скачать; "
+        "✅ — опубликованный, 📝 — черновик. Дополнить пак — /addto, новый — /new, "
+        "что умею и цены — /help.\n\n🐞 Если что-то не так — напишите /report.",
         reply_markup=kb.as_markup(),
     )
 
@@ -874,6 +1035,10 @@ def build_router() -> Router:
     router.callback_query.register(on_pub_download, F.data == "pub:dl")
     router.callback_query.register(on_publish_no, F.data == "pub:no")
     router.callback_query.register(on_pick_char, F.data.startswith("char:"))
+    router.callback_query.register(on_show_canonical, F.data.startswith("canon:"))
+    router.callback_query.register(on_char_add, F.data.startswith("cadd:"))
+    router.callback_query.register(on_char_redraw, F.data.startswith("credraw:"))
+    router.message.register(on_redraw_photo, Redraw.photo)
     router.callback_query.register(on_pick_pack, F.data.startswith("extend:"))
     router.callback_query.register(on_pick_saved_pack, F.data.startswith("pk:"))
     router.callback_query.register(on_saved_publish, F.data.startswith("pkpub:"))

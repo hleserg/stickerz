@@ -1,12 +1,13 @@
 """The canonical pipeline executor — the heart of the product (§4).
 
 Fully data-driven: one generic loop walks the style's YAML steps, collects the
-declared refs from run state, resolves prompt placeholders, generates, runs the
-gate, and feeds the result forward as the sliding anchor. There is **no
-per-style branching** (invariant §B.4).
+declared refs from run state, resolves prompt placeholders, generates, and feeds
+the result forward as the sliding anchor. There is **no per-style branching**
+(invariant §B.4).
 
-On a gate slip, only *that* step is rolled back and re-shot with a smaller delta
-(a nudge appended to the prompt) — never the whole chain (§4.3).
+The geometry gate is **advisory only** (§4.3): comparing a real photo face to a
+Disney/anime drawing can't yield a meaningful pass/fail, so we never re-shoot —
+we just log an alert when the deviation looks large, and keep the frame.
 """
 
 from __future__ import annotations
@@ -24,10 +25,8 @@ logger = logging.getLogger(__name__)
 # Called after each completed step with (done, total) for progress UIs.
 StepCallback = Callable[[int, int], Awaitable[None]]
 
-_SMALLER_DELTA_NUDGE = (
-    " Make a SMALLER change from the reference this time: keep the face geometry "
-    "identical, move only slightly toward the target style."
-)
+#: Advisory geometry threshold: below this we log an alert (no re-shoot).
+DEFAULT_ALERT_THRESHOLD = 0.25
 
 # Appended on a child-safety refusal to steer past the filter (§6). The empty
 # first element means "try the plain prompt first". Russian — matches the prompts
@@ -46,10 +45,6 @@ def _is_yes(answer: str) -> bool:
 
 class CanonicalError(RuntimeError):
     """The pipeline could not produce a canonical."""
-
-
-class CanonicalGateError(CanonicalError):
-    """A step kept failing the geometry gate after all retries (§4.3)."""
 
 
 def build_age_clause(subject_type: SubjectType, child_age: int | None) -> str:
@@ -75,12 +70,10 @@ class CanonicalEngine:
         self,
         model: ImageModel,
         *,
-        gate_threshold: float = 0.6,
-        max_step_retries: int = 2,
+        alert_threshold: float = DEFAULT_ALERT_THRESHOLD,
     ) -> None:
         self._model = model
-        self._threshold = gate_threshold
-        self._max_step_retries = max_step_retries
+        self._alert_threshold = alert_threshold
 
     async def run(
         self,
@@ -157,39 +150,23 @@ class CanonicalEngine:
         refs: list[bytes],
         gate_prev: bytes,
     ) -> bytes:
-        attempts = self._max_step_retries + 1
-        for attempt in range(attempts):
-            attempt_prompt = prompt if attempt == 0 else prompt + _SMALLER_DELTA_NUDGE
-            logger.info(
-                "canonical step %d: generating (attempt %d/%d, refs=%s)",
-                step.step,
-                attempt + 1,
-                attempts,
-                step.refs,
-            )
-            image = await self._generate_with_refusal_retry(attempt_prompt, refs, step)
-            result = await run_gate(
-                step.gate, self._model, gate_prev, image, threshold=self._threshold
-            )
-            logger.info(
-                "canonical step %d: gate=%s score=%.2f ok=%s",
-                step.step,
-                step.gate,
-                result.score,
-                result.ok,
-            )
-            if result.ok:
-                return image
+        logger.info("canonical step %d: generating (refs=%s)", step.step, step.refs)
+        image = await self._generate_with_refusal_retry(prompt, refs, step)
+        # Advisory gate only: a real face vs a stylised drawing can't be a hard
+        # pass/fail, so we never re-shoot — just alert on a large deviation (§4.3).
+        result = await run_gate(
+            step.gate, self._model, gate_prev, image, threshold=self._alert_threshold
+        )
+        if not result.ok:
             logger.warning(
-                "gate slip on style=%s step=%s attempt=%d (score=%.2f); re-shooting",
+                "canonical geometry alert: style=%s step=%s score=%.2f (advisory; kept)",
                 style_id,
                 step.step,
-                attempt + 1,
                 result.score,
             )
-        raise CanonicalGateError(
-            f"style={style_id} step={step.step} failed the geometry gate after {attempts} attempts"
-        )
+        else:
+            logger.info("canonical step %d: gate=%s score=%.2f", step.step, step.gate, result.score)
+        return image
 
     async def _precheck_skips(self, step: PipelineStep, prev: bytes) -> bool:
         """Ask the configured yes/no question about ``prev``; skip the step on yes."""

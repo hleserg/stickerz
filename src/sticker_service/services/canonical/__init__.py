@@ -5,7 +5,6 @@ from __future__ import annotations
 from sticker_service.services.canonical.engine import (
     CanonicalEngine,
     CanonicalError,
-    CanonicalGateError,
     build_age_clause,
 )
 from sticker_service.services.canonical.gate import GateResult, run_gate
@@ -20,7 +19,6 @@ from sticker_service.services.canonical.schema import (
 __all__ = [
     "CanonicalEngine",
     "CanonicalError",
-    "CanonicalGateError",
     "Distance",
     "Gate",
     "GateResult",

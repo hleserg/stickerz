@@ -146,16 +146,19 @@ async def test_alpha_gate_blocks_unapproved_then_allows(db: Database) -> None:
     assert await _alpha_gate(db, uid) is None  # approved → passes
 
 
-async def test_generation_gate_budget_and_quota(db: Database) -> None:
+async def test_generation_gate_budget_and_credits(db: Database) -> None:
+    from sticker_service.services import pricing
+
     await modes.set_mode(db, modes.ALPHA)
     uid = 99998
+    cost = pricing.COST_NEW_PACK
     await budget.set_budget(db, 100)  # plenty
-    assert await _generation_gate(db, uid) is None  # default quota > 0
-    await db.set_generations(uid, 0)
-    assert "закончились" in (await _generation_gate(db, uid) or "")
-    await db.set_generations(uid, 3)
-    await budget.set_budget(db, 0)  # can't cover 2 more
-    assert "приостановлено" in (await _generation_gate(db, uid) or "")
+    assert await _generation_gate(db, uid, cost) is None  # default credits enough
+    await db.set_credits(uid, 0)
+    assert "Недостаточно" in (await _generation_gate(db, uid, cost) or "")
+    await db.set_credits(uid, cost)
+    await budget.set_budget(db, 0)  # global budget can't cover 2 more
+    assert "приостановлено" in (await _generation_gate(db, uid, cost) or "")
 
 
 async def test_mychars_empty_prompts_new(db: Database) -> None:
