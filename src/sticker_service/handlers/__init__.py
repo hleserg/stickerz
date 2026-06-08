@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from aiogram import Dispatcher
+from aiogram.fsm.storage.base import BaseStorage
 
 from sticker_service.db import Database
 from sticker_service.handlers import admin, apply, flow, report, start
@@ -16,15 +17,18 @@ def build_dispatcher(
     db: Database | None = None,
     orchestrator: Orchestrator | None = None,
     loader: StyleLoader | None = None,
+    storage: BaseStorage | None = None,
 ) -> Dispatcher:
     """Build the root :class:`Dispatcher` with all feature routers registered.
 
     When ``db`` is provided, the whitelist middleware and admin commands are
     wired. When ``orchestrator`` (and ``loader``) are provided, the full
-    pack-building flow is included. Dependencies are injected into handler scope.
-    Argument-optional so the dispatcher can be built and inspected in tests.
+    pack-building flow is included. ``storage`` overrides the FSM backend (a
+    persistent one in production; aiogram's in-memory default otherwise).
+    Dependencies are injected into handler scope. Argument-optional so the
+    dispatcher can be built and inspected in tests.
     """
-    dp = Dispatcher()
+    dp = Dispatcher(storage=storage) if storage is not None else Dispatcher()
     dp.errors.register(on_error)
     if db is not None:
         dp["db"] = db
