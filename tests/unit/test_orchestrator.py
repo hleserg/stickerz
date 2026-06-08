@@ -53,7 +53,7 @@ class _SheetModel(ImageModel):
     def __init__(self) -> None:
         self.generate_calls: list[str] = []
 
-    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
+    async def generate(self, prompt: str, refs: Sequence[bytes] = (), **_: object) -> bytes:
         self.generate_calls.append(prompt)
         n = prompt.count('"') // 2 or 1  # captions are quoted in the sheet prompt
         return _sheet_bytes(n)

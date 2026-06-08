@@ -38,8 +38,20 @@ class ImageModel(ABC):
     name: str = "abstract"
 
     @abstractmethod
-    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
-        """Generate an image; raise :class:`ModelRefusalError` on a safety refusal."""
+    async def generate(
+        self,
+        prompt: str,
+        refs: Sequence[bytes] = (),
+        *,
+        model: str | None = None,
+        image_size: str | None = None,
+    ) -> bytes:
+        """Generate an image; raise :class:`ModelRefusalError` on a safety refusal.
+
+        ``model``/``image_size`` let a caller force a specific image model and
+        output resolution (used by the fallback ladder); providers that don't
+        support them ignore them.
+        """
 
     @abstractmethod
     async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:
@@ -57,3 +69,43 @@ class ImageModel(ABC):
         step.
         """
         return ""
+
+
+# A fallback ladder is an ordered list of (image_model, image_size) rungs.
+Ladder = Sequence[tuple[str, str]]
+
+
+async def generate_via_ladder(
+    model: ImageModel,
+    prompt: str,
+    refs: Sequence[bytes],
+    ladder: Ladder,
+    *,
+    reformulations: Sequence[str] = ("",),
+) -> bytes:
+    """Walk (model, resolution) rungs until one yields an image (§4.3, HLE-1055).
+
+    Per rung the underlying ``generate`` already retries transient 503s; if the
+    rung still can't produce (overload/availability) we drop to the next rung. A
+    safety **refusal** short-circuits the ladder — a different model won't un-flag
+    the content — but we first try the ``reformulations`` (gentler prompts) on the
+    refusing rung. A quota/credits error fails fast.
+    """
+    last: Exception | None = None
+    for image_model, image_size in ladder:
+        refusal: ModelRefusalError | None = None
+        for nudge in reformulations:
+            try:
+                return await model.generate(
+                    prompt + nudge, refs, model=image_model, image_size=image_size
+                )
+            except ModelRefusalError as exc:
+                refusal = exc  # try the next gentler reformulation on this rung
+            except ModelQuotaError:
+                raise  # out of credits — failing over can't help
+            except ModelError as exc:
+                last = exc  # transient/availability exhausted on this rung
+                break
+        if refusal is not None:
+            raise refusal  # all reformulations refused → another model won't help
+    raise last or ModelError("generation ladder exhausted with no attempts")

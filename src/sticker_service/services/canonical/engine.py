@@ -18,7 +18,13 @@ from collections.abc import Awaitable, Callable
 from sticker_service.db.models import SubjectType
 from sticker_service.services.canonical.gate import run_gate
 from sticker_service.services.canonical.schema import PipelineStep, Style
-from sticker_service.services.models.base import ImageModel, ModelRefusalError
+from sticker_service.services.models.base import (
+    ImageModel,
+    Ladder,
+    ModelRefusalError,
+    generate_via_ladder,
+)
+from sticker_service.services.models.gemini import CANONICAL_LADDER
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +77,11 @@ class CanonicalEngine:
         model: ImageModel,
         *,
         alert_threshold: float = DEFAULT_ALERT_THRESHOLD,
+        ladder: Ladder = CANONICAL_LADDER,
     ) -> None:
         self._model = model
         self._alert_threshold = alert_threshold
+        self._ladder = ladder
 
     async def run(
         self,
@@ -151,7 +159,14 @@ class CanonicalEngine:
         gate_prev: bytes,
     ) -> bytes:
         logger.info("canonical step %d: generating (refs=%s)", step.step, step.refs)
-        image = await self._generate_with_refusal_retry(prompt, refs, step)
+        try:
+            image = await generate_via_ladder(
+                self._model, prompt, refs, self._ladder, reformulations=_WHOLESOME_NUDGES
+            )
+        except ModelRefusalError as exc:
+            raise CanonicalError(
+                f"step {step.step}: model refused generation after reformulations ({exc})"
+            ) from exc
         # Advisory gate only: a real face vs a stylised drawing can't be a hard
         # pass/fail, so we never re-shoot — just alert on a large deviation (§4.3).
         result = await run_gate(
@@ -175,21 +190,6 @@ class CanonicalEngine:
         answer = await self._model.ask(prev, step.skip_if_yes)
         logger.info("canonical step %d: pre-check answer=%r", step.step, answer)
         return _is_yes(answer)
-
-    async def _generate_with_refusal_retry(
-        self, prompt: str, refs: list[bytes], step: PipelineStep
-    ) -> bytes:
-        """Generate, retrying with a wholesome reformulation on a safety refusal (§6)."""
-        last: ModelRefusalError | None = None
-        for nudge in _WHOLESOME_NUDGES:
-            try:
-                return await self._model.generate(prompt + nudge, refs)
-            except ModelRefusalError as exc:
-                last = exc
-                logger.warning("canonical step %d: refused (%s); reformulating", step.step, exc)
-        raise CanonicalError(
-            f"step {step.step}: model refused generation after reformulations ({last})"
-        )
 
     @staticmethod
     def _collect_refs(

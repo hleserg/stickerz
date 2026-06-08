@@ -31,6 +31,20 @@ _IMAGE_FALLBACKS = ("gemini-3.1-flash-image", "gemini-2.5-flash-image")
 #: Vision/text model for the geometry gate and emoji picking (cheap + fast).
 VISION_MODEL = "gemini-2.5-flash"
 
+FLASH_MODEL = _IMAGE_FALLBACKS[0]  # gemini-3.1-flash-image
+# Fallback ladders (model, resolution) — HLE-1055. pro primary (quality), flash
+# fallback when pro is overloaded; resolution steps down to survive demand spikes.
+CANONICAL_LADDER: tuple[tuple[str, str], ...] = (
+    (IMAGE_MODEL, "1K"),  # canonical reference — small is enough
+    (FLASH_MODEL, "4K"),
+    (FLASH_MODEL, "2K"),
+)
+SHEET_LADDER: tuple[tuple[str, str], ...] = (
+    (IMAGE_MODEL, "4K"),  # sheet carries Cyrillic captions — keep it sharp
+    (IMAGE_MODEL, "2K"),
+    (FLASH_MODEL, "4K"),
+)
+
 _MAX_GEN_ATTEMPTS = 6
 _REFUSAL_REASONS = ("SAFETY", "PROHIBITED", "BLOCK", "RECITATION")
 _FLOAT_RE = re.compile(r"\d+(?:\.\d+)?|\.\d+")
