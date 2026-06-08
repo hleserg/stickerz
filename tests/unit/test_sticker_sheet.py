@@ -40,7 +40,7 @@ class _RefuserModel(ImageModel):
         self._left = refuse_times
         self.calls: list[str] = []
 
-    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
+    async def generate(self, prompt: str, refs: Sequence[bytes] = (), **_: object) -> bytes:
         self.calls.append(prompt)
         if self._left > 0:
             self._left -= 1
@@ -121,10 +121,9 @@ async def test_generate_sheet_retries_then_succeeds() -> None:
     assert len(model.calls) == 3  # 2 refusals + 1 success
 
 
-async def test_generate_sheet_gives_up_after_retries() -> None:
-    model = _RefuserModel(refuse_times=5)
+async def test_generate_sheet_gives_up_after_reformulations() -> None:
+    model = _RefuserModel(refuse_times=99)  # always refuses
     with pytest.raises(SheetRefusedError):
-        await generate_sheet(
-            model, b"CANON", _style(), ["Привет!"], subject_type="adult", max_refusal_retries=3
-        )
+        await generate_sheet(model, b"CANON", _style(), ["Привет!"], subject_type="adult")
+    # refusal doesn't fail over to other models (flash won't un-flag) → one rung of nudges
     assert len(model.calls) == 3

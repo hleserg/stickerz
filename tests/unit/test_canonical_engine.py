@@ -27,7 +27,7 @@ class _RefuseThenOk(ImageModel):
         self._left = refuse_times
         self.calls = 0
 
-    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
+    async def generate(self, prompt: str, refs: Sequence[bytes] = (), **_: object) -> bytes:
         self.calls += 1
         if self._left > 0:
             self._left -= 1

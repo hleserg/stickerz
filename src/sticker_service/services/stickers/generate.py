@@ -13,12 +13,12 @@ import logging
 from sticker_service.db.models import SubjectType
 from sticker_service.services.canonical.engine import build_age_clause
 from sticker_service.services.canonical.schema import Style
-from sticker_service.services.models.base import ImageModel, ModelRefusalError
+from sticker_service.services.models.base import ImageModel, ModelRefusalError, generate_via_ladder
+from sticker_service.services.models.gemini import SHEET_LADDER
 
 logger = logging.getLogger(__name__)
 
 CHROMA = "#FF00FF"
-MAX_REFUSAL_RETRIES = 3
 
 # Appended on each refusal retry to steer away from the safety trigger (§6).
 _REFORMULATIONS: tuple[str, ...] = (
@@ -64,25 +64,19 @@ async def generate_sheet(
     *,
     subject_type: SubjectType,
     child_age: int | None = None,
-    max_refusal_retries: int = MAX_REFUSAL_RETRIES,
 ) -> bytes:
-    """Generate the sheet in one call; retry with reformulation on refusal."""
+    """Generate the sheet in one call, walking the model/resolution ladder (§6, HLE-1055)."""
     age_clause = build_age_clause(subject_type, child_age)
     base_prompt = build_sheet_prompt(style, captions, age_clause)
 
     logger.info("sheet: generating %d stickers in one call", len(captions))
-    for attempt in range(max_refusal_retries):
-        reformulation = _REFORMULATIONS[min(attempt, len(_REFORMULATIONS) - 1)]
-        try:
-            sheet = await model.generate(base_prompt + reformulation, refs=[canonical])
-            logger.info("sheet: generated (%d bytes)", len(sheet))
-            return sheet
-        except ModelRefusalError:
-            logger.warning(
-                "sheet generation refused (attempt %d/%d); reformulating",
-                attempt + 1,
-                max_refusal_retries,
-            )
-    raise SheetRefusedError(
-        f"model refused the sheet after {max_refusal_retries} attempts (style={style.style_id})"
-    )
+    try:
+        sheet = await generate_via_ladder(
+            model, base_prompt, [canonical], SHEET_LADDER, reformulations=_REFORMULATIONS
+        )
+    except ModelRefusalError as exc:
+        raise SheetRefusedError(
+            f"model refused the sheet after reformulations (style={style.style_id})"
+        ) from exc
+    logger.info("sheet: generated (%d bytes)", len(sheet))
+    return sheet

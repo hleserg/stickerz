@@ -33,7 +33,14 @@ class GptImageModel(ImageModel):
             self._client = AsyncOpenAI(api_key=self._api_key)
         return self._client
 
-    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:  # pragma: no cover
+    async def generate(  # pragma: no cover
+        self,
+        prompt: str,
+        refs: Sequence[bytes] = (),
+        *,
+        model: str | None = None,
+        image_size: str | None = None,
+    ) -> bytes:
         raise ModelError("GPT generate() is calibrated on the prototype (§15.1)")
 
     async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:  # pragma: no cover

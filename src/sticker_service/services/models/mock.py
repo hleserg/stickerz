@@ -46,7 +46,14 @@ class MockImageModel(ImageModel):
         #: prompts seen, in order — handy for asserting one-call-per-sheet etc.
         self.generate_calls: list[str] = []
 
-    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
+    async def generate(
+        self,
+        prompt: str,
+        refs: Sequence[bytes] = (),
+        *,
+        model: str | None = None,
+        image_size: str | None = None,
+    ) -> bytes:
         self.generate_calls.append(prompt)
         if self._refuse_on is not None and self._refuse_on in prompt:
             raise ModelRefusalError("mock refusal (safety filter simulation)")
