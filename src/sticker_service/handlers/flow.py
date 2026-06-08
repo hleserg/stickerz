@@ -5,6 +5,17 @@ style → canonical → confirm → published pack, and the "add to pack" branch
 Business logic lives in the tested service layer (orchestrator, engine,
 postprocess); this module wires Telegram interaction to it.
 
+UX model — a single "wizard message" per flow:
+- The bot keeps ONE message ("wizard message", its id stored in FSM) and EDITS
+  it at every step instead of posting a new message each time, so a whole run
+  reads as one updating card rather than a wall of jumping messages.
+- ``_screen_for`` is the single source of truth that renders any step to
+  ``(text, keyboard)``; forward steps and the ``⬅️ Назад`` button both go through
+  it, so navigation can never drift out of sync.
+- The user's own typed messages (name, captions) are deleted to keep the chat
+  clean; a sent photo is kept, and the wizard is then re-sent *below* the photo
+  so the controls sit under the image, not above it.
+
 Invariants enforced here and covered by tests:
 - consent (fact + timestamp) is recorded implicitly when /new starts (§15.2);
 - age is asked ONLY for children, never for adults (§B.4 / {age_clause}).
@@ -21,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -48,6 +60,24 @@ _STAGE_TEXT = {
     "emoji": "🎭 Подбираю эмодзи…",
     "publish": "📦 Публикую пак в Telegram…",
 }
+
+# --- screen copy (single source of truth for step text) ----------------------
+
+_TXT_PHOTO = (
+    "Создаём новый пак. Пришли фото человека.\n\n"
+    "🐞 Заметишь любой косяк — пожалуйста, напиши /report с подробностями "
+    "(что делал, что не так): это очень помогает улучшать бота."
+)
+_TXT_NAME = "Как назвать пак/персонажа? (можно кириллицу и эмодзи)\n\nНапиши ответ сообщением."
+_TXT_SUBJECT = "Это взрослый или ребёнок?"
+_TXT_AGE = "Сколько лет ребёнку?"
+_TXT_STYLE = "Выбери стиль:"
+_TXT_CAPTIONS = (
+    "Выберите стандартные стикеры для набора. Дальше можно добавить свои, "
+    "но всего не больше 15 (один лист)."
+)
+_TXT_ASK_CUSTOM = "Хотите добавить свои подписи?"
+_TXT_ENTER_CUSTOM = "Напиши свою подпись сообщением (текст для стикера):"
 
 
 def _friendly_error(exc: Exception) -> str:
@@ -105,10 +135,29 @@ class Redraw(StatesGroup):
 # --- keyboards (pure) --------------------------------------------------------
 
 
+def _attach_nav(kb: InlineKeyboardBuilder, *, back: bool) -> None:
+    """Append a trailing ``⬅️ Назад`` / ``❌ Отмена`` row to a builder."""
+    nav = InlineKeyboardBuilder()
+    if back:
+        nav.button(text="⬅️ Назад", callback_data="nav:back")
+    nav.button(text="❌ Отмена", callback_data="nav:cancel")
+    nav.adjust(2)
+    kb.attach(nav)
+
+
+def _nav_kb(*, back: bool) -> Any:
+    """A keyboard with only the nav row (for text-input screens)."""
+    kb = InlineKeyboardBuilder()
+    _attach_nav(kb, back=back)
+    return kb.as_markup()
+
+
 def subject_kb() -> Any:
     kb = InlineKeyboardBuilder()
     kb.button(text="Взрослый", callback_data="subject:adult")
     kb.button(text="Ребёнок", callback_data="subject:child")
+    kb.adjust(2)
+    _attach_nav(kb, back=True)
     return kb.as_markup()
 
 
@@ -117,6 +166,7 @@ def age_kb() -> Any:
     for age in range(19):  # 0..18 (§5.3)
         kb.button(text=str(age), callback_data=f"age:{age}")
     kb.adjust(5)
+    _attach_nav(kb, back=True)
     return kb.as_markup()
 
 
@@ -125,6 +175,7 @@ def style_kb(loader: StyleLoader) -> Any:
     for style_id, display in loader.menu():
         kb.button(text=display, callback_data=f"style:{style_id}")
     kb.adjust(1)
+    _attach_nav(kb, back=True)
     return kb.as_markup()
 
 
@@ -139,7 +190,7 @@ def publish_kb(*, can_publish: bool = True) -> Any:
 
 
 def std_checklist_kb(selected: list[int], page: int) -> Any:
-    """Checklist of standard captions: 12 per page (3×4), toggles + nav + done."""
+    """Checklist of standard captions: toggles + page nav + done + back/cancel."""
     from sticker_service.services.stickers import PER_PAGE, STANDARD_BLOCK
 
     kb = InlineKeyboardBuilder()
@@ -157,6 +208,7 @@ def std_checklist_kb(selected: list[int], page: int) -> Any:
         nav.button(text="▶", callback_data=f"stdpage:{page + 1}")
     nav.button(text="Далее ▶▶", callback_data="stddone")
     kb.attach(nav)
+    _attach_nav(kb, back=True)
     return kb.as_markup()
 
 
@@ -164,6 +216,8 @@ def ask_custom_kb() -> Any:
     kb = InlineKeyboardBuilder()
     kb.button(text="Да", callback_data="cust:yes")
     kb.button(text="Нет", callback_data="cust:no")
+    kb.adjust(2)
+    _attach_nav(kb, back=True)
     return kb.as_markup()
 
 
@@ -177,7 +231,138 @@ def review_kb(total: int) -> Any:
     if total > 0:
         kb.button(text="➖ Убрать стикер", callback_data="rev:remove")
     kb.adjust(1)
+    _attach_nav(kb, back=True)
     return kb.as_markup()
+
+
+def _review_text(captions: list[str]) -> str:
+    """Numbered caption list for the review screen."""
+    if not captions:
+        return "Пока ничего не выбрано. Добавьте хотя бы один стикер."
+    listing = "\n".join(f"{i}. {c}" for i, c in enumerate(captions, start=1))
+    return f"Стикеры ({len(captions)}):\n{listing}"
+
+
+# --- screen rendering + back navigation (pure) -------------------------------
+
+
+def _screen_for(
+    target: str | None, data: dict[str, Any], loader: StyleLoader | None
+) -> tuple[str, Any]:
+    """Render a wizard step to ``(text, keyboard)`` — the single source of truth.
+
+    Forward transitions and the Back button both call this so a step looks
+    identical no matter how it was reached. ``loader`` is required only for the
+    style step.
+    """
+    if target == NewPack.name.state:
+        return _TXT_NAME, _nav_kb(back=False)
+    if target == NewPack.subject.state:
+        return _TXT_SUBJECT, subject_kb()
+    if target == NewPack.child_age.state:
+        return _TXT_AGE, age_kb()
+    if target == NewPack.style.state:
+        if loader is None:
+            raise ValueError("style screen needs a StyleLoader")
+        return _TXT_STYLE, style_kb(loader)
+    if target == NewPack.select_std.state:
+        selected = list(data.get("std_sel", []))
+        page = int(data.get("page", 0))
+        return _TXT_CAPTIONS, std_checklist_kb(selected, page)
+    if target == NewPack.ask_custom.state:
+        return _TXT_ASK_CUSTOM, ask_custom_kb()
+    if target == NewPack.enter_custom.state:
+        return _TXT_ENTER_CUSTOM, _nav_kb(back=True)
+    if target == NewPack.review.state:
+        captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
+        return _review_text(captions), review_kb(len(captions))
+    raise ValueError(f"no screen for state {target!r}")  # pragma: no cover - guard
+
+
+def _prev_state(current: str | None, data: dict[str, Any]) -> str | None:
+    """Map the current wizard step to the one ``⬅️ Назад`` should return to."""
+    if current == NewPack.subject.state:
+        return NewPack.name.state
+    if current == NewPack.child_age.state:
+        return NewPack.subject.state
+    if current == NewPack.style.state:
+        return NewPack.child_age.state if data.get("subject") == "child" else NewPack.subject.state
+    if current == NewPack.select_std.state:
+        return NewPack.style.state
+    if current == NewPack.ask_custom.state:
+        return NewPack.select_std.state
+    if current == NewPack.enter_custom.state:
+        back = data.get("custom_back")
+        return back if isinstance(back, str) else NewPack.ask_custom.state
+    if current == NewPack.review.state:
+        return NewPack.ask_custom.state
+    return None
+
+
+# --- wizard-message plumbing (I/O) -------------------------------------------
+
+
+async def _store_wizard(state: FSMContext, msg: Message) -> None:  # pragma: no cover
+    """Remember which message is the editable wizard for this flow."""
+    await state.update_data(wizard_chat_id=msg.chat.id, wizard_msg_id=msg.message_id)
+
+
+async def _show(  # pragma: no cover
+    callback: CallbackQuery,
+    state: FSMContext,
+    target: str | None,
+    loader: StyleLoader | None,
+    data: dict[str, Any] | None = None,
+) -> None:
+    """Set ``target`` and edit the wizard message in place (callback-driven)."""
+    data = data if data is not None else await state.get_data()
+    text, markup = _screen_for(target, data, loader)
+    await state.set_state(target)
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(text, reply_markup=markup)
+        await _store_wizard(state, callback.message)
+
+
+async def _show_msg(  # pragma: no cover
+    message: Message,
+    state: FSMContext,
+    target: str | None,
+    loader: StyleLoader | None,
+    data: dict[str, Any] | None = None,
+) -> None:
+    """Set ``target`` and edit the stored wizard message (message-driven)."""
+    data = data if data is not None else await state.get_data()
+    text, markup = _screen_for(target, data, loader)
+    await state.set_state(target)
+    cid = data.get("wizard_chat_id")
+    mid = data.get("wizard_msg_id")
+    if cid is not None and mid is not None:
+        try:
+            await message.bot.edit_message_text(  # type: ignore[union-attr]
+                text, chat_id=cid, message_id=mid, reply_markup=markup
+            )
+            return
+        except TelegramBadRequest:
+            pass
+    sent = await message.answer(text, reply_markup=markup)
+    await _store_wizard(state, sent)
+
+
+async def _replace_below(  # pragma: no cover
+    message: Message, state: FSMContext, text: str, markup: Any = None
+) -> Message:
+    """Drop the current wizard message and send a fresh one *below* the user's
+    media, so the bot's controls sit under the photo rather than above it."""
+    data = await state.get_data()
+    cid = data.get("wizard_chat_id")
+    mid = data.get("wizard_msg_id")
+    if cid is not None and mid is not None:
+        with contextlib.suppress(TelegramBadRequest):
+            await message.bot.delete_message(cid, mid)  # type: ignore[union-attr]
+    sent = await message.answer(text, reply_markup=markup)
+    await _store_wizard(state, sent)
+    return sent
 
 
 # --- handlers ----------------------------------------------------------------
@@ -230,11 +415,8 @@ async def cmd_new(message: Message, state: FSMContext, db: Database) -> None:
     if uid:
         await db.record_consent(uid)
     await state.set_state(NewPack.photo)
-    await message.answer(
-        "Создаём новый пак. Пришли фото человека.\n\n"
-        "🐞 Заметишь любой косяк — пожалуйста, напиши /report с подробностями "
-        "(что делал, что не так): это очень помогает улучшать бота."
-    )
+    sent = await message.answer(_TXT_PHOTO, reply_markup=_nav_kb(back=False))
+    await _store_wizard(state, sent)
 
 
 _PHOTO_HINTS = {
@@ -247,15 +429,18 @@ _PHOTO_HINTS = {
 async def on_photo(  # pragma: no cover
     message: Message, state: FSMContext, orchestrator: Orchestrator, db: Database
 ) -> None:
-    """Accept + validate the photo (vision foolproof check), then ask for a name."""
+    """Accept + validate the photo (vision foolproof check), then ask for a name.
+
+    The photo is kept in the chat; the wizard is re-sent *below* it so the next
+    prompt sits under the image.
+    """
     tag_component("handlers.flow")
     if not message.photo:
         await message.answer("Нужно именно фото. Пришли изображение человека.")
         return
-    bot = message.bot
-    await bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
-    status = await message.answer("📸 Принял фото, проверяю…")
-    file = await bot.download(message.photo[-1].file_id)  # type: ignore[union-attr]
+    await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
+    status = await _replace_below(message, state, "📸 Принял фото, проверяю…")
+    file = await message.bot.download(message.photo[-1].file_id)  # type: ignore[union-attr]
     photo = file.read() if file else b""
     uid = message.from_user.id if message.from_user else 0
     try:
@@ -264,14 +449,20 @@ async def on_photo(  # pragma: no cover
         logger.warning("photo check failed: %s", str(exc)[:100])
         code = None
     if code == photo_check.NUDE:
+        with contextlib.suppress(TelegramBadRequest):
+            await status.delete()
         await _strike(db, uid, message, "На фото обнажёнка")
         return
-    if code is not None:
-        await status.edit_text(_PHOTO_HINTS.get(code, "Фото не подходит, пришли другое."))
+    if code is not None:  # stay in photo state; the prompt sits below the bad photo
+        with contextlib.suppress(TelegramBadRequest):
+            await status.edit_text(_PHOTO_HINTS.get(code, "Фото не подходит, пришли другое."))
         return
     await state.update_data(photo=photo)
+    text, markup = _screen_for(NewPack.name.state, await state.get_data(), None)
     await state.set_state(NewPack.name)
-    await status.edit_text("Как назвать пак/персонажа? (можно кириллицу и эмодзи)")
+    with contextlib.suppress(TelegramBadRequest):
+        await status.edit_text(text, reply_markup=markup)
+    await _store_wizard(state, status)
 
 
 async def _strike(
@@ -294,7 +485,7 @@ async def _alert_admins_quota(msg: Message, exc: Exception) -> None:  # pragma: 
 
 
 async def on_name(message: Message, state: FSMContext, db: Database) -> None:
-    """Store the human name (moderated), then ask adult/child."""
+    """Store the human name (moderated), drop the typed message, then ask adult/child."""
     tag_component("handlers.flow")
     name = (message.text or "").strip()
     reason = caption_rejection_reason(name)
@@ -307,50 +498,45 @@ async def on_name(message: Message, state: FSMContext, db: Database) -> None:
         )
         return
     await state.update_data(name=name or "Мой пак")
-    await state.set_state(NewPack.subject)
-    await message.answer("Это взрослый или ребёнок?", reply_markup=subject_kb())
+    with contextlib.suppress(TelegramBadRequest):
+        await message.delete()
+    await _show_msg(message, state, NewPack.subject.state, None)
 
 
 async def on_subject(callback: CallbackQuery, state: FSMContext, loader: StyleLoader) -> None:
     """Branch on subject: ask age ONLY for a child (§B.4)."""
     tag_component("handlers.flow")
     subject = (callback.data or "").split(":", 1)[-1]
+    await callback.answer()
     if subject == "child":
         await state.update_data(subject="child")
-        await state.set_state(NewPack.child_age)
-        if isinstance(callback.message, Message):
-            await callback.message.answer("Сколько лет ребёнку?", reply_markup=age_kb())
+        await _show(callback, state, NewPack.child_age.state, loader)
     else:
         await state.update_data(subject="adult", child_age=None)
-        await state.set_state(NewPack.style)
-        if isinstance(callback.message, Message):
-            await callback.message.answer("Выбери стиль:", reply_markup=style_kb(loader))
-    await callback.answer()
+        await _show(callback, state, NewPack.style.state, loader)
 
 
 async def on_age(callback: CallbackQuery, state: FSMContext, loader: StyleLoader) -> None:
     """Store the child's age (0..18), then ask for a style."""
     tag_component("handlers.flow")
     age = int((callback.data or "age:0").split(":", 1)[-1])
-    await state.update_data(child_age=age)
-    await state.set_state(NewPack.style)
-    if isinstance(callback.message, Message):
-        await callback.message.answer("Выбери стиль:", reply_markup=style_kb(loader))
     await callback.answer()
+    await state.update_data(child_age=age)
+    await _show(callback, state, NewPack.style.state, loader)
 
 
 # --- caption selection → create → preview → publish/download -----------------
 
 
-async def _start_selection(msg: Message, state: FSMContext) -> None:  # pragma: no cover
-    """Begin the standard-caption checklist (all selected by default)."""
-    await state.update_data(std_sel=list(range(len(STANDARD_BLOCK))), custom=[], page=0)
-    await state.set_state(NewPack.select_std)
-    await msg.answer(
-        "Выберите стандартные стикеры, которые надо включить в набор. Дальше "
-        "сможете добавить свои, но всего не больше 15 (один лист).",
-        reply_markup=std_checklist_kb(list(range(len(STANDARD_BLOCK))), 0),
+async def _enter_captions(  # pragma: no cover
+    callback: CallbackQuery, state: FSMContext, *, mode: str, **extra: Any
+) -> None:
+    """Seed caption state (all standard selected) and show the checklist."""
+    await state.update_data(
+        mode=mode, std_sel=list(range(len(STANDARD_BLOCK))), custom=[], page=0, **extra
     )
+    await callback.answer()
+    await _show(callback, state, NewPack.select_std.state, None)
 
 
 async def on_style(
@@ -359,12 +545,9 @@ async def on_style(
     """Store the style and start caption selection (canonical is built on Create)."""
     tag_component("handlers.flow")
     style_id = (callback.data or "").split(":", 1)[-1]
-    await state.update_data(mode="fresh", style_id=style_id)
     if callback.from_user is not None:
         await analytics.log(db, callback.from_user.id, analytics.STYLE_CHOSEN, style_id=style_id)
-    await callback.answer()
-    if isinstance(callback.message, Message):
-        await _start_selection(callback.message, state)
+    await _enter_captions(callback, state, mode="fresh", style_id=style_id)
 
 
 async def on_std_toggle(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
@@ -399,27 +582,21 @@ async def on_std_page(callback: CallbackQuery, state: FSMContext) -> None:  # pr
 
 async def on_std_done(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
     tag_component("handlers.flow")
-    await state.set_state(NewPack.ask_custom)
+    await _show(callback, state, NewPack.ask_custom.state, None)
     await callback.answer()
-    if isinstance(callback.message, Message):
-        await callback.message.answer(
-            "Хотите добавить свои варианты?", reply_markup=ask_custom_kb()
-        )
 
 
 async def on_custom_yes(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
     tag_component("handlers.flow")
-    await state.set_state(NewPack.enter_custom)
+    await state.update_data(custom_back=NewPack.ask_custom.state)
+    await _show(callback, state, NewPack.enter_custom.state, None)
     await callback.answer()
-    if isinstance(callback.message, Message):
-        await callback.message.answer("Введите свой вариант:")
 
 
 async def on_custom_no(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
     tag_component("handlers.flow")
+    await _show(callback, state, NewPack.review.state, None)
     await callback.answer()
-    if isinstance(callback.message, Message):
-        await _show_review(callback.message, state)
 
 
 async def on_enter_custom(
@@ -440,32 +617,16 @@ async def on_enter_custom(
     if text and total < MAX_CAPTIONS:
         custom.append(text)
         await state.update_data(custom=custom)
-    await _show_review(message, state)
-
-
-async def _show_review(msg: Message, state: FSMContext) -> None:  # pragma: no cover
-    data = await state.get_data()
-    captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
-    await state.set_state(NewPack.review)
-    if not captions:
-        await msg.answer(
-            "Пока ничего не выбрано. Добавьте хотя бы один стикер.",
-            reply_markup=review_kb(0),
-        )
-        return
-    listing = "\n".join(f"{i}. {c}" for i, c in enumerate(captions, start=1))
-    await msg.answer(
-        f"Стикеры ({len(captions)}):\n{listing}",
-        reply_markup=review_kb(len(captions)),
-    )
+    with contextlib.suppress(TelegramBadRequest):
+        await message.delete()
+    await _show_msg(message, state, NewPack.review.state, None)
 
 
 async def on_rev_add(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
     tag_component("handlers.flow")
-    await state.set_state(NewPack.enter_custom)
+    await state.update_data(custom_back=NewPack.review.state)
+    await _show(callback, state, NewPack.enter_custom.state, None)
     await callback.answer()
-    if isinstance(callback.message, Message):
-        await callback.message.answer("Введите свой вариант:")
 
 
 async def on_rev_remove(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
@@ -476,9 +637,20 @@ async def on_rev_remove(callback: CallbackQuery, state: FSMContext) -> None:  # 
     for i, c in enumerate(captions):
         kb.button(text=f"➖ {c}", callback_data=f"rem:{i}")
     kb.adjust(2)
+    back = InlineKeyboardBuilder()
+    back.button(text="⬅️ Назад", callback_data="rev:show")
+    kb.attach(back)
     await callback.answer()
     if isinstance(callback.message, Message):
-        await callback.message.answer("Какой убрать?", reply_markup=kb.as_markup())
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text("Какой убрать?", reply_markup=kb.as_markup())
+
+
+async def on_rev_show(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    """Return to the review list (from the remove sub-screen)."""
+    tag_component("handlers.flow")
+    await _show(callback, state, NewPack.review.state, None)
+    await callback.answer()
 
 
 async def on_rem_pick(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
@@ -493,8 +665,27 @@ async def on_rem_pick(callback: CallbackQuery, state: FSMContext) -> None:  # pr
         custom.pop(pos - len(std_sel))
     await state.update_data(std_sel=std_sel, custom=custom)
     await callback.answer("Убрал")
+    await _show(callback, state, NewPack.review.state, None)
+
+
+async def on_nav_back(callback: CallbackQuery, state: FSMContext, loader: StyleLoader) -> None:
+    """``⬅️ Назад`` — re-render the previous wizard step in place."""
+    tag_component("handlers.flow")
+    data = await state.get_data()
+    target = _prev_state(await state.get_state(), data)
+    await callback.answer()
+    if target is not None:
+        await _show(callback, state, target, loader, data)
+
+
+async def on_nav_cancel(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    """``❌ Отмена`` — abort the flow and collapse the wizard message."""
+    tag_component("handlers.flow")
+    await state.clear()
+    await callback.answer()
     if isinstance(callback.message, Message):
-        await _show_review(callback.message, state)
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text("Отменено. Новый пак: /new")
 
 
 async def on_rev_create(  # pragma: no cover
@@ -536,18 +727,18 @@ async def on_rev_create(  # pragma: no cover
         total=len(captions),
     )
     started = time.monotonic()
-    status = await msg.answer("🎨 Рисую персонажа…")
+    await state.set_state(NewPack.publish)
 
     async def on_step(done: int, total: int) -> None:
         with contextlib.suppress(Exception):
-            await status.edit_text(
-                f"🎨 Рисую персонажа… {_progress_bar(done, total)} {done}/{total}"
-            )
+            await msg.edit_text(f"🎨 Рисую персонажа… {_progress_bar(done, total)} {done}/{total}")
 
     async def on_stage(label: str) -> None:
         with contextlib.suppress(Exception):
-            await status.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
+            await msg.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
 
+    with contextlib.suppress(Exception):
+        await msg.edit_text("🎨 Рисую персонажа…")
     try:
         async with _typing(msg):
             bundle = await orchestrator.build_for_review(
@@ -569,7 +760,8 @@ async def on_rev_create(  # pragma: no cover
         await analytics.log(
             db, user_id, analytics.GENERATION_ERROR, mode=mode, reason=str(exc)[:200]
         )
-        await status.edit_text(_friendly_error(exc))
+        with contextlib.suppress(Exception):
+            await msg.edit_text(_friendly_error(exc))
         if model_errors.is_quota(exc):
             await _alert_admins_quota(msg, exc)
         return
@@ -582,8 +774,6 @@ async def on_rev_create(  # pragma: no cover
         count=len(bundle.stickers),
         seconds=round(time.monotonic() - started, 1),
     )
-    with contextlib.suppress(Exception):
-        await status.delete()
     await _present_for_publish(
         msg, state, bundle.stickers, mode=mode, title=bundle.title, pack_id=bundle.pack_id
     )
@@ -611,15 +801,23 @@ async def _present_for_publish(  # pragma: no cover
     title: str,
     pack_id: int | None = None,
 ) -> None:
-    """Send the transparent preview sheet(s) and offer publish/download."""
+    """Send the transparent preview sheet(s), then offer publish/download below them."""
     await state.update_data(stickers=stickers, mode=mode, pack_id=pack_id, pub_title=title)
     await state.set_state(NewPack.publish)
+    # Drop the progress message, drop previews, then put controls *below* the previews.
+    data = await state.get_data()
+    cid = data.get("wizard_chat_id")
+    mid = data.get("wizard_msg_id")
+    if cid is not None and mid is not None:
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.bot.delete_message(cid, mid)  # type: ignore[union-attr]
     for i, sheet in enumerate(compose_preview([img for img, _ in stickers]), start=1):
         await msg.answer_document(BufferedInputFile(sheet, filename=f"preview_{i}.png"))
-    await msg.answer(
+    sent = await msg.answer(
         f"Готово: {len(stickers)} стикеров (прозрачный фон). Что дальше?",
         reply_markup=publish_kb(),
     )
+    await _store_wizard(state, sent)
 
 
 async def on_publish_yes(  # pragma: no cover
@@ -635,11 +833,13 @@ async def on_publish_yes(  # pragma: no cover
         return
     stickers: list[StickerInput] = data.get("stickers") or []
     if not stickers:
-        await msg.answer("Нет готовых стикеров. Начни заново: /new")
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.edit_text("Нет готовых стикеров. Начни заново: /new")
         await state.clear()
         return
 
-    status = await msg.answer("📦 Публикую пак в Telegram…")
+    with contextlib.suppress(TelegramBadRequest):
+        await msg.edit_text("📦 Публикую пак в Telegram…")
     try:
         async with _typing(msg):
             pack = await db.get_pack(int(data["pack_id"])) if data.get("pack_id") else None
@@ -655,13 +855,15 @@ async def on_publish_yes(  # pragma: no cover
                 )
     except Exception as exc:
         logger.exception("publish failed")
-        await status.edit_text(_friendly_error(exc))
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.edit_text(_friendly_error(exc))
         return
 
     event = analytics.EXTENDED if data.get("mode") == "extend" else analytics.PUBLISHED
     await analytics.log(db, user_id, event, set_name=result.set_name, count=result.count)
     await state.clear()
-    await status.edit_text(f"✅ Готово! Пак: {result.link}")
+    with contextlib.suppress(TelegramBadRequest):
+        await msg.edit_text(f"✅ Готово! Пак: {result.link}")
 
 
 async def on_pub_download(  # pragma: no cover
@@ -693,7 +895,8 @@ async def on_publish_no(callback: CallbackQuery, state: FSMContext) -> None:  # 
     await state.clear()
     await callback.answer()
     if isinstance(callback.message, Message):
-        await callback.message.answer("Отменено. Новый пак: /new")
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text("Отменено. Новый пак: /new")
 
 
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
@@ -704,6 +907,39 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await message.answer("Отменено. Начать заново: /new")
+
+
+# --- saved characters: list → actions (edit in place + back) -----------------
+
+
+def _chars_markup(characters: list[Any]) -> Any:
+    kb = InlineKeyboardBuilder()
+    for char in characters:
+        kb.button(text=f"{char.name} ({char.style_id})", callback_data=f"char:{char.id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+_TXT_CHARS = (
+    "Твои персонажи. Выбери, чтобы посмотреть каноникл, добавить стикеры "
+    "(0.5 пака) или перерисовать (1 пак):"
+)
+
+
+def _char_actions_kb(char_id: int) -> Any:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🖼 Показать каноникл", callback_data=f"canon:{char_id}")
+    kb.button(
+        text=f"➕ Добавить стикеры ({pricing.format_packs(pricing.COST_ADD_STICKERS)} пака)",
+        callback_data=f"cadd:{char_id}",
+    )
+    kb.button(
+        text=f"🔄 Перерисовать ({pricing.format_packs(pricing.COST_REDRAW)} пак)",
+        callback_data=f"credraw:{char_id}",
+    )
+    kb.button(text="⬅️ К списку", callback_data="nav:chars")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 async def cmd_mychars(message: Message, db: Database) -> None:
@@ -717,18 +953,29 @@ async def cmd_mychars(message: Message, db: Database) -> None:
     if not characters:
         await message.answer("Пока нет сохранённых персонажей. Создай пак: /new")
         return
-    kb = InlineKeyboardBuilder()
-    for char in characters:
-        kb.button(text=f"{char.name} ({char.style_id})", callback_data=f"char:{char.id}")
-    kb.adjust(1)
-    await message.answer(
-        "Твои персонажи. Выбери, чтобы посмотреть каноникл, добавить стикеры "
-        "(0.5 пака) или перерисовать (1 пак):",
-        reply_markup=kb.as_markup(),
-    )
+    await message.answer(_TXT_CHARS, reply_markup=_chars_markup(characters))
 
 
-async def on_pick_char(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
+async def on_nav_chars(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
+    """Back to the character list (edits the menu message in place)."""
+    tag_component("handlers.flow")
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    characters = await db.list_characters(user_id)
+    if not characters:
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.edit_text("Пока нет сохранённых персонажей. Создай пак: /new")
+        return
+    with contextlib.suppress(TelegramBadRequest):
+        await msg.edit_text(_TXT_CHARS, reply_markup=_chars_markup(characters))
+
+
+async def on_pick_char(  # pragma: no cover
+    callback: CallbackQuery, state: FSMContext, db: Database
+) -> None:
     """Show actions for a saved character: show canonical / add stickers / redraw."""
     tag_component("handlers.flow")
     char_id = int((callback.data or "char:0").split(":", 1)[-1])
@@ -740,22 +987,15 @@ async def on_pick_char(callback: CallbackQuery, db: Database) -> None:  # pragma
     if char is None:
         await msg.answer("Персонаж не найден.")
         return
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🖼 Показать каноникл", callback_data=f"canon:{char_id}")
-    kb.button(
-        text=f"➕ Добавить стикеры ({pricing.format_packs(pricing.COST_ADD_STICKERS)} пака)",
-        callback_data=f"cadd:{char_id}",
-    )
-    kb.button(
-        text=f"🔄 Перерисовать ({pricing.format_packs(pricing.COST_REDRAW)} пак)",
-        callback_data=f"credraw:{char_id}",
-    )
-    kb.adjust(1)
-    await msg.answer(f"«{char.name}» ({char.style_id}). Что сделать?", reply_markup=kb.as_markup())
+    await _store_wizard(state, msg)
+    with contextlib.suppress(TelegramBadRequest):
+        await msg.edit_text(
+            f"«{char.name}» ({char.style_id}). Что сделать?", reply_markup=_char_actions_kb(char_id)
+        )
 
 
 async def on_show_canonical(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
-    """Send the character's saved canonical image."""
+    """Send the character's saved canonical image (keeps the menu in place)."""
     tag_component("handlers.flow")
     char_id = int((callback.data or "canon:0").split(":", 1)[-1])
     char = await db.get_character(char_id)
@@ -781,10 +1021,7 @@ async def on_char_add(callback: CallbackQuery, state: FSMContext) -> None:  # pr
     """Add stickers to a saved character → caption selection → create (0.5 pack)."""
     tag_component("handlers.flow")
     char_id = int((callback.data or "cadd:0").split(":", 1)[-1])
-    await state.update_data(mode="reuse", character_id=char_id)
-    await callback.answer()
-    if isinstance(callback.message, Message):
-        await _start_selection(callback.message, state)
+    await _enter_captions(callback, state, mode="reuse", character_id=char_id)
 
 
 async def on_char_redraw(  # pragma: no cover
@@ -808,10 +1045,13 @@ async def on_char_redraw(  # pragma: no cover
     await state.clear()
     await state.update_data(redraw_char_id=char_id)
     await state.set_state(Redraw.photo)
-    await msg.answer(
+    prompt = (
         f"🔄 Перерисовка «{char.name}» спишет {pricing.format_packs(pricing.COST_REDRAW)} пак. "
         "Пришли новое фото человека."
     )
+    with contextlib.suppress(TelegramBadRequest):
+        await msg.edit_text(prompt)
+    await _store_wizard(state, msg)
 
 
 async def on_redraw_photo(  # pragma: no cover
@@ -830,7 +1070,7 @@ async def on_redraw_photo(  # pragma: no cover
         await message.answer("Персонаж не найден. Начни заново: /mychars")
         return
     await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
-    status = await message.answer("📸 Принял фото, проверяю…")
+    status = await _replace_below(message, state, "📸 Принял фото, проверяю…")
     file = await message.bot.download(message.photo[-1].file_id)  # type: ignore[union-attr]
     photo = file.read() if file else b""
     try:
@@ -839,12 +1079,16 @@ async def on_redraw_photo(  # pragma: no cover
         logger.warning("photo check failed: %s", str(exc)[:100])
         code = None
     if code == photo_check.NUDE:
+        with contextlib.suppress(TelegramBadRequest):
+            await status.delete()
         await _strike(db, user_id, message, "На фото обнажёнка")
         return
     if code is not None:
-        await status.edit_text(_PHOTO_HINTS.get(code, "Фото не подходит, пришли другое."))
+        with contextlib.suppress(TelegramBadRequest):
+            await status.edit_text(_PHOTO_HINTS.get(code, "Фото не подходит, пришли другое."))
         return
-    await status.edit_text("🎨 Перерисовываю персонажа…")
+    with contextlib.suppress(TelegramBadRequest):
+        await status.edit_text("🎨 Перерисовываю персонажа…")
 
     async def on_step(done: int, total: int) -> None:
         with contextlib.suppress(Exception):
@@ -855,12 +1099,13 @@ async def on_redraw_photo(  # pragma: no cover
             canonical = await orchestrator.redraw_canonical(char, photo, on_step=on_step)
     except Exception as exc:
         logger.exception("redraw failed")
-        await status.edit_text(_friendly_error(exc))
+        with contextlib.suppress(TelegramBadRequest):
+            await status.edit_text(_friendly_error(exc))
         if model_errors.is_quota(exc):
             await _alert_admins_quota(message, exc)
         return
     await state.clear()
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(TelegramBadRequest):
         await status.delete()
     await message.answer_document(
         BufferedInputFile(canonical, filename=f"{char.name}.png"),
@@ -895,6 +1140,25 @@ async def cmd_addto(message: Message, db: Database) -> None:
     )
 
 
+# --- saved packs: list → actions (edit in place + back) ----------------------
+
+
+def _packs_markup(packs: list[Any]) -> Any:
+    kb = InlineKeyboardBuilder()
+    for pack in packs:
+        mark = "✅" if pack.published else "📝"
+        kb.button(text=f"{mark} {pack.title}", callback_data=f"pk:{pack.id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+_TXT_PACKS = (
+    "Ваши паки. Выберите пак, чтобы открыть, опубликовать или скачать; "
+    "✅ — опубликованный, 📝 — черновик. Дополнить пак — /addto, новый — /new, "
+    "что умею и цены — /help.\n\n🐞 Если что-то не так — напишите /report."
+)
+
+
 async def cmd_mypacks(message: Message, db: Database) -> None:
     """List saved packs: published → open/download, drafts → publish/download."""
     tag_component("handlers.flow")
@@ -906,22 +1170,27 @@ async def cmd_mypacks(message: Message, db: Database) -> None:
     if not packs:
         await message.answer("Пока нет сохранённых паков. Создай: /new")
         return
-    kb = InlineKeyboardBuilder()
-    for pack in packs:
-        mark = "✅" if pack.published else "📝"
-        kb.button(text=f"{mark} {pack.title}", callback_data=f"pk:{pack.id}")
-    kb.adjust(1)
-    await message.answer(
-        "Ваши паки. Выберите пак, чтобы открыть, опубликовать или скачать; "
-        "✅ — опубликованный, 📝 — черновик. Дополнить пак — /addto, новый — /new, "
-        "что умею и цены — /help.\n\n🐞 Если что-то не так — напишите /report.",
-        reply_markup=kb.as_markup(),
-    )
+    await message.answer(_TXT_PACKS, reply_markup=_packs_markup(packs))
 
 
-async def on_pick_saved_pack(  # pragma: no cover
-    callback: CallbackQuery, db: Database
-) -> None:
+async def on_nav_packs(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
+    """Back to the pack list (edits the menu message in place)."""
+    tag_component("handlers.flow")
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    user_id = callback.from_user.id if callback.from_user else 0
+    packs = await db.list_packs(user_id)
+    if not packs:
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.edit_text("Пока нет сохранённых паков. Создай: /new")
+        return
+    with contextlib.suppress(TelegramBadRequest):
+        await msg.edit_text(_TXT_PACKS, reply_markup=_packs_markup(packs))
+
+
+async def on_pick_saved_pack(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
     """Show actions for a saved pack: open/download (published) or publish/download (draft)."""
     tag_component("handlers.flow")
     pack_id = int((callback.data or "pk:0").split(":", 1)[-1])
@@ -939,9 +1208,11 @@ async def on_pick_saved_pack(  # pragma: no cover
     else:
         kb.button(text="✅ Опубликовать", callback_data=f"pkpub:{pack.id}")
     kb.button(text="⬇️ Скачать (zip)", callback_data=f"pkdl:{pack.id}")
+    kb.button(text="⬅️ К списку", callback_data="nav:packs")
     kb.adjust(1)
     status = "опубликован" if pack.published else "черновик"
-    await msg.answer(f"«{pack.title}» — {status}.", reply_markup=kb.as_markup())
+    with contextlib.suppress(TelegramBadRequest):
+        await msg.edit_text(f"«{pack.title}» — {status}.", reply_markup=kb.as_markup())
 
 
 async def on_saved_download(  # pragma: no cover
@@ -985,10 +1256,12 @@ async def on_saved_publish(  # pragma: no cover
         await msg.answer("Пак не найден")
         return
     if pack.published:
-        await msg.answer(f"Уже опубликован: {pack.link}")
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.edit_text(f"Уже опубликован: {pack.link}")
         return
     stickers = await orchestrator.load_pack_stickers(pack_id)
-    status = await msg.answer("📦 Публикую пак в Telegram…")
+    with contextlib.suppress(TelegramBadRequest):
+        await msg.edit_text("📦 Публикую пак в Telegram…")
     try:
         async with _typing(msg):
             result = await orchestrator.publish_draft(
@@ -996,22 +1269,21 @@ async def on_saved_publish(  # pragma: no cover
             )
     except Exception as exc:
         logger.exception("publish failed")
-        await status.edit_text(_friendly_error(exc))
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.edit_text(_friendly_error(exc))
         return
     await analytics.log(
         db, user_id, analytics.PUBLISHED, set_name=result.set_name, count=result.count
     )
-    await status.edit_text(f"✅ Готово! Пак: {result.link}")
+    with contextlib.suppress(TelegramBadRequest):
+        await msg.edit_text(f"✅ Готово! Пак: {result.link}")
 
 
 async def on_pick_pack(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
     """Extend an existing pack → caption selection → create → append."""
     tag_component("handlers.flow")
     pack_id = int((callback.data or "extend:0").split(":", 1)[-1])
-    await state.update_data(mode="extend", pack_id=pack_id)
-    await callback.answer()
-    if isinstance(callback.message, Message):
-        await _start_selection(callback.message, state)
+    await _enter_captions(callback, state, mode="extend", pack_id=pack_id)
 
 
 def build_router() -> Router:
@@ -1024,6 +1296,8 @@ def build_router() -> Router:
     router.message.register(cmd_addto, Command("addto"))
     router.message.register(on_photo, NewPack.photo)
     router.message.register(on_name, NewPack.name)
+    router.callback_query.register(on_nav_back, F.data == "nav:back")
+    router.callback_query.register(on_nav_cancel, F.data == "nav:cancel")
     router.callback_query.register(on_subject, F.data.startswith("subject:"))
     router.callback_query.register(on_age, F.data.startswith("age:"))
     router.callback_query.register(on_style, F.data.startswith("style:"))
@@ -1036,10 +1310,13 @@ def build_router() -> Router:
     router.callback_query.register(on_rev_create, F.data == "rev:create")
     router.callback_query.register(on_rev_add, F.data == "rev:add")
     router.callback_query.register(on_rev_remove, F.data == "rev:remove")
+    router.callback_query.register(on_rev_show, F.data == "rev:show")
     router.callback_query.register(on_rem_pick, F.data.startswith("rem:"))
     router.callback_query.register(on_publish_yes, F.data == "pub:yes")
     router.callback_query.register(on_pub_download, F.data == "pub:dl")
     router.callback_query.register(on_publish_no, F.data == "pub:no")
+    router.callback_query.register(on_nav_chars, F.data == "nav:chars")
+    router.callback_query.register(on_nav_packs, F.data == "nav:packs")
     router.callback_query.register(on_pick_char, F.data.startswith("char:"))
     router.callback_query.register(on_show_canonical, F.data.startswith("canon:"))
     router.callback_query.register(on_char_add, F.data.startswith("cadd:"))

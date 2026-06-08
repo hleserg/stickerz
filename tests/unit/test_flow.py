@@ -22,7 +22,10 @@ from sticker_service.handlers.flow import (
     NewPack,
     _alpha_gate,
     _generation_gate,
+    _prev_state,
     _progress_bar,
+    _review_text,
+    _screen_for,
     cmd_addto,
     cmd_cancel,
     cmd_mychars,
@@ -219,3 +222,56 @@ async def test_addto_lists_packs(db: Database) -> None:
     message.from_user = SimpleNamespace(id=1)
     await cmd_addto(message, db)
     assert message.answer.await_args.kwargs.get("reply_markup") is not None
+
+
+# --- single-message wizard: back map + screen rendering ----------------------
+
+
+def test_prev_state_back_map() -> None:
+    assert _prev_state(NewPack.subject.state, {}) == NewPack.name.state
+    assert _prev_state(NewPack.child_age.state, {}) == NewPack.subject.state
+    # style goes back to subject for adults, to age for children (§B.4)
+    assert _prev_state(NewPack.style.state, {"subject": "adult"}) == NewPack.subject.state
+    assert _prev_state(NewPack.style.state, {"subject": "child"}) == NewPack.child_age.state
+    assert _prev_state(NewPack.select_std.state, {}) == NewPack.style.state
+    assert _prev_state(NewPack.ask_custom.state, {}) == NewPack.select_std.state
+    assert _prev_state(NewPack.review.state, {}) == NewPack.ask_custom.state
+    assert _prev_state(NewPack.photo.state, {}) is None  # no back from the entry step
+    assert _prev_state(None, {}) is None
+
+
+def test_prev_state_enter_custom_returns_to_its_entry_point() -> None:
+    # entered from review's "add" → back to review; otherwise back to ask_custom
+    assert (
+        _prev_state(NewPack.enter_custom.state, {"custom_back": NewPack.review.state})
+        == NewPack.review.state
+    )
+    assert _prev_state(NewPack.enter_custom.state, {}) == NewPack.ask_custom.state
+
+
+def test_screen_for_renders_every_step(loader: StyleLoader) -> None:
+    data = {"std_sel": [0, 1], "page": 0, "custom": ["Своё"]}
+    for target in (
+        NewPack.name.state,
+        NewPack.subject.state,
+        NewPack.child_age.state,
+        NewPack.style.state,
+        NewPack.select_std.state,
+        NewPack.ask_custom.state,
+        NewPack.enter_custom.state,
+        NewPack.review.state,
+    ):
+        text, markup = _screen_for(target, data, loader)
+        assert isinstance(text, str) and text
+        assert markup is not None  # every step carries an inline keyboard
+
+
+def test_screen_for_style_requires_loader() -> None:
+    with pytest.raises(ValueError, match="StyleLoader"):
+        _screen_for(NewPack.style.state, {}, None)
+
+
+def test_review_text_numbers_captions_and_handles_empty() -> None:
+    listing = _review_text(["Привет", "Пока"])
+    assert "1. Привет" in listing and "2. Пока" in listing
+    assert "ничего не выбрано" in _review_text([])
