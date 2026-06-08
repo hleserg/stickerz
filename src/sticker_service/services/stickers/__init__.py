@@ -19,6 +19,7 @@ from sticker_service.services.stickers.sets import (
     PER_PAGE,
     STANDARD_BLOCK,
     build_caption_set,
+    selected_captions,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "build_sheet_prompt",
     "generate_sheet",
     "is_single_emoji",
+    "selected_captions",
 ]

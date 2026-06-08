@@ -50,3 +50,9 @@ def build_caption_set(
     room = max(0, limit - len(personal))
     captions = list(STANDARD_BLOCK[:room]) + list(personal)
     return captions[:limit]
+
+
+def selected_captions(std_indices: list[int], custom: list[str]) -> list[str]:
+    """Merge chosen standard captions (by index) with custom ones (capped)."""
+    std = [STANDARD_BLOCK[i] for i in sorted(set(std_indices)) if 0 <= i < len(STANDARD_BLOCK)]
+    return (std + list(custom))[:MAX_CAPTIONS]

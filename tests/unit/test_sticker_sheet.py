@@ -62,6 +62,17 @@ def test_build_caption_set_standard_only() -> None:
     assert captions == list(STANDARD_BLOCK)
 
 
+def test_selected_captions_merges_sorted_and_caps() -> None:
+    from sticker_service.services.stickers import selected_captions
+    from sticker_service.services.stickers.sets import STANDARD_BLOCK
+
+    out = selected_captions([2, 0, 0, 99], ["Своё1", "Своё2"])
+    assert out == [STANDARD_BLOCK[0], STANDARD_BLOCK[2], "Своё1", "Своё2"]  # sorted, deduped
+    # caps at 24
+    big = selected_captions(list(range(len(STANDARD_BLOCK))), [f"c{i}" for i in range(30)])
+    assert len(big) == 24
+
+
 def test_build_caption_set_with_personal_and_limit() -> None:
     captions = build_caption_set(personal=["Не в садик!", "Какао!", "Хм...", "Класс!"], limit=15)
     assert len(captions) == 15

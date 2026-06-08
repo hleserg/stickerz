@@ -29,8 +29,9 @@ from sticker_service.db import Database
 from sticker_service.observability import tag_component
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.orchestrator import Orchestrator
-from sticker_service.services.postprocess import compose_preview
+from sticker_service.services.postprocess import bundle_zip, compose_preview
 from sticker_service.services.publish.publisher import StickerInput
+from sticker_service.services.stickers import STANDARD_BLOCK, selected_captions
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,11 @@ class NewPack(StatesGroup):
     subject = State()
     child_age = State()
     style = State()
-    publish = State()  # stickers generated, preview shown, awaiting publish/cancel
+    select_std = State()  # toggling standard captions (checklist)
+    ask_custom = State()  # «добавить свои? да/нет»
+    enter_custom = State()  # awaiting a custom caption (force reply)
+    review = State()  # numbered list + create/add/remove
+    publish = State()  # stickers generated, preview shown, awaiting publish/download
 
 
 # --- keyboards (pure) --------------------------------------------------------
@@ -117,10 +122,54 @@ def style_kb(loader: StyleLoader) -> Any:
     return kb.as_markup()
 
 
-def publish_kb() -> Any:
+def publish_kb(*, can_publish: bool = True) -> Any:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Опубликовать в Telegram", callback_data="pub:yes")
+    if can_publish:
+        kb.button(text="✅ Опубликовать в Telegram", callback_data="pub:yes")
+    kb.button(text="⬇️ Скачать (zip)", callback_data="pub:dl")
     kb.button(text="❌ Отмена", callback_data="pub:no")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def std_checklist_kb(selected: list[int], page: int) -> Any:
+    """Checklist of standard captions: 12 per page (3×4), toggles + nav + done."""
+    from sticker_service.services.stickers import PER_PAGE, STANDARD_BLOCK
+
+    kb = InlineKeyboardBuilder()
+    pages = max(1, (len(STANDARD_BLOCK) + PER_PAGE - 1) // PER_PAGE)
+    start = page * PER_PAGE
+    page_items = list(enumerate(STANDARD_BLOCK))[start : start + PER_PAGE]
+    for i, caption in page_items:
+        mark = "✅" if i in selected else "⬜"
+        kb.button(text=f"{mark} {caption}", callback_data=f"std:{i}")
+    kb.adjust(3)  # 3 columns → up to 3×4 per page
+    nav = InlineKeyboardBuilder()
+    if page > 0:
+        nav.button(text="◀", callback_data=f"stdpage:{page - 1}")
+    if page < pages - 1:
+        nav.button(text="▶", callback_data=f"stdpage:{page + 1}")
+    nav.button(text="Далее ▶▶", callback_data="stddone")
+    kb.attach(nav)
+    return kb.as_markup()
+
+
+def ask_custom_kb() -> Any:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Да", callback_data="cust:yes")
+    kb.button(text="Нет", callback_data="cust:no")
+    return kb.as_markup()
+
+
+def review_kb(total: int) -> Any:
+    from sticker_service.services.stickers import MAX_CAPTIONS
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Создать стикерпак", callback_data="rev:create")
+    if total < MAX_CAPTIONS:
+        kb.button(text="➕ Добавить стикер", callback_data="rev:add")
+    if total > 0:
+        kb.button(text="➖ Убрать стикер", callback_data="rev:remove")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -151,7 +200,7 @@ async def on_consent(callback: CallbackQuery, state: FSMContext, db: Database) -
     await callback.answer()
 
 
-async def on_photo(message: Message, state: FSMContext) -> None:  # pragma: no cover - Telegram IO
+async def on_photo(message: Message, state: FSMContext) -> None:  # pragma: no cover
     """Accept the photo (only valid after consent), then ask for a name."""
     tag_component("handlers.flow")
     if not message.photo:
@@ -200,19 +249,169 @@ async def on_age(callback: CallbackQuery, state: FSMContext, loader: StyleLoader
     await callback.answer()
 
 
-async def on_style(  # pragma: no cover - runs the model pipeline
-    callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator
-) -> None:
-    """Build canonical, generate stickers (no 'похож' confirm), show a preview."""
+# --- caption selection → create → preview → publish/download -----------------
+
+
+async def _start_selection(msg: Message, state: FSMContext) -> None:  # pragma: no cover
+    """Begin the standard-caption checklist (all selected by default)."""
+    await state.update_data(std_sel=list(range(len(STANDARD_BLOCK))), custom=[], page=0)
+    await state.set_state(NewPack.select_std)
+    await msg.answer(
+        "Выберите стандартные стикеры, которые надо включить в набор. Дальше "
+        "сможете добавить свои, но всего не больше 24.",
+        reply_markup=std_checklist_kb(list(range(len(STANDARD_BLOCK))), 0),
+    )
+
+
+async def on_style(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    """Store the style and start caption selection (canonical is built on Create)."""
     tag_component("handlers.flow")
     style_id = (callback.data or "").split(":", 1)[-1]
+    await state.update_data(mode="fresh", style_id=style_id)
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await _start_selection(callback.message, state)
+
+
+async def on_std_toggle(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    tag_component("handlers.flow")
+    idx = int((callback.data or "std:0").split(":", 1)[-1])
     data = await state.get_data()
+    selected = list(data.get("std_sel", []))
+    if idx in selected:
+        selected.remove(idx)
+    else:
+        selected.append(idx)
+    await state.update_data(std_sel=selected)
+    page = int(data.get("page", 0))
+    with contextlib.suppress(Exception):
+        if isinstance(callback.message, Message):
+            await callback.message.edit_reply_markup(reply_markup=std_checklist_kb(selected, page))
+    await callback.answer()
+
+
+async def on_std_page(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    tag_component("handlers.flow")
+    page = int((callback.data or "stdpage:0").split(":", 1)[-1])
+    await state.update_data(page=page)
+    data = await state.get_data()
+    with contextlib.suppress(Exception):
+        if isinstance(callback.message, Message):
+            await callback.message.edit_reply_markup(
+                reply_markup=std_checklist_kb(list(data.get("std_sel", [])), page)
+            )
+    await callback.answer()
+
+
+async def on_std_done(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    tag_component("handlers.flow")
+    await state.set_state(NewPack.ask_custom)
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "Хотите добавить свои варианты?", reply_markup=ask_custom_kb()
+        )
+
+
+async def on_custom_yes(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    tag_component("handlers.flow")
+    await state.set_state(NewPack.enter_custom)
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer("Введите свой вариант:")
+
+
+async def on_custom_no(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    tag_component("handlers.flow")
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await _show_review(callback.message, state)
+
+
+async def on_enter_custom(message: Message, state: FSMContext) -> None:  # pragma: no cover
+    """Append a typed custom caption (capped at 24), then show the review list."""
+    tag_component("handlers.flow")
+    text = (message.text or "").strip()
+    data = await state.get_data()
+    custom = list(data.get("custom", []))
+    total = len(selected_captions(data.get("std_sel", []), custom))
+    if text and total < 24:
+        custom.append(text)
+        await state.update_data(custom=custom)
+    await _show_review(message, state)
+
+
+async def _show_review(msg: Message, state: FSMContext) -> None:  # pragma: no cover
+    data = await state.get_data()
+    captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
+    await state.set_state(NewPack.review)
+    if not captions:
+        await msg.answer(
+            "Пока ничего не выбрано. Добавьте хотя бы один стикер.",
+            reply_markup=review_kb(0),
+        )
+        return
+    listing = "\n".join(f"{i}. {c}" for i, c in enumerate(captions, start=1))
+    await msg.answer(
+        f"Стикеры ({len(captions)}):\n{listing}",
+        reply_markup=review_kb(len(captions)),
+    )
+
+
+async def on_rev_add(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    tag_component("handlers.flow")
+    await state.set_state(NewPack.enter_custom)
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer("Введите свой вариант:")
+
+
+async def on_rev_remove(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    tag_component("handlers.flow")
+    data = await state.get_data()
+    captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
+    kb = InlineKeyboardBuilder()
+    for i, c in enumerate(captions):
+        kb.button(text=f"➖ {c}", callback_data=f"rem:{i}")
+    kb.adjust(2)
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer("Какой убрать?", reply_markup=kb.as_markup())
+
+
+async def on_rem_pick(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    tag_component("handlers.flow")
+    pos = int((callback.data or "rem:0").split(":", 1)[-1])
+    data = await state.get_data()
+    std_sel = sorted(set(data.get("std_sel", [])))
+    custom = list(data.get("custom", []))
+    if pos < len(std_sel):
+        std_sel.remove(std_sel[pos])
+    elif pos - len(std_sel) < len(custom):
+        custom.pop(pos - len(std_sel))
+    await state.update_data(std_sel=std_sel, custom=custom)
+    await callback.answer("Убрал")
+    if isinstance(callback.message, Message):
+        await _show_review(callback.message, state)
+
+
+async def on_rev_create(  # pragma: no cover
+    callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator, db: Database
+) -> None:
+    """Generate the selected stickers (per page) and show a preview to publish/download."""
+    tag_component("handlers.flow")
+    data = await state.get_data()
+    captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
+    user_id = callback.from_user.id if callback.from_user else 0
     await callback.answer()
     msg = callback.message if isinstance(callback.message, Message) else None
     if msg is None:
         return
+    if not captions:
+        await msg.answer("Выберите хотя бы один стикер.")
+        return
 
-    status = await msg.answer("🎨 Рисую персонажа… (шаг 1)")
+    status = await msg.answer("🎨 Рисую персонажа…")
 
     async def on_step(done: int, total: int) -> None:
         with contextlib.suppress(Exception):
@@ -222,39 +421,53 @@ async def on_style(  # pragma: no cover - runs the model pipeline
         with contextlib.suppress(Exception):
             await status.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
 
-    user_id = callback.from_user.id if callback.from_user else 0
+    mode = data.get("mode", "fresh")
     try:
         async with _typing(msg):
-            canonical = await orchestrator.build_canonical(
-                photo=data["photo"],
-                style_id=style_id,
-                subject_type=data["subject"],
-                child_age=data.get("child_age"),
-                on_step=on_step,
+            if mode == "extend":
+                pack = await db.get_pack(int(data["pack_id"]))
+                if pack is None:
+                    raise RuntimeError("pack not found")
+                character = await db.get_character(pack.character_id)
+                title, pack_id = pack.title, pack.id
+            elif mode == "reuse":
+                character = await db.get_character(int(data["character_id"]))
+                title, pack_id = (character.name if character else ""), None
+            else:  # fresh — build canonical now
+                canonical = await orchestrator.build_canonical(
+                    photo=data["photo"],
+                    style_id=data["style_id"],
+                    subject_type=data["subject"],
+                    child_age=data.get("child_age"),
+                    on_step=on_step,
+                )
+                character = await orchestrator.save_character(
+                    owner_id=user_id,
+                    name=data["name"],
+                    style_id=data["style_id"],
+                    subject_type=data["subject"],
+                    child_age=data.get("child_age"),
+                    canonical=canonical,
+                )
+                title, pack_id = character.name, None
+            if character is None:
+                raise RuntimeError("character not found")
+            stickers = await orchestrator.build_stickers(
+                character, captions=captions, on_stage=on_stage
             )
-            character = await orchestrator.save_character(
-                owner_id=user_id,
-                name=data["name"],
-                style_id=style_id,
-                subject_type=data["subject"],
-                child_age=data.get("child_age"),
-                canonical=canonical,
-            )
-            stickers = await orchestrator.build_stickers(character, on_stage=on_stage)
     except Exception as exc:
         logger.exception("generation failed")
         await status.edit_text(_friendly_error(exc))
-        await state.clear()
         return
 
     with contextlib.suppress(Exception):
         await status.delete()
     await _present_for_publish(
-        msg, state, stickers, mode="new", character_id=character.id, title=character.name
+        msg, state, stickers, mode=mode, character_id=character.id, title=title, pack_id=pack_id
     )
 
 
-async def _present_for_publish(  # pragma: no cover - Telegram IO
+async def _present_for_publish(  # pragma: no cover
     msg: Message,
     state: FSMContext,
     stickers: list[StickerInput],
@@ -264,7 +477,7 @@ async def _present_for_publish(  # pragma: no cover - Telegram IO
     title: str,
     pack_id: int | None = None,
 ) -> None:
-    """Send the transparent preview sheet(s) and ask whether to publish."""
+    """Send the transparent preview sheet(s) and offer publish/download."""
     await state.update_data(
         stickers=stickers, mode=mode, character_id=character_id, pack_id=pack_id, pub_title=title
     )
@@ -272,15 +485,15 @@ async def _present_for_publish(  # pragma: no cover - Telegram IO
     for i, sheet in enumerate(compose_preview([img for img, _ in stickers]), start=1):
         await msg.answer_document(BufferedInputFile(sheet, filename=f"preview_{i}.png"))
     await msg.answer(
-        f"Готово: {len(stickers)} стикеров (прозрачный фон). Публикуем пак в Telegram?",
+        f"Готово: {len(stickers)} стикеров (прозрачный фон). Что дальше?",
         reply_markup=publish_kb(),
     )
 
 
-async def on_publish_yes(  # pragma: no cover - publishes via Bot API
+async def on_publish_yes(  # pragma: no cover
     callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator, db: Database
 ) -> None:
-    """Publish the previously-generated stickers (new pack or extend)."""
+    """Publish the previewed stickers (new pack or extend)."""
     tag_component("handlers.flow")
     data = await state.get_data()
     user_id = callback.from_user.id if callback.from_user else 0
@@ -323,10 +536,27 @@ async def on_publish_yes(  # pragma: no cover - publishes via Bot API
     await status.edit_text(f"✅ Готово! Пак: {result.link}")
 
 
-async def on_publish_no(
-    callback: CallbackQuery, state: FSMContext
-) -> None:  # pragma: no cover - IO
-    """Cancel before publishing."""
+async def on_pub_download(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    """Send the stickers as a ZIP; keep state so the user can still publish."""
+    tag_component("handlers.flow")
+    data = await state.get_data()
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None:
+        return
+    stickers: list[StickerInput] = data.get("stickers") or []
+    if not stickers:
+        await msg.answer("Нет готовых стикеров. Начни заново: /new")
+        return
+    archive = bundle_zip([img for img, _ in stickers])
+    await msg.answer_document(
+        BufferedInputFile(archive, filename="stickers.zip"),
+        caption="Готовые стикеры (PNG, 512px, прозрачный фон).",
+    )
+
+
+async def on_publish_no(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    """Cancel."""
     tag_component("handlers.flow")
     await state.clear()
     await callback.answer()
@@ -349,38 +579,14 @@ async def cmd_mychars(message: Message, db: Database) -> None:
     await message.answer("Новый пак про сохранённого персонажа:", reply_markup=kb.as_markup())
 
 
-async def on_pick_char(  # pragma: no cover - runs the model + Bot API
-    callback: CallbackQuery, state: FSMContext, db: Database, orchestrator: Orchestrator
-) -> None:
-    """Reuse a saved character to generate stickers, then preview before publish (§3.2)."""
+async def on_pick_char(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    """Reuse a saved character → caption selection → create."""
     tag_component("handlers.flow")
     char_id = int((callback.data or "char:0").split(":", 1)[-1])
-    character = await db.get_character(char_id)
+    await state.update_data(mode="reuse", character_id=char_id)
     await callback.answer()
-    msg = callback.message if isinstance(callback.message, Message) else None
-    if msg is None:
-        return
-    if character is None:
-        await msg.answer("Персонаж не найден")
-        return
-    status = await msg.answer("✨ Генерирую стикеры…")
-
-    async def on_stage(label: str) -> None:
-        with contextlib.suppress(Exception):
-            await status.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
-
-    try:
-        async with _typing(msg):
-            stickers = await orchestrator.build_stickers(character, on_stage=on_stage)
-    except Exception as exc:
-        logger.exception("generation failed")
-        await status.edit_text(_friendly_error(exc))
-        return
-    with contextlib.suppress(Exception):
-        await status.delete()
-    await _present_for_publish(
-        msg, state, stickers, mode="new", character_id=character.id, title=character.name
-    )
+    if isinstance(callback.message, Message):
+        await _start_selection(callback.message, state)
 
 
 async def cmd_addto(message: Message, db: Database) -> None:
@@ -401,48 +607,14 @@ async def cmd_addto(message: Message, db: Database) -> None:
     )
 
 
-async def on_pick_pack(  # pragma: no cover - runs the model + Bot API
-    callback: CallbackQuery, state: FSMContext, db: Database, orchestrator: Orchestrator
-) -> None:
-    """Generate stickers for the pack's character, preview, then append on confirm (§3.2)."""
+async def on_pick_pack(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    """Extend an existing pack → caption selection → create → append."""
     tag_component("handlers.flow")
     pack_id = int((callback.data or "extend:0").split(":", 1)[-1])
-    pack = await db.get_pack(pack_id)
+    await state.update_data(mode="extend", pack_id=pack_id)
     await callback.answer()
-    msg = callback.message if isinstance(callback.message, Message) else None
-    if msg is None:
-        return
-    if pack is None:
-        await msg.answer("Пак не найден")
-        return
-    character = await db.get_character(pack.character_id)
-    if character is None:
-        await msg.answer("Персонаж пака не найден")
-        return
-    status = await msg.answer("✨ Генерирую стикеры…")
-
-    async def on_stage(label: str) -> None:
-        with contextlib.suppress(Exception):
-            await status.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
-
-    try:
-        async with _typing(msg):
-            stickers = await orchestrator.build_stickers(character, on_stage=on_stage)
-    except Exception as exc:
-        logger.exception("generation failed")
-        await status.edit_text(_friendly_error(exc))
-        return
-    with contextlib.suppress(Exception):
-        await status.delete()
-    await _present_for_publish(
-        msg,
-        state,
-        stickers,
-        mode="extend",
-        character_id=character.id,
-        title=pack.title,
-        pack_id=pack.id,
-    )
+    if isinstance(callback.message, Message):
+        await _start_selection(callback.message, state)
 
 
 def build_router() -> Router:
@@ -457,7 +629,18 @@ def build_router() -> Router:
     router.callback_query.register(on_subject, F.data.startswith("subject:"))
     router.callback_query.register(on_age, F.data.startswith("age:"))
     router.callback_query.register(on_style, F.data.startswith("style:"))
+    router.callback_query.register(on_std_toggle, F.data.startswith("std:"))
+    router.callback_query.register(on_std_page, F.data.startswith("stdpage:"))
+    router.callback_query.register(on_std_done, F.data == "stddone")
+    router.callback_query.register(on_custom_yes, F.data == "cust:yes")
+    router.callback_query.register(on_custom_no, F.data == "cust:no")
+    router.message.register(on_enter_custom, NewPack.enter_custom)
+    router.callback_query.register(on_rev_create, F.data == "rev:create")
+    router.callback_query.register(on_rev_add, F.data == "rev:add")
+    router.callback_query.register(on_rev_remove, F.data == "rev:remove")
+    router.callback_query.register(on_rem_pick, F.data.startswith("rem:"))
     router.callback_query.register(on_publish_yes, F.data == "pub:yes")
+    router.callback_query.register(on_pub_download, F.data == "pub:dl")
     router.callback_query.register(on_publish_no, F.data == "pub:no")
     router.callback_query.register(on_pick_char, F.data.startswith("char:"))
     router.callback_query.register(on_pick_pack, F.data.startswith("extend:"))
