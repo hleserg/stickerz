@@ -337,6 +337,35 @@ async def test_build_for_review_extend_skips_draft(
     assert len(await db.list_packs(13)) == 1
 
 
+async def test_build_for_review_extend_rejects_when_no_room(
+    db: Database, loader: StyleLoader, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An extend that can't fit the 120-limit fails for free, before generating."""
+    from sticker_service.services.publish import MAX_STICKERS_PER_SET, PackFullError
+
+    bot = _FakeBot()
+    orch = _orchestrator(db, loader, bot, tmp_path)
+    char = await orch.save_character(
+        owner_id=14,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(EXPECTED),
+    )
+    await orch.create_pack(owner_id=14, character=char)
+    pack = (await db.list_packs(14))[0]
+
+    async def _full(_pack_id: int) -> int:
+        return MAX_STICKERS_PER_SET  # pretend the set is already at the limit
+
+    monkeypatch.setattr(db, "count_stickers", _full)
+    generate_calls_before = len(bot.added)
+    with pytest.raises(PackFullError):
+        await orch.build_for_review(mode="extend", owner_id=14, captions=["Эй"], pack_id=pack.id)
+    assert len(bot.added) == generate_calls_before  # nothing was generated/appended
+
+
 async def test_build_for_review_validates_required_args(
     db: Database, loader: StyleLoader, tmp_path: Path
 ) -> None:

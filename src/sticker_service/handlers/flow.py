@@ -48,6 +48,7 @@ from sticker_service.services.models import errors as model_errors
 from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import Orchestrator
 from sticker_service.services.postprocess import bundle_zip, compose_preview
+from sticker_service.services.publish import PackFullError, remaining_capacity
 from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers import MAX_CAPTIONS, STANDARD_BLOCK, selected_captions
 from sticker_service.services.strikes import register_strike
@@ -82,6 +83,8 @@ _TXT_ENTER_CUSTOM = "Напиши свою подпись сообщением (
 
 def _friendly_error(exc: Exception) -> str:
     """Turn a backend exception into a short user-facing message (shared taxonomy)."""
+    if isinstance(exc, PackFullError):  # already a ready RU sentence (remaining slots)
+        return str(exc)
     return model_errors.user_message(exc)
 
 
@@ -1463,10 +1466,24 @@ async def on_saved_publish(  # pragma: no cover
         await msg.edit_text(f"✅ Готово! Пак: {result.link}")
 
 
-async def on_pick_pack(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+async def on_pick_pack(  # pragma: no cover
+    callback: CallbackQuery, state: FSMContext, db: Database
+) -> None:
     """Extend an existing pack → caption selection → create → append."""
     tag_component("handlers.flow")
     pack_id = int((callback.data or "extend:0").split(":", 1)[-1])
+    # Refuse a full pack up front, so the user never builds captions for a set
+    # that can't take any more stickers (the 120-limit is enforced again, for
+    # free, at generation time if they pick more than the remaining room).
+    room = remaining_capacity(await db.count_stickers(pack_id))
+    if room == 0:
+        msg = callback.message if isinstance(callback.message, Message) else None
+        await callback.answer()
+        if msg is not None:
+            pack = await db.get_pack(pack_id)
+            title = pack.title if pack else "этот"
+            await msg.answer(f"Пак «{title}» уже заполнен (120/120). Создай новый пак: /new")
+        return
     await _enter_captions(callback, state, mode="extend", pack_id=pack_id)
 
 

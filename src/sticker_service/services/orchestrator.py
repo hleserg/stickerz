@@ -23,7 +23,11 @@ from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.canonical.schema import Style
 from sticker_service.services.models.base import ImageModel
 from sticker_service.services.postprocess import apply_watermark, grid_for, process_sheet
-from sticker_service.services.publish import Publisher
+from sticker_service.services.publish import (
+    MAX_STICKERS_PER_SET,
+    Publisher,
+    capacity_error,
+)
 from sticker_service.services.publish.naming import build_set_name
 from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers import (
@@ -209,6 +213,12 @@ class Orchestrator:
             pack = await self._db.get_pack(pack_id)
             if pack is None:
                 raise OrchestratorError("pack not found")
+            # Capacity pre-check BEFORE generating (and before the caller charges):
+            # an extend that can't fit the 120-sticker limit must fail for free,
+            # not after a paid generation that publish_extend would then reject.
+            current = await self._db.count_stickers(pack.id)
+            if len(captions) + current > MAX_STICKERS_PER_SET:
+                raise capacity_error(pack.title, current)
             character = await self._db.get_character(pack.character_id)
             title: str = pack.title
         elif mode == "reuse":
