@@ -108,6 +108,15 @@ CREATE TABLE IF NOT EXISTS quotas (
     user_id   INTEGER PRIMARY KEY,
     remaining INTEGER NOT NULL
 );
+-- Indexes for the per-user / per-pack lookups and the budget hot path
+-- (count_events). Without these they are full table scans that grow with usage.
+CREATE INDEX IF NOT EXISTS idx_stickers_pack_id ON stickers(pack_id);
+CREATE INDEX IF NOT EXISTS idx_packs_owner_id ON packs(owner_id);
+CREATE INDEX IF NOT EXISTS idx_packs_character_id ON packs(character_id);
+CREATE INDEX IF NOT EXISTS idx_characters_owner_id ON characters(owner_id);
+CREATE INDEX IF NOT EXISTS idx_strikes_user_id ON strikes(user_id);
+CREATE INDEX IF NOT EXISTS idx_events_user_id ON events(user_id);
+CREATE INDEX IF NOT EXISTS idx_events_event ON events(event);
 """
 
 
