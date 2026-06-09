@@ -297,26 +297,32 @@ def drop_outlier_fragments(
 
     A valid sticker fills its tile with the character, so every real piece has a
     similar opaque footprint; a detached letter (e.g. a lone «Я»), a corner
-    picture-frame or a splash is a *small* outlier. Drop pieces whose opaque area
-    is below ``area_frac`` of the median, smallest first, stopping once ``expected``
-    pieces remain so a legitimate count is never thinned. Complements
-    ``drop_text_strips``, which only catches short-wide caption lines — not tall
-    single glyphs. Never returns an empty list.
+    picture-frame or a splash is an outlier. Two modes:
+
+    - ``expected`` known: cap to it by dropping the smallest extras. A stray
+      fragment isn't always *small* (a duplicated limb, a blob the chroma key
+      missed), so an area threshold alone can't catch it — we must land on
+      exactly ``expected`` (this is the "7 pieces for 6 captions" fix).
+    - ``expected`` unknown: drop only clear small-area outliers (below
+      ``area_frac`` of the median).
+
+    Complements ``drop_text_strips`` (short-wide caption lines). Never returns an
+    empty list.
     """
     if len(pieces) < 2:
         return pieces
     if expected is not None and len(pieces) <= expected:
         return pieces  # already at/under target — nothing to drop, skip the scan
     areas = [_opaque_area(p) for p in pieces]
-    median = sorted(areas)[len(areas) // 2]
-    if median == 0:
-        return pieces
-    threshold = area_frac * median
-    small = [i for i, a in enumerate(areas) if a < threshold]
-    budget = len(small) if expected is None else max(0, min(len(small), len(pieces) - expected))
-    if budget <= 0:
-        return pieces
-    to_drop = set(sorted(small, key=lambda i: areas[i])[:budget])
+    smallest_first = sorted(range(len(pieces)), key=lambda i: areas[i])
+    if expected is not None:
+        to_drop = set(smallest_first[: len(pieces) - expected])
+    else:
+        median = sorted(areas)[len(areas) // 2]
+        if median == 0:
+            return pieces
+        threshold = area_frac * median
+        to_drop = {i for i in smallest_first if areas[i] < threshold}
     kept = [p for i, p in enumerate(pieces) if i not in to_drop]
     return kept or pieces
 
