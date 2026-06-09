@@ -162,6 +162,17 @@ def test_drop_outlier_fragments_respects_expected() -> None:
     assert len(drop_outlier_fragments(pieces, expected=3)) == 3
 
 
+def test_drop_outlier_fragments_caps_to_expected_for_large_extra() -> None:
+    # The "7 for 6" bug: a sizeable stray fragment (>40% of the median, so the
+    # small-area heuristic can't catch it) must still be dropped when the count
+    # is known. The old budget could only remove sub-threshold pieces.
+    char = Image.new("RGBA", (300, 400), (0, 0, 0, 255))
+    extra = Image.new("RGBA", (220, 300), (0, 0, 0, 255))  # large-ish, not "small"
+    pieces = [char.copy() for _ in range(6)] + [extra]
+    kept = drop_outlier_fragments(pieces, expected=6)
+    assert len(kept) == 6  # capped to expected; the extra (smallest) is dropped
+
+
 def test_process_sheet_drops_lone_letter_tile() -> None:
     # Two characters in a 1×3 grid plus a lone letter-sized tile in the third cell.
     sheet = Image.new("RGBA", (360, 200), MAGENTA)
