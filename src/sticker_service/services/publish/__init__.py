@@ -11,6 +11,8 @@ from sticker_service.services.publish.publisher import (
     MAX_STICKERS_PER_SET,
     PackFullError,
     Publisher,
+    capacity_error,
+    remaining_capacity,
 )
 
 __all__ = [
@@ -18,6 +20,8 @@ __all__ = [
     "PackFullError",
     "Publisher",
     "build_set_name",
+    "capacity_error",
+    "remaining_capacity",
     "sticker_set_link",
     "transliterate",
 ]

@@ -12,6 +12,8 @@ from sticker_service.services.publish import (
     PackFullError,
     Publisher,
     build_set_name,
+    capacity_error,
+    remaining_capacity,
     sticker_set_link,
     transliterate,
 )
@@ -134,3 +136,21 @@ async def test_add_to_pack_enforces_limit() -> None:
             stickers=[(b"a", "🙂")],
             current_count=MAX_STICKERS_PER_SET,
         )
+
+
+def test_remaining_capacity() -> None:
+    assert remaining_capacity(0) == MAX_STICKERS_PER_SET
+    assert remaining_capacity(MAX_STICKERS_PER_SET - 10) == 10
+    assert remaining_capacity(MAX_STICKERS_PER_SET) == 0
+    assert remaining_capacity(MAX_STICKERS_PER_SET + 5) == 0  # never negative
+
+
+def test_capacity_error_message_states_remaining_slots() -> None:
+    # Some room left: the message names how many slots remain.
+    exc = capacity_error("Котик", MAX_STICKERS_PER_SET - 3)
+    assert isinstance(exc, PackFullError)
+    assert "3" in str(exc)
+    assert "Котик" in str(exc)
+    # Full: a distinct "create a new pack" message.
+    full = capacity_error("Котик", MAX_STICKERS_PER_SET)
+    assert "заполнен" in str(full)

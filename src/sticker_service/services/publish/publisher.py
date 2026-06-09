@@ -24,7 +24,30 @@ StickerInput = tuple[bytes, str]
 
 
 class PackFullError(RuntimeError):
-    """Adding would exceed Telegram's 120-stickers-per-set limit."""
+    """Adding would exceed Telegram's 120-stickers-per-set limit.
+
+    Carries a ready, user-facing RU message (the flow shows ``str(exc)`` as-is),
+    so the user is told how many slots remain *before* any paid work runs.
+    """
+
+
+def remaining_capacity(current_count: int) -> int:
+    """Free slots left in a set before it hits the 120-sticker limit."""
+    return max(0, MAX_STICKERS_PER_SET - current_count)
+
+
+def capacity_error(title: str, current_count: int) -> PackFullError:
+    """A ``PackFullError`` whose message tells the user how many slots remain."""
+    room = remaining_capacity(current_count)
+    if room == 0:
+        return PackFullError(
+            f"Пак «{title}» уже заполнен ({MAX_STICKERS_PER_SET}/{MAX_STICKERS_PER_SET}). "
+            "Создай новый пак: /new"
+        )
+    return PackFullError(
+        f"В паке «{title}» осталось {room} из {MAX_STICKERS_PER_SET} мест. "
+        f"Выбери не больше {room} стикеров за раз или начни новый пак: /new"
+    )
 
 
 def _is_name_occupied(exc: Exception) -> bool:
@@ -108,10 +131,7 @@ class Publisher:
     ) -> None:
         """Append stickers to an existing set, respecting the 120 limit."""
         if current_count + len(stickers) > MAX_STICKERS_PER_SET:
-            raise PackFullError(
-                f"set {set_name} has {current_count}; cannot add {len(stickers)} "
-                f"(limit {MAX_STICKERS_PER_SET})"
-            )
+            raise capacity_error(set_name, current_count)
         for i, (image, emoji) in enumerate(stickers, start=current_count):
             await self._bot.add_sticker_to_set(  # type: ignore[attr-defined]
                 user_id=user_id, name=set_name, sticker=_input_sticker(image, emoji, i)
