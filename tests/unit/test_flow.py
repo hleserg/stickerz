@@ -183,9 +183,9 @@ async def test_enter_captions_fresh_keeps_collected_state(db: Database) -> None:
 
 
 async def test_enter_captions_seeds_13_unique_default_items(db: Database) -> None:
-    # The default pack is no longer "all 13 standard": it's ALWAYS exactly 13
-    # pre-filled unique items — 6-8 random standard reactions + 5-7 meme ideas
-    # (memes live in the custom list, visible/removable on the review step).
+    # The default pack is ALWAYS exactly 13 pre-filled unique items — 6-8 random
+    # standard reactions + 5-7 meme ideas, all pre-checked toggles on the same
+    # checklist screen; the custom list starts empty (user ideas only).
     from sticker_service.handlers.flow import _enter_captions
     from sticker_service.services.stickers import STANDARD_BLOCK
 
@@ -194,13 +194,66 @@ async def test_enter_captions_seeds_13_unique_default_items(db: Database) -> Non
     callback.data = "style:watercolor"
     await _enter_captions(callback, state, db, mode="fresh", style_id="watercolor")
     data = await state.get_data()
-    std, memes = data["std_sel"], data["custom"]
+    std, memes, picked = data["std_sel"], data["meme_items"], data["meme_sel"]
+    assert data["custom"] == []  # customs are the user's own ideas only
     assert len(std) + len(memes) == 13  # the pre-filled total is fixed
     assert 6 <= len(std) <= 8 and 5 <= len(memes) <= 7
+    assert picked == list(range(len(memes)))  # every sampled meme starts checked
     assert len(set(std)) == len(std) and len(set(memes)) == len(memes)  # no repeats
     assert all(0 <= i < len(STANDARD_BLOCK) for i in std)
     # Every meme item is prompt-ready: exact caption or an explicit no-text marker.
     assert all("Подпись: «" in m or m.endswith("Без подписи.") for m in memes)
+
+
+def test_picked_captions_merges_segments_in_order_and_caps() -> None:
+    from sticker_service.handlers.flow import _picked_captions, _picked_count
+    from sticker_service.services.stickers import STANDARD_BLOCK
+
+    data = {
+        "std_sel": [2, 0, 99],  # 99 is out of range → ignored
+        "meme_items": ["Идея А. Без подписи.", "Идея Б. Подпись: «Хех»"],
+        "meme_sel": [1],
+        "custom": ["своё"],
+    }
+    assert _picked_captions(data) == [
+        STANDARD_BLOCK[0],
+        STANDARD_BLOCK[2],
+        "Идея Б. Подпись: «Хех»",
+        "своё",
+    ]
+    assert _picked_count(data) == 4
+    # The cap holds: 13 std + 2 memes + 2 customs → exactly MAX_CAPTIONS items.
+    full = {
+        "std_sel": list(range(13)),
+        "meme_items": ["м1. Без подписи.", "м2. Без подписи."],
+        "meme_sel": [0, 1],
+        "custom": ["а", "б"],
+    }
+    from sticker_service.services.stickers import MAX_CAPTIONS
+
+    assert len(_picked_captions(full)) == MAX_CAPTIONS
+    assert _picked_count(full) == 17  # uncapped count drives the toggle guard
+
+
+def test_meme_button_label_strips_markers_and_truncates() -> None:
+    from sticker_service.handlers.flow import _meme_button_label
+
+    assert _meme_button_label("Пьёт кофе. Подпись: «Первый глоток.»") == "Пьёт кофе."
+    assert _meme_button_label("Спит лицом в подушку. Без подписи.") == "Спит лицом в подушку."
+    long = "Очень длинное описание сцены которое не влезет в кнопку никак"
+    label = _meme_button_label(f"{long} Без подписи.")
+    assert label.endswith("…") and len(label) <= 31
+
+
+def test_checklist_kb_renders_meme_toggles() -> None:
+    from sticker_service.handlers.flow import std_checklist_kb
+
+    markup = std_checklist_kb([0], 0, ["Идея А. Без подписи.", "Идея Б. Подпись: «Хех»"], [0])
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    meme_buttons = [b for b in buttons if (b.callback_data or "").startswith("meme:")]
+    assert len(meme_buttons) == 2
+    assert meme_buttons[0].text.startswith("✅ 🎲 ")  # checked meme
+    assert meme_buttons[1].text.startswith("⬜ 🎲 ")  # unchecked meme
 
 
 async def test_alpha_gate_blocks_unapproved_then_allows(db: Database) -> None:
