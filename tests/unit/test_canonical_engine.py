@@ -15,7 +15,17 @@ from sticker_service.services.canonical import (
     run_gate,
 )
 from sticker_service.services.models import MockImageModel
-from sticker_service.services.models.base import ImageModel, ModelRefusalError
+from sticker_service.services.models.base import ImageModel, ModelError, ModelRefusalError
+
+
+class _VisionDown(MockImageModel):
+    """Image generation works, but the cheap vision model is overloaded (503)."""
+
+    async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:
+        raise ModelError("503 UNAVAILABLE: this model is currently experiencing high demand")
+
+    async def ask(self, image: bytes, question: str) -> str:
+        raise ModelError("503 UNAVAILABLE: this model is currently experiencing high demand")
 
 
 class _RefuseThenOk(ImageModel):
@@ -253,3 +263,43 @@ async def test_run_gate_vision_judge_threshold() -> None:
 async def test_run_gate_none_always_ok() -> None:
     model = MockImageModel(judge_score=0.0)
     assert (await run_gate(Gate.NONE, model, b"a", b"b", threshold=0.9)).ok is True
+
+
+# --- vision-model outage resilience (the gate/pre-check are advisory) ---------
+
+
+async def test_run_gate_keeps_frame_when_vision_unavailable() -> None:
+    # A 503 on the cheap vision model must not abort: the gate is advisory, so we
+    # keep the frame (ok=True) rather than propagating the error.
+    gate = await run_gate(Gate.VISION_JUDGE, _VisionDown(), b"a", b"b", threshold=0.9)
+    assert gate.ok is True
+    assert gate.score == -1.0
+
+
+async def test_pipeline_survives_gate_vision_outage() -> None:
+    # The image model is fine; only the vision gate is down. The run must still
+    # complete (this is the real "перегружена" bug: a vision 503 aborted the flow).
+    model = _VisionDown()
+    canonical = await CanonicalEngine(model).run(_watercolor_like(), b"P", subject_type="adult")
+    assert canonical.startswith(b"\x89PNG")
+    assert len(model.generate_calls) == 3  # all steps generated despite gate outage
+
+
+async def test_pipeline_survives_precheck_vision_outage() -> None:
+    # A skip_if_yes pre-check whose vision call 503s must not abort — we just don't
+    # skip and run the step normally.
+    model = _VisionDown()
+    style = _style(
+        [
+            {"step": 1, "prompt": "a", "refs": ["photo"], "gate": "none"},
+            {
+                "step": 2,
+                "prompt": "turn to camera",
+                "refs": ["prev"],
+                "gate": "none",
+                "skip_if_yes": "смотрит в камеру?",
+            },
+        ]
+    )
+    await CanonicalEngine(model).run(style, b"P", subject_type="adult")
+    assert model.generate_calls == ["a", "turn to camera"]  # step 2 ran (not skipped)

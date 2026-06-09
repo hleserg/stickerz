@@ -21,6 +21,7 @@ from sticker_service.services.canonical.schema import PipelineStep, Style
 from sticker_service.services.models.base import (
     ImageModel,
     Ladder,
+    ModelError,
     ModelRefusalError,
     generate_via_ladder,
 )
@@ -192,10 +193,23 @@ class CanonicalEngine:
         return image
 
     async def _precheck_skips(self, step: PipelineStep, prev: bytes) -> bool:
-        """Ask the configured yes/no question about ``prev``; skip the step on yes."""
+        """Ask the configured yes/no question about ``prev``; skip the step on yes.
+
+        The pre-check is an optimization (skip a redundant turn-to-camera step), so
+        a vision-model outage must not abort the run — on failure we simply don't
+        skip and run the step normally.
+        """
         if not step.skip_if_yes:
             return False
-        answer = await self._model.ask(prev, step.skip_if_yes)
+        try:
+            answer = await self._model.ask(prev, step.skip_if_yes)
+        except ModelError as exc:
+            logger.warning(
+                "canonical step %d: pre-check vision unavailable (%s); running step",
+                step.step,
+                str(exc)[:100],
+            )
+            return False
         logger.info("canonical step %d: pre-check answer=%r", step.step, answer)
         return _is_yes(answer)
 
