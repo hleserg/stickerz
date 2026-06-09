@@ -335,9 +335,16 @@ async def _show(  # pragma: no cover
     text, markup = _screen_for(target, data, loader)
     await state.set_state(target)
     if isinstance(callback.message, Message):
-        with contextlib.suppress(TelegramBadRequest):
+        try:
             await callback.message.edit_text(text, reply_markup=markup)
-        await _store_wizard(state, callback.message)
+            await _store_wizard(state, callback.message)
+            return
+        except TelegramBadRequest:
+            # Wizard message gone (deleted/too old) — don't silently no-op; send
+            # a fresh one so navigation never looks frozen.
+            pass
+        sent = await callback.message.answer(text, reply_markup=markup)
+        await _store_wizard(state, sent)
 
 
 async def _show_msg(  # pragma: no cover
@@ -442,6 +449,22 @@ _PHOTO_HINTS = {
 }
 
 
+async def _download_photo(message: Message, status: Message) -> bytes | None:  # pragma: no cover
+    """Download the largest photo; on a Telegram failure, tell the user and return None.
+
+    Without this, a transient ``bot.download`` error escaped the handler and left
+    the wizard frozen on "проверяю фото…" forever.
+    """
+    try:
+        file = await message.bot.download(message.photo[-1].file_id)  # type: ignore[union-attr]
+    except Exception as exc:
+        logger.warning("photo download failed: %s", str(exc)[:100])
+        with contextlib.suppress(Exception):
+            await status.edit_text("Не удалось скачать фото из Telegram — пришли его ещё раз.")
+        return None
+    return file.read() if file else b""
+
+
 async def on_photo(  # pragma: no cover
     message: Message, state: FSMContext, orchestrator: Orchestrator, db: Database
 ) -> None:
@@ -456,8 +479,9 @@ async def on_photo(  # pragma: no cover
         return
     await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
     status = await _replace_below(message, state, "📸 Принял фото, проверяю…")
-    file = await message.bot.download(message.photo[-1].file_id)  # type: ignore[union-attr]
-    photo = file.read() if file else b""
+    photo = await _download_photo(message, status)
+    if photo is None:
+        return  # download failed → user was told to resend; stay in photo state
     uid = message.from_user.id if message.from_user else 0
     try:
         async with _photo_check_timeout():
@@ -855,6 +879,11 @@ async def _generate_and_present(  # pragma: no cover
             )
     except Exception as exc:
         logger.exception("generation failed")
+        # Revert out of the publish state (set before generation) so a failure is
+        # never a dead-end recoverable only via /cancel — the review screen's
+        # "✅ Создать" works again, alongside any retry button.
+        with contextlib.suppress(Exception):
+            await state.set_state(NewPack.review)
         await analytics.log(
             db, user_id, analytics.GENERATION_ERROR, mode=mode, reason=str(exc)[:200]
         )
@@ -862,7 +891,7 @@ async def _generate_and_present(  # pragma: no cover
             await msg.edit_text(_friendly_error(exc))
         if model_errors.is_quota(exc):
             await _alert_admins_quota(msg, exc)
-        if model_errors.is_retryable(exc):  # overload → offer a retry once it cools down
+        if model_errors.is_retryable(exc):  # overload/timeout → offer a retry once it cools down
             _arm_retry(msg)
         return
 
@@ -1204,8 +1233,9 @@ async def on_redraw_photo(  # pragma: no cover
         return
     await message.bot.send_chat_action(message.chat.id, "typing")  # type: ignore[union-attr]
     status = await _replace_below(message, state, "📸 Принял фото, проверяю…")
-    file = await message.bot.download(message.photo[-1].file_id)  # type: ignore[union-attr]
-    photo = file.read() if file else b""
+    photo = await _download_photo(message, status)
+    if photo is None:
+        return  # download failed → user was told to resend
     try:
         async with _photo_check_timeout():
             code = await orchestrator.validate_photo(photo)

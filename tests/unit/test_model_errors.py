@@ -44,6 +44,13 @@ def test_http_codes_match_on_word_boundary() -> None:
     assert errors.classify(RuntimeError("order 4290 not found")) == errors.UNKNOWN
 
 
+def test_timeout_is_retryable_transient() -> None:
+    # A generation timeout (empty str()) must be retryable so the user gets the
+    # retry button, not a dead-end. asyncio.TimeoutError is builtin TimeoutError.
+    assert errors.classify(TimeoutError()) == errors.TRANSIENT
+    assert errors.is_retryable(TimeoutError())
+
+
 def test_user_message_per_kind() -> None:
     assert "лимит" in errors.user_message(ModelQuotaError("x"))
     assert "перегружена" in errors.user_message(RuntimeError("503 high demand"))

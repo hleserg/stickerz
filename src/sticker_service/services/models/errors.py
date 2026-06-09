@@ -50,6 +50,10 @@ def classify(exc: Exception) -> str:
         return QUOTA
     if isinstance(exc, ModelRefusalError):
         return REFUSAL
+    # A timeout (asyncio.TimeoutError is builtin TimeoutError on 3.11+) is a
+    # transient stall worth retrying — its str() is empty, so type-check it.
+    if isinstance(exc, TimeoutError):
+        return TRANSIENT
     s = str(exc).lower()
     if any(t in s for t in _QUOTA):
         return QUOTA
