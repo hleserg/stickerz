@@ -16,6 +16,13 @@ from sticker_service.services.stickers.generate import (
     build_sheet_prompt,
     generate_sheet,
 )
+from sticker_service.services.stickers.meme_pool import (
+    MemeIdea,
+    active_pool,
+    bundled_pool,
+    parse_pool,
+    sample_default_mix,
+)
 from sticker_service.services.stickers.sets import (
     MAX_CAPTIONS,
     PER_PAGE,
@@ -30,14 +37,19 @@ __all__ = [
     "MAX_CAPTIONS",
     "PER_PAGE",
     "STANDARD_BLOCK",
+    "MemeIdea",
     "SheetRefusedError",
+    "active_pool",
     "assign_emoji",
     "assign_emojis",
     "build_caption_set",
     "build_sheet_prompt",
+    "bundled_pool",
     "emoji_for_caption",
     "extract_emoji",
     "generate_sheet",
     "is_single_emoji",
+    "parse_pool",
+    "sample_default_mix",
     "selected_captions",
 ]

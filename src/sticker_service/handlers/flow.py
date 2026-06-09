@@ -297,7 +297,14 @@ def _screen_for(
     if target == NewPack.select_std.state:
         selected = list(data.get("std_sel", []))
         page = int(data.get("page", 0))
-        return _TXT_CAPTIONS, std_checklist_kb(selected, page)
+        text = _TXT_CAPTIONS
+        memes = len(data.get("custom", []))
+        if memes:
+            text += (
+                f"\n\n🎲 Плюс {memes} случайных мемных идей уже в наборе — "
+                "увидите их на шаге проверки, там же можно убрать лишние."
+            )
+        return text, std_checklist_kb(selected, page)
     if target == NewPack.ask_custom.state:
         return _TXT_ASK_CUSTOM, ask_custom_kb()
     if target == NewPack.enter_custom.state:
@@ -583,9 +590,16 @@ async def on_age(callback: CallbackQuery, state: FSMContext, loader: StyleLoader
 
 
 async def _enter_captions(
-    callback: CallbackQuery, state: FSMContext, *, mode: str, **extra: Any
+    callback: CallbackQuery, state: FSMContext, db: Database, *, mode: str, **extra: Any
 ) -> None:
-    """Seed caption state (all standard selected) and show the checklist.
+    """Seed caption state with a random default mix and show the checklist.
+
+    The default pack is no longer the full static standard block: it's ALWAYS
+    exactly 13 pre-filled unique items — 6-8 random standard reactions
+    (pre-checked on the checklist) plus 5-7 random meme ideas from the pool
+    (seeded into ``custom`` — visible and removable on the review step), leaving
+    room for 2 user ideas under the 15 cap. If the pool somehow fails to load,
+    fall back to the old all-standard default rather than blocking pack creation.
 
     ``reuse``/``extend`` jump straight here without a photo/name/style collection
     phase, so any leftover data from a previous *unfinished* ``/new`` flow still
@@ -593,11 +607,16 @@ async def _enter_captions(
     ``photo`` can hijack publishing into a wrong NEW pack instead of reusing /
     extending the chosen one. ``fresh`` keeps the data it just collected.
     """
+    from sticker_service.services.stickers import active_pool, sample_default_mix
+
     if mode != "fresh":
         await state.set_data({})
-    await state.update_data(
-        mode=mode, std_sel=list(range(len(STANDARD_BLOCK))), custom=[], page=0, **extra
-    )
+    try:
+        std_sel, memes = sample_default_mix(await active_pool(db))
+    except Exception:  # the default mix must never block the flow
+        logger.warning("meme pool unavailable; using the all-standard default")
+        std_sel, memes = list(range(len(STANDARD_BLOCK))), []
+    await state.update_data(mode=mode, std_sel=std_sel, custom=memes, page=0, **extra)
     await callback.answer()
     await _show(callback, state, NewPack.select_std.state, None)
 
@@ -610,7 +629,7 @@ async def on_style(
     style_id = (callback.data or "").split(":", 1)[-1]
     if callback.from_user is not None:
         await analytics.log(db, callback.from_user.id, analytics.STYLE_CHOSEN, style_id=style_id)
-    await _enter_captions(callback, state, mode="fresh", style_id=style_id)
+    await _enter_captions(callback, state, db, mode="fresh", style_id=style_id)
 
 
 async def on_std_toggle(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
@@ -1224,11 +1243,13 @@ async def on_show_canonical(callback: CallbackQuery, db: Database) -> None:  # p
     )
 
 
-async def on_char_add(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+async def on_char_add(
+    callback: CallbackQuery, state: FSMContext, db: Database
+) -> None:  # pragma: no cover
     """Add stickers to a saved character → caption selection → create (0.5 pack)."""
     tag_component("handlers.flow")
     char_id = int((callback.data or "cadd:0").split(":", 1)[-1])
-    await _enter_captions(callback, state, mode="reuse", character_id=char_id)
+    await _enter_captions(callback, state, db, mode="reuse", character_id=char_id)
 
 
 async def on_char_redraw(  # pragma: no cover
@@ -1506,7 +1527,7 @@ async def on_pick_pack(  # pragma: no cover
             title = pack.title if pack else "этот"
             await msg.answer(f"Пак «{title}» уже заполнен (120/120). Создай новый пак: /new")
         return
-    await _enter_captions(callback, state, mode="extend", pack_id=pack_id)
+    await _enter_captions(callback, state, db, mode="extend", pack_id=pack_id)
 
 
 def build_router() -> Router:

@@ -141,7 +141,7 @@ async def test_cancel_when_idle_is_noop() -> None:
     assert "Нечего отменять" in message.answer.await_args.args[0]
 
 
-async def test_enter_captions_extend_drops_stale_fresh_state() -> None:
+async def test_enter_captions_extend_drops_stale_fresh_state(db: Database) -> None:
     from sticker_service.handlers.flow import _enter_captions
 
     state = _state()
@@ -151,24 +151,45 @@ async def test_enter_captions_extend_drops_stale_fresh_state() -> None:
     )
     callback = AsyncMock()
     callback.data = "extend:7"
-    await _enter_captions(callback, state, mode="extend", pack_id=7)
+    await _enter_captions(callback, state, db, mode="extend", pack_id=7)
     data = await state.get_data()
     assert data["mode"] == "extend" and data["pack_id"] == 7
     # Stale fresh-flow data is wiped so it can't hijack publish into a new pack.
     assert "name" not in data and "photo" not in data and "style_id" not in data
 
 
-async def test_enter_captions_fresh_keeps_collected_state() -> None:
+async def test_enter_captions_fresh_keeps_collected_state(db: Database) -> None:
     from sticker_service.handlers.flow import _enter_captions
 
     state = _state()
     await state.update_data(photo=b"X", name="Лёша", style_id="watercolor", subject="adult")
     callback = AsyncMock()
     callback.data = "style:watercolor"
-    await _enter_captions(callback, state, mode="fresh", style_id="watercolor")
+    await _enter_captions(callback, state, db, mode="fresh", style_id="watercolor")
     data = await state.get_data()
     assert data["mode"] == "fresh"
     assert data["photo"] == b"X" and data["name"] == "Лёша"  # collected data preserved
+
+
+async def test_enter_captions_seeds_13_unique_default_items(db: Database) -> None:
+    # The default pack is no longer "all 13 standard": it's ALWAYS exactly 13
+    # pre-filled unique items — 6-8 random standard reactions + 5-7 meme ideas
+    # (memes live in the custom list, visible/removable on the review step).
+    from sticker_service.handlers.flow import _enter_captions
+    from sticker_service.services.stickers import STANDARD_BLOCK
+
+    state = _state()
+    callback = AsyncMock()
+    callback.data = "style:watercolor"
+    await _enter_captions(callback, state, db, mode="fresh", style_id="watercolor")
+    data = await state.get_data()
+    std, memes = data["std_sel"], data["custom"]
+    assert len(std) + len(memes) == 13  # the pre-filled total is fixed
+    assert 6 <= len(std) <= 8 and 5 <= len(memes) <= 7
+    assert len(set(std)) == len(std) and len(set(memes)) == len(memes)  # no repeats
+    assert all(0 <= i < len(STANDARD_BLOCK) for i in std)
+    # Every meme item is prompt-ready: exact caption or an explicit no-text marker.
+    assert all("Подпись: «" in m or m.endswith("Без подписи.") for m in memes)
 
 
 async def test_alpha_gate_blocks_unapproved_then_allows(db: Database) -> None:
