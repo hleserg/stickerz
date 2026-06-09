@@ -53,6 +53,22 @@ async def test_credits_default_and_ops(db: Database) -> None:
     assert await db.add_credits(5, 2) == 2
 
 
+async def test_consume_credits_atomic_under_concurrency(db: Database) -> None:
+    # Two concurrent spends must BOTH apply — the old read-modify-write could
+    # interleave (read 6, read 6, write 5, write 5) and lose a decrement.
+    import asyncio
+
+    await db.set_credits(9, 6)
+    await asyncio.gather(db.consume_credits(9, 1), db.consume_credits(9, 1))
+    assert await db.credits_left(9) == 4  # both decrements landed, not 5
+
+
+async def test_consume_credits_all_or_nothing_when_insufficient(db: Database) -> None:
+    # Spending more than the balance leaves it untouched (no partial debit).
+    await db.set_credits(11, 1)
+    assert await db.consume_credits(11, 2) == 1  # insufficient → nothing spent
+
+
 # --- budget -----------------------------------------------------------------
 
 

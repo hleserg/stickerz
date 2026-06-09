@@ -293,3 +293,15 @@ def test_review_text_shows_limit_notice_only_when_full() -> None:
     full = [f"c{i}" for i in range(MAX_CAPTIONS)]
     assert "максимум" in _review_text(full)  # at the cap → explain the 15-per-pass limit
     assert "максимум" not in _review_text(full[:-1])  # one below → no notice
+
+
+def test_single_flight_guard_blocks_reentry() -> None:
+    # A second paid/publish action for the same user is refused while one runs,
+    # which prevents double-tap double-spend / duplicate packs.
+    from sticker_service.handlers.flow import _begin_action, _end_action
+
+    assert _begin_action(123) is True  # first acquire wins
+    assert _begin_action(123) is False  # re-entry blocked while in-flight
+    _end_action(123)
+    assert _begin_action(123) is True  # released → acquirable again
+    _end_action(123)

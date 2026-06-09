@@ -705,45 +705,72 @@ async def on_nav_cancel(callback: CallbackQuery, state: FSMContext) -> None:  # 
             await callback.message.edit_text("Отменено. Новый пак: /new")
 
 
+# --- single-flight guard: one paid/publish action per user at a time ----------
+# aiogram runs handlers as concurrent coroutines on one event loop, so a plain
+# set is a safe mutex (no await between the check and the add). This stops a
+# double-tap from starting two generations (double spend) or two publishes
+# (a duplicate Telegram pack).
+_inflight_users: set[int] = set()
+_BUSY_TEXT = "⏳ Уже выполняется — дождись результата."
+
+
+def _begin_action(user_id: int) -> bool:
+    """Reserve the user's single in-flight slot; False if one is already running."""
+    if user_id in _inflight_users:
+        return False
+    _inflight_users.add(user_id)
+    return True
+
+
+def _end_action(user_id: int) -> None:
+    _inflight_users.discard(user_id)
+
+
 async def on_rev_create(  # pragma: no cover
     callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator, db: Database
 ) -> None:
     """Generate the selected stickers (per page) and show a preview to publish/download."""
     tag_component("handlers.flow")
-    data = await state.get_data()
-    captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
     user_id = callback.from_user.id if callback.from_user else 0
-    await callback.answer()
-    msg = callback.message if isinstance(callback.message, Message) else None
-    if msg is None:
+    if not _begin_action(user_id):
+        await callback.answer(_BUSY_TEXT, show_alert=True)
         return
-    if not captions:
-        await msg.answer("Выберите хотя бы один стикер.")
-        return
-    mode = data.get("mode", "fresh")
-    cost = pricing.cost_for_mode(mode)
-    if (hint := await _generation_gate(db, user_id, cost)) is not None:
-        await msg.answer(hint)
-        return
+    try:
+        data = await state.get_data()
+        captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
+        await callback.answer()
+        msg = callback.message if isinstance(callback.message, Message) else None
+        if msg is None:
+            return
+        if not captions:
+            await msg.answer("Выберите хотя бы один стикер.")
+            return
+        mode = data.get("mode", "fresh")
+        cost = pricing.cost_for_mode(mode)
+        if (hint := await _generation_gate(db, user_id, cost)) is not None:
+            await msg.answer(hint)
+            return
 
-    # Inform of the price before doing the (paid) work, for alpha participants.
-    if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
-        have = await db.credits_left(user_id)
-        await msg.answer(
-            f"💸 Это действие спишет {pricing.format_packs(cost)} пак "
-            f"(сейчас у тебя {pricing.format_packs(have)})."
+        # Inform of the price before doing the (paid) work, for alpha participants.
+        if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
+            have = await db.credits_left(user_id)
+            await msg.answer(
+                f"💸 Это действие спишет {pricing.format_packs(cost)} пак "
+                f"(сейчас у тебя {pricing.format_packs(have)})."
+            )
+
+        std_names = [STANDARD_BLOCK[i] for i in sorted(set(data.get("std_sel", [])))]
+        await analytics.log(
+            db,
+            user_id,
+            analytics.CAPTIONS_SELECTED,
+            standard=std_names,
+            custom=list(data.get("custom", [])),
+            total=len(captions),
         )
-
-    std_names = [STANDARD_BLOCK[i] for i in sorted(set(data.get("std_sel", [])))]
-    await analytics.log(
-        db,
-        user_id,
-        analytics.CAPTIONS_SELECTED,
-        standard=std_names,
-        custom=list(data.get("custom", [])),
-        total=len(captions),
-    )
-    await _generate_and_present(msg, state, orchestrator, db, user_id)
+        await _generate_and_present(msg, state, orchestrator, db, user_id)
+    finally:
+        _end_action(user_id)
 
 
 # --- generation core + retry-on-overload (shared by create & retry) ----------
@@ -870,14 +897,20 @@ async def on_retry(  # pragma: no cover
 ) -> None:
     """Re-run generation after a transient overload (armed button finished its countdown)."""
     tag_component("handlers.flow")
-    await callback.answer()
-    msg = callback.message if isinstance(callback.message, Message) else None
-    if msg is None:
-        return
     user_id = callback.from_user.id if callback.from_user else 0
-    with contextlib.suppress(Exception):
-        await msg.edit_reply_markup(reply_markup=None)  # drop the button while retrying
-    await _generate_and_present(msg, state, orchestrator, db, user_id)
+    if not _begin_action(user_id):
+        await callback.answer(_BUSY_TEXT, show_alert=True)
+        return
+    try:
+        await callback.answer()
+        msg = callback.message if isinstance(callback.message, Message) else None
+        if msg is None:
+            return
+        with contextlib.suppress(Exception):
+            await msg.edit_reply_markup(reply_markup=None)  # drop the button while retrying
+        await _generate_and_present(msg, state, orchestrator, db, user_id)
+    finally:
+        _end_action(user_id)
 
 
 async def on_retry_wait(callback: CallbackQuery) -> None:  # pragma: no cover
@@ -919,45 +952,51 @@ async def on_publish_yes(  # pragma: no cover
 ) -> None:
     """Publish the previewed stickers (new pack or extend)."""
     tag_component("handlers.flow")
-    data = await state.get_data()
     user_id = callback.from_user.id if callback.from_user else 0
-    await callback.answer()
-    msg = callback.message if isinstance(callback.message, Message) else None
-    if msg is None:
+    if not _begin_action(user_id):
+        await callback.answer(_BUSY_TEXT, show_alert=True)
         return
-    stickers: list[StickerInput] = data.get("stickers") or []
-    if not stickers:
-        with contextlib.suppress(TelegramBadRequest):
-            await msg.edit_text("Нет готовых стикеров. Начни заново: /new")
-        await state.clear()
-        return
-
-    with contextlib.suppress(TelegramBadRequest):
-        await msg.edit_text("📦 Публикую пак в Telegram…")
     try:
-        async with _typing(msg):
-            pack = await db.get_pack(int(data["pack_id"])) if data.get("pack_id") else None
-            if pack is None:
-                raise RuntimeError("pack not found")
-            if data.get("mode") == "extend":
-                result = await orchestrator.publish_extend(
-                    owner_id=user_id, pack=pack, stickers=stickers
-                )
-            else:
-                result = await orchestrator.publish_draft(
-                    owner_id=user_id, pack=pack, stickers=stickers
-                )
-    except Exception as exc:
-        logger.exception("publish failed")
-        with contextlib.suppress(TelegramBadRequest):
-            await msg.edit_text(_friendly_error(exc))
-        return
+        data = await state.get_data()
+        await callback.answer()
+        msg = callback.message if isinstance(callback.message, Message) else None
+        if msg is None:
+            return
+        stickers: list[StickerInput] = data.get("stickers") or []
+        if not stickers:
+            with contextlib.suppress(TelegramBadRequest):
+                await msg.edit_text("Нет готовых стикеров. Начни заново: /new")
+            await state.clear()
+            return
 
-    event = analytics.EXTENDED if data.get("mode") == "extend" else analytics.PUBLISHED
-    await analytics.log(db, user_id, event, set_name=result.set_name, count=result.count)
-    await state.clear()
-    with contextlib.suppress(TelegramBadRequest):
-        await msg.edit_text(f"✅ Готово! Пак: {result.link}")
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.edit_text("📦 Публикую пак в Telegram…")
+        try:
+            async with _typing(msg):
+                pack = await db.get_pack(int(data["pack_id"])) if data.get("pack_id") else None
+                if pack is None:
+                    raise RuntimeError("pack not found")
+                if data.get("mode") == "extend":
+                    result = await orchestrator.publish_extend(
+                        owner_id=user_id, pack=pack, stickers=stickers
+                    )
+                else:
+                    result = await orchestrator.publish_draft(
+                        owner_id=user_id, pack=pack, stickers=stickers
+                    )
+        except Exception as exc:
+            logger.exception("publish failed")
+            with contextlib.suppress(TelegramBadRequest):
+                await msg.edit_text(_friendly_error(exc))
+            return
+
+        event = analytics.EXTENDED if data.get("mode") == "extend" else analytics.PUBLISHED
+        await analytics.log(db, user_id, event, set_name=result.set_name, count=result.count)
+        await state.clear()
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.edit_text(f"✅ Готово! Пак: {result.link}")
+    finally:
+        _end_action(user_id)
 
 
 async def on_pub_download(  # pragma: no cover
