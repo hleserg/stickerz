@@ -141,6 +141,36 @@ async def test_cancel_when_idle_is_noop() -> None:
     assert "Нечего отменять" in message.answer.await_args.args[0]
 
 
+async def test_enter_captions_extend_drops_stale_fresh_state() -> None:
+    from sticker_service.handlers.flow import _enter_captions
+
+    state = _state()
+    # Leftover from a previous, unfinished /new flow sitting in the persistent FSM.
+    await state.update_data(
+        mode="fresh", name="Серг", photo=b"X", style_id="watercolor", subject="adult"
+    )
+    callback = AsyncMock()
+    callback.data = "extend:7"
+    await _enter_captions(callback, state, mode="extend", pack_id=7)
+    data = await state.get_data()
+    assert data["mode"] == "extend" and data["pack_id"] == 7
+    # Stale fresh-flow data is wiped so it can't hijack publish into a new pack.
+    assert "name" not in data and "photo" not in data and "style_id" not in data
+
+
+async def test_enter_captions_fresh_keeps_collected_state() -> None:
+    from sticker_service.handlers.flow import _enter_captions
+
+    state = _state()
+    await state.update_data(photo=b"X", name="Лёша", style_id="watercolor", subject="adult")
+    callback = AsyncMock()
+    callback.data = "style:watercolor"
+    await _enter_captions(callback, state, mode="fresh", style_id="watercolor")
+    data = await state.get_data()
+    assert data["mode"] == "fresh"
+    assert data["photo"] == b"X" and data["name"] == "Лёша"  # collected data preserved
+
+
 async def test_alpha_gate_blocks_unapproved_then_allows(db: Database) -> None:
     await modes.set_mode(db, modes.ALPHA)
     uid = 99999  # not an admin

@@ -582,10 +582,19 @@ async def on_age(callback: CallbackQuery, state: FSMContext, loader: StyleLoader
 # --- caption selection → create → preview → publish/download -----------------
 
 
-async def _enter_captions(  # pragma: no cover
+async def _enter_captions(
     callback: CallbackQuery, state: FSMContext, *, mode: str, **extra: Any
 ) -> None:
-    """Seed caption state (all standard selected) and show the checklist."""
+    """Seed caption state (all standard selected) and show the checklist.
+
+    ``reuse``/``extend`` jump straight here without a photo/name/style collection
+    phase, so any leftover data from a previous *unfinished* ``/new`` flow still
+    sits in the persistent FSM. Reset it first, or that stale ``mode``/``name``/
+    ``photo`` can hijack publishing into a wrong NEW pack instead of reusing /
+    extending the chosen one. ``fresh`` keeps the data it just collected.
+    """
+    if mode != "fresh":
+        await state.set_data({})
     await state.update_data(
         mode=mode, std_sel=list(range(len(STANDARD_BLOCK))), custom=[], page=0, **extra
     )
@@ -1031,6 +1040,16 @@ async def on_publish_yes(  # pragma: no cover
                 pack = await db.get_pack(int(data["pack_id"])) if data.get("pack_id") else None
                 if pack is None:
                     raise RuntimeError("pack not found")
+                # Diagnostic: which branch a publish takes (extend vs new set) and on
+                # which pack — so a "made a new set instead of extending" report is
+                # traceable to the mode/pack_id the FSM actually held at publish time.
+                logger.info(
+                    "publish: mode=%s pack_id=%s set=%s stickers=%d",
+                    data.get("mode"),
+                    pack.id,
+                    pack.set_name,
+                    len(stickers),
+                )
                 if data.get("mode") == "extend":
                     result = await orchestrator.publish_extend(
                         owner_id=user_id, pack=pack, stickers=stickers

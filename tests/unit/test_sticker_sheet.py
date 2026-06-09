@@ -95,6 +95,7 @@ def test_sheet_prompt_quotes_standard_captions_and_resolves_suffix() -> None:
     # New semantics: ideas not captions, optional text, free composition, die-cut on magenta.
     assert "NOT captions" in prompt
     assert "EXACT caption" in prompt
+    assert "act out" in prompt  # caption-only items get played out, not just written
     assert "die-cut" in prompt
     # The old hard "caption ON the figure" rule is gone.
     assert "directly ON the character" not in prompt
