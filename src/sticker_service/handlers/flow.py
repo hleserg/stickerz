@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import random
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -50,7 +51,7 @@ from sticker_service.services.orchestrator import Orchestrator
 from sticker_service.services.postprocess import bundle_zip, compose_preview
 from sticker_service.services.publish import PackFullError, remaining_capacity
 from sticker_service.services.publish.publisher import StickerInput
-from sticker_service.services.stickers import MAX_CAPTIONS, STANDARD_BLOCK
+from sticker_service.services.stickers import MAX_CAPTIONS, STANDARD_BLOCK, selected_captions
 from sticker_service.services.strikes import register_strike
 
 logger = logging.getLogger(__name__)
@@ -83,11 +84,13 @@ _TXT_SUBJECT = "Это взрослый или ребёнок?"
 _TXT_AGE = "Сколько лет ребёнку?"
 _TXT_STYLE = "Выбери стиль:"
 _TXT_CAPTIONS = (
-    "Соберите набор: стандартные реакции и 🎲 случайные мемные идеи — отметьте нужное. "
-    "Дальше можно добавить свои, всего не больше 15 (один лист)."
+    "Выберите стандартные стикеры для набора. Дальше можно добавить свои "
+    "или взять 🎲 случайную идею — всего не больше 15 (один лист)."
 )
 _TXT_NEW_OR_ADDTO = "Новый пак: /new · Дополнить существующий: /addto (вдвое дешевле)"
-_TXT_ASK_CUSTOM = "Хотите добавить свои стикеры? Можно описать идею своими словами."
+_TXT_ASK_CUSTOM = (
+    "Хотите добавить свои стикеры? Можно описать идею своими словами или взять 🎲 случайную."
+)
 _TXT_ENTER_CUSTOM = (
     "Опишите идею стикера сообщением — что на нём происходит (поза, эмоция, одежда, сценка). "
     'Нужна точная надпись? Возьмите её в кавычки, например: «Огонь!» или "С днём рождения!".'
@@ -121,24 +124,19 @@ def _canonical_progress_text(done: int, total: int) -> str:
     return f"{_STAGE_TEXT['style']} {_progress_bar(done, total)} {done}/{total}"
 
 
-def _picked_captions(data: dict[str, Any]) -> list[str]:
-    """Everything currently selected, in sheet order: standard → memes → customs."""
-    std = [
-        STANDARD_BLOCK[i]
-        for i in sorted(set(data.get("std_sel", [])))
-        if 0 <= i < len(STANDARD_BLOCK)
-    ]
-    items = list(data.get("meme_items", []))
-    memes = [items[j] for j in sorted(set(data.get("meme_sel", []))) if 0 <= j < len(items)]
-    return (std + memes + list(data.get("custom", [])))[:MAX_CAPTIONS]
-
-
 def _picked_count(data: dict[str, Any]) -> int:
-    """Selected standard + meme + custom count, uncapped (for the 15-limit guard)."""
+    """Selected standard + custom count, uncapped (for the 15-limit guard)."""
     std = {i for i in data.get("std_sel", []) if 0 <= i < len(STANDARD_BLOCK)}
-    items = data.get("meme_items", [])
-    memes = {j for j in data.get("meme_sel", []) if 0 <= j < len(items)}
-    return len(std) + len(memes) + len(data.get("custom", []))
+    return len(std) + len(data.get("custom", []))
+
+
+def _format_random_idea(item: str) -> str:
+    """The 🎲 sub-screen text: the rolled idea + how to use or replace it."""
+    return (
+        f"🎲 Случайная идея:\n\n{item}\n\n"
+        "Можно «Взять эту», крутануть ещё раз, скопировать и доработать — "
+        "или просто пришлите свой текст сообщением."
+    )
 
 
 @contextlib.asynccontextmanager
@@ -248,19 +246,8 @@ def publish_kb(*, can_publish: bool = True) -> Any:
     return kb.as_markup()
 
 
-def _meme_button_label(item: str, *, limit: int = 30) -> str:
-    """Short checklist label for a meme sheet-item (description sans markers)."""
-    text = item.split(" Подпись:", 1)[0].removesuffix(" Без подписи.").strip()
-    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
-
-
-def std_checklist_kb(
-    selected: list[int],
-    page: int,
-    meme_items: list[str] | None = None,
-    meme_sel: list[int] | None = None,
-) -> Any:
-    """Caption checklist: standard toggles + 🎲 meme-idea toggles + nav."""
+def std_checklist_kb(selected: list[int], page: int) -> Any:
+    """Checklist of standard captions: toggles + page nav + done + back/cancel."""
     from sticker_service.services.stickers import PER_PAGE, STANDARD_BLOCK
 
     kb = InlineKeyboardBuilder()
@@ -271,17 +258,6 @@ def std_checklist_kb(
         mark = "✅" if i in selected else "⬜"
         kb.button(text=f"{mark} {caption}", callback_data=f"std:{i}")
     kb.adjust(3)  # 3 columns → up to 3×4 per page
-    # The randomly sampled meme ideas live right on this screen as toggles too —
-    # one per row (their texts are long), same ✅/⬜ marks as the standard block.
-    memes = list(meme_items or [])
-    if memes:
-        picked = set(meme_sel or [])
-        mk = InlineKeyboardBuilder()
-        for j, item in enumerate(memes):
-            mark = "✅" if j in picked else "⬜"
-            mk.button(text=f"{mark} 🎲 {_meme_button_label(item)}", callback_data=f"meme:{j}")
-        mk.adjust(1)
-        kb.attach(mk)
     # Bulk toggles: flip every standard caption at once (handy to clear, then
     # pick a few, or re-select all). Capped at the per-sheet limit.
     bulk = InlineKeyboardBuilder()
@@ -305,6 +281,30 @@ def ask_custom_kb() -> Any:
     kb.button(text="Да", callback_data="cust:yes")
     kb.button(text="Нет", callback_data="cust:no")
     kb.adjust(2)
+    _attach_nav(kb, back=True)
+    return kb.as_markup()
+
+
+def enter_custom_kb() -> Any:
+    """The idea-input screen: type your own, or roll a 🎲 random prompt."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎲 Случайный промт", callback_data="randidea")
+    kb.adjust(1)
+    _attach_nav(kb, back=True)
+    return kb.as_markup()
+
+
+def random_idea_kb(item: str) -> Any:
+    """Actions under a rolled idea: take it, reroll, copy it into the input."""
+    from aiogram.types import CopyTextButton
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Взять эту", callback_data="randtake")
+    kb.button(text="🎲 Ещё", callback_data="randidea")
+    # Copies the idea to the clipboard so it can be pasted into the input
+    # field and edited before sending (closest Bot API gets to pre-filling).
+    kb.button(text="📋 Скопировать", copy_text=CopyTextButton(text=item[:256]))
+    kb.adjust(2, 1)
     _attach_nav(kb, back=True)
     return kb.as_markup()
 
@@ -362,15 +362,13 @@ def _screen_for(
     if target == NewPack.select_std.state:
         selected = list(data.get("std_sel", []))
         page = int(data.get("page", 0))
-        return _TXT_CAPTIONS, std_checklist_kb(
-            selected, page, list(data.get("meme_items", [])), list(data.get("meme_sel", []))
-        )
+        return _TXT_CAPTIONS, std_checklist_kb(selected, page)
     if target == NewPack.ask_custom.state:
         return _TXT_ASK_CUSTOM, ask_custom_kb()
     if target == NewPack.enter_custom.state:
-        return _TXT_ENTER_CUSTOM, _nav_kb(back=True)
+        return _TXT_ENTER_CUSTOM, enter_custom_kb()
     if target == NewPack.review.state:
-        captions = _picked_captions(data)
+        captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
         return _review_text(captions), review_kb(len(captions))
     raise ValueError(f"no screen for state {target!r}")  # pragma: no cover - guard
 
@@ -650,16 +648,13 @@ async def on_age(callback: CallbackQuery, state: FSMContext, loader: StyleLoader
 
 
 async def _enter_captions(
-    callback: CallbackQuery, state: FSMContext, db: Database, *, mode: str, **extra: Any
+    callback: CallbackQuery, state: FSMContext, *, mode: str, **extra: Any
 ) -> None:
-    """Seed caption state with a random default mix and show the checklist.
+    """Seed caption state (all standard selected) and show the checklist.
 
-    The default pack is no longer the full static standard block: it's ALWAYS
-    exactly 13 pre-filled unique items — 6-8 random standard reactions plus 5-7
-    random meme ideas, ALL shown as pre-checked toggles right on the caption
-    checklist (memes under their 🎲 rows), leaving room for 2 user ideas under
-    the 15 cap. If the pool somehow fails to load, fall back to the old
-    all-standard default rather than blocking pack creation.
+    The meme pool plays through the 🎲 «Случайный промт» button on the
+    idea-input step instead of pre-filled toggles, so the default here is the
+    plain full standard block again.
 
     ``reuse``/``extend`` jump straight here without a photo/name/style collection
     phase, so any leftover data from a previous *unfinished* ``/new`` flow still
@@ -667,23 +662,10 @@ async def _enter_captions(
     ``photo`` can hijack publishing into a wrong NEW pack instead of reusing /
     extending the chosen one. ``fresh`` keeps the data it just collected.
     """
-    from sticker_service.services.stickers import active_pool, sample_default_mix
-
     if mode != "fresh":
         await state.set_data({})
-    try:
-        std_sel, memes = sample_default_mix(await active_pool(db))
-    except Exception:  # the default mix must never block the flow
-        logger.warning("meme pool unavailable; using the all-standard default")
-        std_sel, memes = list(range(len(STANDARD_BLOCK))), []
     await state.update_data(
-        mode=mode,
-        std_sel=std_sel,
-        meme_items=memes,
-        meme_sel=list(range(len(memes))),
-        custom=[],
-        page=0,
-        **extra,
+        mode=mode, std_sel=list(range(len(STANDARD_BLOCK))), custom=[], page=0, **extra
     )
     await callback.answer()
     await _show(callback, state, NewPack.select_std.state, None)
@@ -697,14 +679,7 @@ async def on_style(
     style_id = (callback.data or "").split(":", 1)[-1]
     if callback.from_user is not None:
         await analytics.log(db, callback.from_user.id, analytics.STYLE_CHOSEN, style_id=style_id)
-    await _enter_captions(callback, state, db, mode="fresh", style_id=style_id)
-
-
-def _checklist_markup(data: dict[str, Any], *, std_sel: list[int], meme_sel: list[int]) -> Any:
-    """Rebuild the caption checklist markup from the freshest selection state."""
-    return std_checklist_kb(
-        std_sel, int(data.get("page", 0)), list(data.get("meme_items", [])), meme_sel
-    )
+    await _enter_captions(callback, state, mode="fresh", style_id=style_id)
 
 
 _TXT_CAP_FULL = f"Больше {MAX_CAPTIONS} нельзя — сначала снимите какую-нибудь галочку."
@@ -723,59 +698,29 @@ async def on_std_toggle(callback: CallbackQuery, state: FSMContext) -> None:  # 
             return
         selected.append(idx)
     await state.update_data(std_sel=selected)
+    page = int(data.get("page", 0))
     with contextlib.suppress(Exception):
         if isinstance(callback.message, Message):
-            await callback.message.edit_reply_markup(
-                reply_markup=_checklist_markup(
-                    data, std_sel=selected, meme_sel=list(data.get("meme_sel", []))
-                )
-            )
-    await callback.answer()
-
-
-async def on_meme_toggle(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
-    """Toggle one of the 🎲 random meme ideas on the caption checklist."""
-    tag_component("handlers.flow")
-    idx = int((callback.data or "meme:0").split(":", 1)[-1])
-    data = await state.get_data()
-    picked = list(data.get("meme_sel", []))
-    if idx in picked:
-        picked.remove(idx)
-    else:
-        if _picked_count(data) >= MAX_CAPTIONS:
-            await callback.answer(_TXT_CAP_FULL)  # toast, no popup, no message
-            return
-        picked.append(idx)
-    await state.update_data(meme_sel=picked)
-    with contextlib.suppress(Exception):
-        if isinstance(callback.message, Message):
-            await callback.message.edit_reply_markup(
-                reply_markup=_checklist_markup(
-                    data, std_sel=list(data.get("std_sel", [])), meme_sel=picked
-                )
-            )
+            await callback.message.edit_reply_markup(reply_markup=std_checklist_kb(selected, page))
     await callback.answer()
 
 
 async def on_std_bulk(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
     """Select-all / clear-all for the standard caption checklist.
 
-    Select-all fills only the room left by checked memes and customs, so the
-    overall selection never exceeds the per-sheet cap.
+    Select-all fills only the room left by the user's customs, so the overall
+    selection never exceeds the per-sheet cap.
     """
     tag_component("handlers.flow")
     select_all = (callback.data or "") == "stdall"
     data = await state.get_data()
-    room = max(0, MAX_CAPTIONS - _picked_count({**data, "std_sel": []}))
+    room = max(0, MAX_CAPTIONS - len(data.get("custom", [])))
     selected = list(range(len(STANDARD_BLOCK)))[:room] if select_all else []
     await state.update_data(std_sel=selected)
+    page = int(data.get("page", 0))
     with contextlib.suppress(Exception):
         if isinstance(callback.message, Message):
-            await callback.message.edit_reply_markup(
-                reply_markup=_checklist_markup(
-                    data, std_sel=selected, meme_sel=list(data.get("meme_sel", []))
-                )
-            )
+            await callback.message.edit_reply_markup(reply_markup=std_checklist_kb(selected, page))
     if select_all and len(selected) < len(STANDARD_BLOCK):
         await callback.answer(f"Отметил {len(selected)} — всего можно {MAX_CAPTIONS}.")
     else:
@@ -790,11 +735,7 @@ async def on_std_page(callback: CallbackQuery, state: FSMContext) -> None:  # pr
     with contextlib.suppress(Exception):
         if isinstance(callback.message, Message):
             await callback.message.edit_reply_markup(
-                reply_markup=_checklist_markup(
-                    data,
-                    std_sel=list(data.get("std_sel", [])),
-                    meme_sel=list(data.get("meme_sel", [])),
-                )
+                reply_markup=std_checklist_kb(list(data.get("std_sel", [])), page)
             )
     await callback.answer()
 
@@ -810,6 +751,50 @@ async def on_custom_yes(callback: CallbackQuery, state: FSMContext) -> None:  # 
     await state.update_data(custom_back=NewPack.ask_custom.state)
     await _show(callback, state, NewPack.enter_custom.state, None)
     await callback.answer()
+
+
+async def on_random_idea(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    """🎲 «Случайный промт»: roll an idea from the meme pool onto the input screen.
+
+    The rolled text is shown with «Взять эту» / «Ещё» / copy-to-clipboard (the
+    closest Bot API gets to pre-filling the user's input field); typing a own
+    message still works — the FSM state stays on the input step.
+    """
+    tag_component("handlers.flow")
+    from sticker_service.services.stickers import active_pool
+
+    try:
+        pool = await active_pool(db)
+    except Exception:  # the dice must never break the input step
+        pool = []
+    if not pool:
+        await callback.answer("Идеи сейчас недоступны — напишите свою.")
+        return
+    item = random.choice(pool).as_sheet_item()  # nosec B311 - variety, not crypto
+    await state.update_data(rand_idea=item)
+    with contextlib.suppress(Exception):
+        if isinstance(callback.message, Message):
+            await callback.message.edit_text(
+                _format_random_idea(item), reply_markup=random_idea_kb(item)
+            )
+    await callback.answer()
+
+
+async def on_random_take(callback: CallbackQuery, state: FSMContext) -> None:
+    """➕ «Взять эту»: append the rolled idea as a custom item and show the review."""
+    tag_component("handlers.flow")
+    data = await state.get_data()
+    item = data.get("rand_idea")
+    if not item:
+        await callback.answer("Сначала крутаните 🎲")
+        return
+    if _picked_count(data) >= MAX_CAPTIONS:
+        await callback.answer(_TXT_CAP_FULL)
+        return
+    custom = [*list(data.get("custom", [])), item]
+    await state.update_data(custom=custom, rand_idea=None)
+    await callback.answer("Добавил 🎲")
+    await _show(callback, state, NewPack.review.state, None)
 
 
 async def on_custom_no(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
@@ -850,7 +835,7 @@ async def on_rev_add(callback: CallbackQuery, state: FSMContext) -> None:  # pra
 async def on_rev_remove(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
     tag_component("handlers.flow")
     data = await state.get_data()
-    captions = _picked_captions(data)
+    captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
     kb = InlineKeyboardBuilder()
     for i, c in enumerate(captions):
         kb.button(text=f"➖ {c}", callback_data=f"rem:{i}")
@@ -872,21 +857,17 @@ async def on_rev_show(callback: CallbackQuery, state: FSMContext) -> None:  # pr
 
 
 async def on_rem_pick(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
-    """Remove one item by its review position: standard → memes → customs."""
+    """Remove one item by its review position: standard first, then customs."""
     tag_component("handlers.flow")
     pos = int((callback.data or "rem:0").split(":", 1)[-1])
     data = await state.get_data()
-    std_sel = sorted({i for i in data.get("std_sel", []) if 0 <= i < len(STANDARD_BLOCK)})
-    items = list(data.get("meme_items", []))
-    meme_sel = sorted({j for j in data.get("meme_sel", []) if 0 <= j < len(items)})
+    std_sel = sorted(set(data.get("std_sel", [])))
     custom = list(data.get("custom", []))
     if pos < len(std_sel):
         std_sel.remove(std_sel[pos])
-    elif pos - len(std_sel) < len(meme_sel):
-        meme_sel.remove(meme_sel[pos - len(std_sel)])
-    elif pos - len(std_sel) - len(meme_sel) < len(custom):
-        custom.pop(pos - len(std_sel) - len(meme_sel))
-    await state.update_data(std_sel=std_sel, meme_sel=meme_sel, custom=custom)
+    elif pos - len(std_sel) < len(custom):
+        custom.pop(pos - len(std_sel))
+    await state.update_data(std_sel=std_sel, custom=custom)
     await callback.answer("Убрал")
     await _show(callback, state, NewPack.review.state, None)
 
@@ -943,7 +924,7 @@ async def on_rev_create(  # pragma: no cover
         return
     try:
         data = await state.get_data()
-        captions = _picked_captions(data)
+        captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
         await callback.answer()
         msg = callback.message if isinstance(callback.message, Message) else None
         if msg is None:
@@ -966,16 +947,11 @@ async def on_rev_create(  # pragma: no cover
             )
 
         std_names = [STANDARD_BLOCK[i] for i in sorted(set(data.get("std_sel", [])))]
-        meme_items = list(data.get("meme_items", []))
-        memes = [
-            meme_items[j] for j in sorted(set(data.get("meme_sel", []))) if j < len(meme_items)
-        ]
         await analytics.log(
             db,
             user_id,
             analytics.CAPTIONS_SELECTED,
             standard=std_names,
-            memes=memes,
             custom=list(data.get("custom", [])),
             total=len(captions),
         )
@@ -1030,7 +1006,7 @@ async def _generate_and_present(  # pragma: no cover
     (which persist in the FSM state).
     """
     data = await state.get_data()
-    captions = _picked_captions(data)
+    captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
     if not captions:
         return
     mode = data.get("mode", "fresh")
@@ -1380,13 +1356,11 @@ async def on_show_canonical(callback: CallbackQuery, db: Database) -> None:  # p
     )
 
 
-async def on_char_add(
-    callback: CallbackQuery, state: FSMContext, db: Database
-) -> None:  # pragma: no cover
+async def on_char_add(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
     """Add stickers to a saved character → caption selection → create (0.5 pack)."""
     tag_component("handlers.flow")
     char_id = int((callback.data or "cadd:0").split(":", 1)[-1])
-    await _enter_captions(callback, state, db, mode="reuse", character_id=char_id)
+    await _enter_captions(callback, state, mode="reuse", character_id=char_id)
 
 
 async def on_char_redraw(  # pragma: no cover
@@ -1664,7 +1638,7 @@ async def on_pick_pack(  # pragma: no cover
             title = pack.title if pack else "этот"
             await msg.answer(f"Пак «{title}» уже заполнен (120/120). Создай новый пак: /new")
         return
-    await _enter_captions(callback, state, db, mode="extend", pack_id=pack_id)
+    await _enter_captions(callback, state, mode="extend", pack_id=pack_id)
 
 
 def build_router() -> Router:
@@ -1683,7 +1657,8 @@ def build_router() -> Router:
     router.callback_query.register(on_age, F.data.startswith("age:"))
     router.callback_query.register(on_style, F.data.startswith("style:"))
     router.callback_query.register(on_std_toggle, F.data.startswith("std:"))
-    router.callback_query.register(on_meme_toggle, F.data.startswith("meme:"))
+    router.callback_query.register(on_random_idea, F.data == "randidea")
+    router.callback_query.register(on_random_take, F.data == "randtake")
     router.callback_query.register(on_std_bulk, F.data.in_({"stdall", "stdclear"}))
     router.callback_query.register(on_std_page, F.data.startswith("stdpage:"))
     router.callback_query.register(on_std_done, F.data == "stddone")

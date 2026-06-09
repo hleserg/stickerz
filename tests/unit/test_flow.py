@@ -152,7 +152,7 @@ def test_canonical_progress_text_tells_real_stage() -> None:
     assert "Проверяю рисунок" in _canonical_progress_text(1, 1)  # single-step style
 
 
-async def test_enter_captions_extend_drops_stale_fresh_state(db: Database) -> None:
+async def test_enter_captions_extend_drops_stale_fresh_state() -> None:
     from sticker_service.handlers.flow import _enter_captions
 
     state = _state()
@@ -162,98 +162,94 @@ async def test_enter_captions_extend_drops_stale_fresh_state(db: Database) -> No
     )
     callback = AsyncMock()
     callback.data = "extend:7"
-    await _enter_captions(callback, state, db, mode="extend", pack_id=7)
+    await _enter_captions(callback, state, mode="extend", pack_id=7)
     data = await state.get_data()
     assert data["mode"] == "extend" and data["pack_id"] == 7
     # Stale fresh-flow data is wiped so it can't hijack publish into a new pack.
     assert "name" not in data and "photo" not in data and "style_id" not in data
 
 
-async def test_enter_captions_fresh_keeps_collected_state(db: Database) -> None:
+async def test_enter_captions_fresh_keeps_collected_state() -> None:
     from sticker_service.handlers.flow import _enter_captions
 
     state = _state()
     await state.update_data(photo=b"X", name="Лёша", style_id="watercolor", subject="adult")
     callback = AsyncMock()
     callback.data = "style:watercolor"
-    await _enter_captions(callback, state, db, mode="fresh", style_id="watercolor")
+    await _enter_captions(callback, state, mode="fresh", style_id="watercolor")
     data = await state.get_data()
     assert data["mode"] == "fresh"
     assert data["photo"] == b"X" and data["name"] == "Лёша"  # collected data preserved
 
 
-async def test_enter_captions_seeds_13_unique_default_items(db: Database) -> None:
-    # The default pack is ALWAYS exactly 13 pre-filled unique items — 6-8 random
-    # standard reactions + 5-7 meme ideas, all pre-checked toggles on the same
-    # checklist screen; the custom list starts empty (user ideas only).
+async def test_enter_captions_seeds_full_standard_default() -> None:
+    # The pre-fill is the plain full standard block again; the meme pool plays
+    # through the 🎲 button on the idea-input step, not through pre-seeded items.
     from sticker_service.handlers.flow import _enter_captions
     from sticker_service.services.stickers import STANDARD_BLOCK
 
     state = _state()
     callback = AsyncMock()
     callback.data = "style:watercolor"
-    await _enter_captions(callback, state, db, mode="fresh", style_id="watercolor")
+    await _enter_captions(callback, state, mode="fresh", style_id="watercolor")
     data = await state.get_data()
-    std, memes, picked = data["std_sel"], data["meme_items"], data["meme_sel"]
-    assert data["custom"] == []  # customs are the user's own ideas only
-    assert len(std) + len(memes) == 13  # the pre-filled total is fixed
-    assert 6 <= len(std) <= 8 and 5 <= len(memes) <= 7
-    assert picked == list(range(len(memes)))  # every sampled meme starts checked
-    assert len(set(std)) == len(std) and len(set(memes)) == len(memes)  # no repeats
-    assert all(0 <= i < len(STANDARD_BLOCK) for i in std)
-    # Every meme item is prompt-ready: exact caption or an explicit no-text marker.
-    assert all("Подпись: «" in m or m.endswith("Без подписи.") for m in memes)
+    assert data["std_sel"] == list(range(len(STANDARD_BLOCK)))
+    assert data["custom"] == []
+    assert "meme_items" not in data and "meme_sel" not in data
 
 
-def test_picked_captions_merges_segments_in_order_and_caps() -> None:
-    from sticker_service.handlers.flow import _picked_captions, _picked_count
-    from sticker_service.services.stickers import STANDARD_BLOCK
+def test_enter_custom_screen_offers_random_prompt_button() -> None:
+    from sticker_service.handlers.flow import NewPack, _screen_for
 
-    data = {
-        "std_sel": [2, 0, 99],  # 99 is out of range → ignored
-        "meme_items": ["Идея А. Без подписи.", "Идея Б. Подпись: «Хех»"],
-        "meme_sel": [1],
-        "custom": ["своё"],
-    }
-    assert _picked_captions(data) == [
-        STANDARD_BLOCK[0],
-        STANDARD_BLOCK[2],
-        "Идея Б. Подпись: «Хех»",
-        "своё",
-    ]
-    assert _picked_count(data) == 4
-    # The cap holds: 13 std + 2 memes + 2 customs → exactly MAX_CAPTIONS items.
-    full = {
-        "std_sel": list(range(13)),
-        "meme_items": ["м1. Без подписи.", "м2. Без подписи."],
-        "meme_sel": [0, 1],
-        "custom": ["а", "б"],
-    }
-    from sticker_service.services.stickers import MAX_CAPTIONS
-
-    assert len(_picked_captions(full)) == MAX_CAPTIONS
-    assert _picked_count(full) == 17  # uncapped count drives the toggle guard
-
-
-def test_meme_button_label_strips_markers_and_truncates() -> None:
-    from sticker_service.handlers.flow import _meme_button_label
-
-    assert _meme_button_label("Пьёт кофе. Подпись: «Первый глоток.»") == "Пьёт кофе."
-    assert _meme_button_label("Спит лицом в подушку. Без подписи.") == "Спит лицом в подушку."
-    long = "Очень длинное описание сцены которое не влезет в кнопку никак"
-    label = _meme_button_label(f"{long} Без подписи.")
-    assert label.endswith("…") and len(label) <= 31
-
-
-def test_checklist_kb_renders_meme_toggles() -> None:
-    from sticker_service.handlers.flow import std_checklist_kb
-
-    markup = std_checklist_kb([0], 0, ["Идея А. Без подписи.", "Идея Б. Подпись: «Хех»"], [0])
+    _text, markup = _screen_for(NewPack.enter_custom.state, {}, None)
     buttons = [b for row in markup.inline_keyboard for b in row]
-    meme_buttons = [b for b in buttons if (b.callback_data or "").startswith("meme:")]
-    assert len(meme_buttons) == 2
-    assert meme_buttons[0].text.startswith("✅ 🎲 ")  # checked meme
-    assert meme_buttons[1].text.startswith("⬜ 🎲 ")  # unchecked meme
+    assert any(b.callback_data == "randidea" for b in buttons)
+    assert any("Случайный промт" in b.text for b in buttons)
+
+
+def test_random_idea_kb_offers_take_reroll_and_copy() -> None:
+    from sticker_service.handlers.flow import random_idea_kb
+
+    markup = random_idea_kb("Пьёт кофе. Подпись: «Первый глоток.»")
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    assert any(b.callback_data == "randtake" for b in buttons)
+    assert any(b.callback_data == "randidea" for b in buttons)  # reroll
+    copies = [b for b in buttons if b.copy_text is not None]
+    assert len(copies) == 1  # paste-into-input helper
+    assert copies[0].copy_text.text.startswith("Пьёт кофе.")
+
+
+async def test_random_idea_roll_then_take_appends_custom(db: Database) -> None:
+    from sticker_service.handlers.flow import on_random_idea, on_random_take
+
+    state = _state()
+    await state.update_data(std_sel=[0], custom=[])
+    callback = AsyncMock()
+    callback.data = "randidea"
+    callback.message = None  # no real message → screen edit is skipped, state still set
+    await on_random_idea(callback, state, db)
+    item = (await state.get_data())["rand_idea"]
+    assert "Подпись: «" in item or item.endswith("Без подписи.")  # prompt-ready
+    take = AsyncMock()
+    take.data = "randtake"
+    await on_random_take(take, state)
+    data = await state.get_data()
+    assert data["custom"] == [item]
+    assert data["rand_idea"] is None  # consumed
+
+
+async def test_random_take_respects_the_15_cap() -> None:
+    from sticker_service.handlers.flow import on_random_take
+
+    state = _state()
+    await state.update_data(
+        std_sel=list(range(13)), custom=["а", "б"], rand_idea="Идея. Без подписи."
+    )
+    callback = AsyncMock()
+    await on_random_take(callback, state)
+    data = await state.get_data()
+    assert data["custom"] == ["а", "б"]  # unchanged — the cap held
+    assert "15" in callback.answer.await_args.args[0]  # unobtrusive toast
 
 
 async def test_alpha_gate_blocks_unapproved_then_allows(db: Database) -> None:
