@@ -69,7 +69,10 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
         f"objects whenever it makes the sticker funnier or more emotional, or when the idea "
         f"calls for it. "
         f'Text rule: an item written in quotes («…» or "…") is an EXACT caption — render that '
-        f"text. An item WITHOUT quotes is only a description: add a short caption ONLY if it "
+        f"text. When an item is ONLY a caption (just the quoted text, with no description), "
+        f"don't merely write it: make the character playfully act out or react to what the "
+        f"caption says, or at least depict its meaning literally. "
+        f"An item WITHOUT quotes is only a description: add a short caption ONLY if it "
         f"genuinely suits the sticker, otherwise draw NO text at all. When you do render a "
         f"caption, write it in Russian (Cyrillic) only, cleanly and without glyph artifacts, "
         f"placed where it reads well and does NOT cover the face or the main action; keep it "
