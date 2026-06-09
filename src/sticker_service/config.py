@@ -8,11 +8,14 @@ committed — keep them in ``.env`` (git-ignored) and document keys in
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 # Package directory (…/sticker_service). Style plugins ship inside the package,
 # so resolve them relative to it — works both from source and an installed wheel.
@@ -101,12 +104,20 @@ class Settings(BaseSettings):
 
     @property
     def admin_id_list(self) -> list[int]:
-        """Parse ``admin_ids`` into an ordered list of integers (ignores blanks)."""
+        """Parse ``admin_ids`` into an ordered list of integers (ignores blanks).
+
+        A non-integer token is skipped (with a warning) rather than raised, so a
+        typo in ``APP_ADMIN_IDS`` can't hard-fail every admin/access check.
+        """
         out: list[int] = []
         for chunk in self.admin_ids.split(","):
             chunk = chunk.strip()
-            if chunk:
+            if not chunk:
+                continue
+            try:
                 out.append(int(chunk))
+            except ValueError:
+                logger.warning("ignoring non-integer admin id %r in APP_ADMIN_IDS", chunk)
         return out
 
     @property

@@ -53,6 +53,14 @@ async def test_credits_default_and_ops(db: Database) -> None:
     assert await db.add_credits(5, 2) == 2
 
 
+async def test_hot_path_indexes_exist(db: Database) -> None:
+    # The per-user / per-pack lookups and the budget count must be indexed.
+    async with db._conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'") as cur:
+        names = {row["name"] for row in await cur.fetchall()}
+    for expected in ("idx_stickers_pack_id", "idx_packs_owner_id", "idx_events_event"):
+        assert expected in names
+
+
 async def test_consume_credits_atomic_under_concurrency(db: Database) -> None:
     # Two concurrent spends must BOTH apply — the old read-modify-write could
     # interleave (read 6, read 6, write 5, write 5) and lose a decrement.
