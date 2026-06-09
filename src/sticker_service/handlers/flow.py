@@ -211,6 +211,13 @@ def std_checklist_kb(selected: list[int], page: int) -> Any:
         mark = "✅" if i in selected else "⬜"
         kb.button(text=f"{mark} {caption}", callback_data=f"std:{i}")
     kb.adjust(3)  # 3 columns → up to 3×4 per page
+    # Bulk toggles: flip every standard caption at once (handy to clear, then
+    # pick a few, or re-select all). Capped at the per-sheet limit.
+    bulk = InlineKeyboardBuilder()
+    bulk.button(text="✅ Отметить все", callback_data="stdall")
+    bulk.button(text="🧹 Снять все", callback_data="stdclear")
+    bulk.adjust(2)
+    kb.attach(bulk)
     nav = InlineKeyboardBuilder()
     if page > 0:
         nav.button(text="◀", callback_data=f"stdpage:{page - 1}")
@@ -606,6 +613,19 @@ async def on_std_toggle(callback: CallbackQuery, state: FSMContext) -> None:  # 
         if isinstance(callback.message, Message):
             await callback.message.edit_reply_markup(reply_markup=std_checklist_kb(selected, page))
     await callback.answer()
+
+
+async def on_std_bulk(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    """Select-all / clear-all for the standard caption checklist."""
+    tag_component("handlers.flow")
+    select_all = (callback.data or "") == "stdall"
+    selected = list(range(len(STANDARD_BLOCK)))[:MAX_CAPTIONS] if select_all else []
+    await state.update_data(std_sel=selected)
+    page = int((await state.get_data()).get("page", 0))
+    with contextlib.suppress(Exception):
+        if isinstance(callback.message, Message):
+            await callback.message.edit_reply_markup(reply_markup=std_checklist_kb(selected, page))
+    await callback.answer("Отмечены все" if select_all else "Галки сняты")
 
 
 async def on_std_page(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
@@ -1466,6 +1486,7 @@ def build_router() -> Router:
     router.callback_query.register(on_age, F.data.startswith("age:"))
     router.callback_query.register(on_style, F.data.startswith("style:"))
     router.callback_query.register(on_std_toggle, F.data.startswith("std:"))
+    router.callback_query.register(on_std_bulk, F.data.in_({"stdall", "stdclear"}))
     router.callback_query.register(on_std_page, F.data.startswith("stdpage:"))
     router.callback_query.register(on_std_done, F.data == "stddone")
     router.callback_query.register(on_custom_yes, F.data == "cust:yes")
