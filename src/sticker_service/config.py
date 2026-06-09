@@ -98,6 +98,12 @@ class Settings(BaseSettings):
     # days. Published packs are never touched. 0 disables the sweep.
     draft_retention_days: int = 30
 
+    # --- Meme pool refresh (default-pack ideas follow Runet trends) ---
+    # Every this many days the text model rewrites the meme-idea pool (a cheap
+    # search-grounded text call — fractions of a cent weekly). 0 disables the
+    # refresh; the bundled pool then stays active forever.
+    meme_refresh_days: int = 7
+
     # --- Watermark (virality; off-switch for B2B) ---
     watermark_enabled: bool = True
     watermark_text: str = "@yuki_stickers_bot"

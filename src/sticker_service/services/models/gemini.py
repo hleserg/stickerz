@@ -190,7 +190,9 @@ class GeminiImageModel(ImageModel):
                 return data
         raise ModelError("Gemini returned no image part")
 
-    async def _vision_text(self, contents: list[Any]) -> str:  # pragma: no cover - network
+    async def _vision_text(
+        self, contents: list[Any], config: Any | None = None
+    ) -> str:  # pragma: no cover - network
         """Run a vision/text call, failing over across :data:`VISION_LADDER`.
 
         Each model gets a couple of quick retries; if it still can't answer
@@ -205,7 +207,7 @@ class GeminiImageModel(ImageModel):
             for attempt in range(_VISION_ATTEMPTS_PER_MODEL):
                 try:
                     response = await client.aio.models.generate_content(
-                        model=model_id, contents=contents
+                        model=model_id, contents=contents, config=config
                     )
                     return response.text or ""
                 except Exception as exc:  # retry, then fail over to the next model
@@ -255,6 +257,17 @@ class GeminiImageModel(ImageModel):
         return await self._vision_text(
             [types.Part.from_bytes(data=image, mime_type=_mime(image)), question]
         )
+
+    async def generate_text(self, prompt: str) -> str:  # pragma: no cover - network
+        """Text-only call on the vision ladder, grounded with Google Search.
+
+        Grounding lets the weekly meme-pool refresh see actually-current Runet
+        trends instead of the model's training-time memory.
+        """
+        from google.genai import types
+
+        config = types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())])
+        return await self._vision_text([prompt], config=config)
 
     @staticmethod
     def _finish(candidate: object) -> str:  # pragma: no cover - diagnostic
