@@ -305,3 +305,13 @@ def test_single_flight_guard_blocks_reentry() -> None:
     _end_action(123)
     assert _begin_action(123) is True  # released → acquirable again
     _end_action(123)
+
+
+def test_std_checklist_has_bulk_select_buttons() -> None:
+    # The standard-caption menu offers "select all" / "clear all" shortcuts.
+    from sticker_service.handlers.flow import std_checklist_kb
+
+    markup = std_checklist_kb(selected=[0], page=0)
+    callbacks = {b.callback_data for row in markup.inline_keyboard for b in row}
+    assert "stdall" in callbacks
+    assert "stdclear" in callbacks
