@@ -28,8 +28,18 @@ logger = logging.getLogger(__name__)
 #: the face best; fallbacks are more available when the primary is overloaded.
 IMAGE_MODEL = "gemini-3-pro-image"
 _IMAGE_FALLBACKS = ("gemini-3.1-flash-image", "gemini-2.5-flash-image")
-#: Vision/text model for the geometry gate and emoji picking (cheap + fast).
+#: Vision/text model for the geometry gate, gaze pre-check and emoji picking
+#: (cheap + fast). It is the single most-overloaded model in practice ("high
+#: demand" 503s), so it gets its own fallback ladder — failing over to other
+#: vision models keeps the advisory checks answered during a single-model spike
+#: instead of degrading them all at once.
 VISION_MODEL = "gemini-2.5-flash"
+_VISION_FALLBACKS = ("gemini-2.5-flash-lite", "gemini-2.5-pro")
+#: Ordered vision models tried in turn: cheap primary → cheaper fallback →
+#: stronger last resort.
+VISION_LADDER: tuple[str, ...] = (VISION_MODEL, *_VISION_FALLBACKS)
+#: Brief retries per model before failing over to the next one.
+_VISION_ATTEMPTS_PER_MODEL = 2
 
 FLASH_MODEL = _IMAGE_FALLBACKS[0]  # gemini-3.1-flash-image
 # Fallback ladders (model, resolution) — HLE-1055. pro primary (quality), flash
@@ -181,22 +191,35 @@ class GeminiImageModel(ImageModel):
         raise ModelError("Gemini returned no image part")
 
     async def _vision_text(self, contents: list[Any]) -> str:  # pragma: no cover - network
+        """Run a vision/text call, failing over across :data:`VISION_LADDER`.
+
+        Each model gets a couple of quick retries; if it still can't answer
+        (typically a 503 "high demand"), we drop to the next vision model rather
+        than giving up. Only when every model on the ladder is exhausted do we
+        raise — so a single overloaded model no longer takes the gate, gaze
+        pre-check and emoji down with it.
+        """
         client = self._get_client()
         last: Exception | None = None
-        for attempt in range(3):
-            try:
-                response = await client.aio.models.generate_content(
-                    model=VISION_MODEL, contents=contents
-                )
-                return response.text or ""
-            except Exception as exc:  # retry any error
-                last = exc
-                if attempt < 2:
-                    logger.warning("gemini vision failed (%s); retrying", str(exc)[:100])
-                    await asyncio.sleep(2 * (attempt + 1))
-                    continue
-                raise ModelError(f"Gemini vision failed after retries: {exc}") from exc
-        raise ModelError(f"Gemini vision failed after retries: {last}")
+        for model_id in VISION_LADDER:
+            for attempt in range(_VISION_ATTEMPTS_PER_MODEL):
+                try:
+                    response = await client.aio.models.generate_content(
+                        model=model_id, contents=contents
+                    )
+                    return response.text or ""
+                except Exception as exc:  # retry, then fail over to the next model
+                    last = exc
+                    final_attempt = attempt == _VISION_ATTEMPTS_PER_MODEL - 1
+                    logger.warning(
+                        "gemini vision %s failed (%s); %s",
+                        model_id,
+                        str(exc)[:100],
+                        "failing over" if final_attempt else "retrying",
+                    )
+                    if not final_attempt:
+                        await asyncio.sleep(2 * (attempt + 1))
+        raise ModelError(f"Gemini vision failed across {len(VISION_LADDER)} models: {last}")
 
     async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:  # pragma: no cover
         from google.genai import types
