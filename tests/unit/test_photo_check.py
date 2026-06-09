@@ -27,3 +27,11 @@ def test_classify(answer: str, expected: str | None) -> None:
 def test_nude_takes_priority() -> None:
     # Nude wins even if other flags also fail.
     assert photo_check.classify("person=no, nude=yes, single=no, big=no") == photo_check.NUDE
+
+
+def test_prompt_flags_partial_nudity() -> None:
+    # The nude check must catch partial nudity (e.g. a bare chest), not only a
+    # fully naked person — that gap let an exposed-breast photo through to Gemini.
+    prompt = photo_check.PROMPT.lower()
+    assert "частичная нагота" in prompt
+    assert "грудь" in prompt
