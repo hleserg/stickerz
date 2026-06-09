@@ -70,6 +70,14 @@ class ImageModel(ABC):
         """
         return ""
 
+    async def generate_text(self, prompt: str) -> str:
+        """Generate free-form TEXT, no images (e.g. the weekly meme-pool refresh).
+
+        Default raises so callers treat text generation as unavailable instead
+        of silently acting on an empty reply.
+        """
+        raise ModelError(f"model '{self.name}' does not support text generation")
+
 
 # A fallback ladder is an ordered list of (image_model, image_size) rungs.
 Ladder = Sequence[tuple[str, str]]

@@ -8,6 +8,7 @@ Run with ``python -m sticker_service.bot`` (the Docker entrypoint) once
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from aiogram import Bot
@@ -47,8 +48,9 @@ async def run() -> None:
     db = await Database.connect(settings.data_dir / "sticker_service.sqlite")
     loader = StyleLoader(settings.styles_dir)
     loader.load()
+    model = build_model()
     orchestrator = Orchestrator(
-        model=build_model(),
+        model=model,
         db=db,
         publisher=Publisher(bot, me.username or ""),
         loader=loader,
@@ -64,10 +66,20 @@ async def run() -> None:
     dp = build_dispatcher(db=db, orchestrator=orchestrator, loader=loader, storage=storage)
     await _set_commands(bot)
 
+    # Keep the default-pack meme pool in step with Runet trends (weekly rewrite).
+    from sticker_service.services.stickers.refresh_memes import meme_refresh_loop
+
+    refresh_task = asyncio.create_task(
+        meme_refresh_loop(model, db, days=settings.meme_refresh_days)
+    )
+
     logger.info("Starting long-polling as @%s", me.username)
     try:
         await dp.start_polling(bot)
     finally:
+        refresh_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await refresh_task
         await storage.close()
         await bot.session.close()
         await db.close()
