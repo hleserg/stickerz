@@ -348,6 +348,29 @@ class Database:
             rows = await cur.fetchall()
         return [Pack(**dict(r)) for r in rows]
 
+    async def list_stale_drafts(self, cutoff: datetime) -> list[Pack]:
+        """Unpublished draft packs created before ``cutoff`` (GC candidates).
+
+        ISO-8601 UTC timestamps sort lexicographically, so a string compare on
+        ``created_at`` is a correct chronological filter without parsing.
+        """
+        async with self._conn.execute(
+            "SELECT * FROM packs WHERE published = 0 AND created_at < ? ORDER BY created_at",
+            (cutoff.isoformat(),),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [Pack(**dict(r)) for r in rows]
+
+    async def delete_pack(self, pack_id: int) -> None:
+        """Delete a pack and its sticker rows (DB only — files are the caller's).
+
+        Stickers go first to satisfy the ``stickers.pack_id`` foreign key; the
+        bound character is left intact (it may own other packs / the canonical).
+        """
+        await self._conn.execute("DELETE FROM stickers WHERE pack_id = ?", (pack_id,))
+        await self._conn.execute("DELETE FROM packs WHERE id = ?", (pack_id,))
+        await self._conn.commit()
+
     # --- stickers ------------------------------------------------------------
 
     async def add_sticker(
