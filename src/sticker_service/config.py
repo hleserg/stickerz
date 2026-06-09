@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     photo_check_timeout_s: float = 60.0
     generation_timeout_s: float = 600.0
 
+    # --- Maintenance (bound disk/db growth on the small VDS) ---
+    # Unpublished draft packs (created mid-flow, then published or abandoned) and
+    # their PNGs are garbage-collected once on startup when older than this many
+    # days. Published packs are never touched. 0 disables the sweep.
+    draft_retention_days: int = 30
+
     # --- Watermark (virality; off-switch for B2B) ---
     watermark_enabled: bool = True
     watermark_text: str = "@yuki_stickers_bot"

@@ -11,7 +11,7 @@ import pytest_asyncio
 from PIL import Image, ImageDraw
 
 from sticker_service.config import get_settings
-from sticker_service.db import Database
+from sticker_service.db import Database, Pack
 from sticker_service.services.canonical import StyleLoader
 from sticker_service.services.models.base import ImageModel
 from sticker_service.services.orchestrator import Orchestrator, OrchestratorError
@@ -421,3 +421,78 @@ async def test_unknown_style_raises(db: Database, loader: StyleLoader, tmp_path:
         await orch.build_canonical(
             photo=b"P", style_id="nope", subject_type="adult", child_age=None
         )
+
+
+# --- draft garbage collection ------------------------------------------------
+
+
+async def _backdate_pack(db: Database, pack_id: int, days: int) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    old = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    await db._conn.execute("UPDATE packs SET created_at = ? WHERE id = ?", (old, pack_id))
+    await db._conn.commit()
+
+
+async def _draft_with_files(orch: Orchestrator, db: Database, owner: int) -> Pack:
+    char = await orch.save_character(
+        owner_id=owner,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(3),
+    )
+    stickers = await orch.build_stickers(char)
+    return await orch.save_draft(owner_id=owner, character=char, title="D", stickers=stickers)
+
+
+async def test_gc_removes_stale_draft_and_files(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    draft = await _draft_with_files(orch, db, owner=1)
+    set_dir = tmp_path / "stickers" / draft.set_name
+    assert set_dir.is_dir() and any(set_dir.iterdir())  # PNGs persisted
+    await _backdate_pack(db, draft.id, days=60)
+
+    removed = await orch.gc_stale_drafts(older_than_days=30)
+
+    assert removed == 1
+    assert await db.get_pack(draft.id) is None
+    assert await db.count_stickers(draft.id) == 0
+    assert not set_dir.exists()  # files swept too
+
+
+async def test_gc_keeps_published_and_recent(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    char = await orch.save_character(
+        owner_id=2,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(3),
+    )
+    await orch.create_pack(owner_id=2, character=char)  # published
+    published = (await db.list_packs(2))[0]
+    await _backdate_pack(db, published.id, days=60)  # old, but published → keep
+    recent_draft = await _draft_with_files(orch, db, owner=2)  # within window → keep
+
+    removed = await orch.gc_stale_drafts(older_than_days=30)
+
+    assert removed == 0
+    assert await db.get_pack(published.id) is not None
+    assert await db.get_pack(recent_draft.id) is not None
+
+
+async def test_gc_disabled_with_nonpositive_window(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    draft = await _draft_with_files(orch, db, owner=3)
+    await _backdate_pack(db, draft.id, days=999)
+    assert await orch.gc_stale_drafts(older_than_days=0) == 0
+    assert await db.get_pack(draft.id) is not None  # untouched when disabled

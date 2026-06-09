@@ -54,6 +54,11 @@ async def run() -> None:
         loader=loader,
         storage_dir=settings.data_dir,
     )
+    # Bound disk/DB growth: drop abandoned drafts + their PNGs once per boot.
+    removed = await orchestrator.gc_stale_drafts(older_than_days=settings.draft_retention_days)
+    if removed:
+        logger.info("startup gc: removed %d stale draft pack(s)", removed)
+
     # Persist FSM state so an OOM/restart resumes flows instead of dropping them.
     storage = await SqliteStorage.create(settings.data_dir / "fsm.sqlite")
     dp = build_dispatcher(db=db, orchestrator=orchestrator, loader=loader, storage=storage)

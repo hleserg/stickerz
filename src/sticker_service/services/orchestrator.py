@@ -10,13 +10,16 @@ that person (§3.2 / §B.4), so packs stay stylistically consistent.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sticker_service.config import get_settings
-from sticker_service.db import Character, Database, Pack
+from sticker_service.db import Character, Database, Pack, Sticker
 from sticker_service.db.models import SubjectType
 from sticker_service.services.canonical.engine import CanonicalEngine
 from sticker_service.services.canonical.loader import StyleLoader
@@ -322,6 +325,36 @@ class Orchestrator:
         """Read a pack's persisted sticker files + emoji from disk."""
         rows = await self._db.list_stickers(pack_id)
         return [(Path(s.file_path).read_bytes(), s.emoji) for s in rows]
+
+    async def gc_stale_drafts(self, *, older_than_days: int) -> int:
+        """Delete unpublished drafts older than the window + their PNGs.
+
+        Drafts are ephemeral (created mid-flow, then published or abandoned), so
+        an old one is safe to remove; this bounds disk/DB growth on the small
+        VDS. Published packs are never touched. Returns the count removed; a
+        non-positive window disables the sweep.
+        """
+        if older_than_days <= 0:
+            return 0
+        cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
+        drafts = await self._db.list_stale_drafts(cutoff)
+        for pack in drafts:
+            stickers = await self._db.list_stickers(pack.id)
+            await self._db.delete_pack(pack.id)
+            self._remove_sticker_files(pack, stickers)
+        if drafts:
+            logger.info("gc: removed %d stale draft pack(s)", len(drafts))
+        return len(drafts)
+
+    def _remove_sticker_files(self, pack: Pack, stickers: list[Sticker]) -> None:
+        """Best-effort delete a draft's PNGs and its per-set directory."""
+        for sticker in stickers:
+            with contextlib.suppress(OSError):
+                Path(sticker.file_path).unlink(missing_ok=True)
+        set_dir = self._storage / "stickers" / pack.set_name
+        with contextlib.suppress(OSError):
+            if set_dir.is_dir():
+                shutil.rmtree(set_dir)
 
     async def publish_extend(
         self, *, owner_id: int, pack: Pack, stickers: list[StickerInput]
