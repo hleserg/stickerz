@@ -129,3 +129,11 @@ def test_gemini_image_model_fallback_sequence() -> None:
     assert image_model_for_attempt(2) == "gemini-3.1-flash-image"
     assert image_model_for_attempt(3) == "gemini-2.5-flash-image"
     assert image_model_for_attempt(99) == "gemini-2.5-flash-image"  # clamps to last
+
+
+def test_gemini_vision_ladder_has_distinct_fallbacks() -> None:
+    from sticker_service.services.models.gemini import VISION_LADDER, VISION_MODEL
+
+    assert VISION_LADDER[0] == VISION_MODEL  # cheap primary first
+    assert len(VISION_LADDER) >= 2  # at least one fallback so a 503 can fail over
+    assert len(set(VISION_LADDER)) == len(VISION_LADDER)  # no duplicate rungs
