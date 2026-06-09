@@ -13,6 +13,8 @@ across the Gemini adapter and the handlers. Categories:
 
 from __future__ import annotations
 
+import re
+
 from sticker_service.services.models.base import ModelQuotaError, ModelRefusalError
 
 REFUSAL = "refusal"
@@ -21,10 +23,14 @@ TRANSIENT = "transient"
 NETWORK = "network"
 UNKNOWN = "unknown"
 
-# Order of checks matters: a depleted-credits 429 must read as QUOTA, not TRANSIENT.
+# Order of checks matters (see ``classify``): QUOTA → TRANSIENT → NETWORK → REFUSAL.
+# QUOTA is keyed on billing-specific words so a transient rate-limit (which Gemini
+# also phrases with "quota"/"RESOURCE_EXHAUSTED") still reads as retryable.
 _QUOTA = ("credits are depleted", "prepayment", "out of credits", "billing", "insufficient")
 _REFUSAL = ("safety", "prohibited", "recitation", "refus")
-_TRANSIENT = ("503", "500", "unavailable", "internal", "overload", "high demand", "429")
+_TRANSIENT_WORDS = ("unavailable", "internal", "overload", "high demand")
+# HTTP codes matched on word boundaries so "50012"/"req-4290" don't false-match.
+_TRANSIENT_CODES = re.compile(r"\b(?:429|500|503)\b")
 _NETWORK = ("proxy", "connect", "timeout", "resolve", "ssl", "network", "getaddrinfo")
 
 _USER_MESSAGES = {
@@ -47,12 +53,14 @@ def classify(exc: Exception) -> str:
     s = str(exc).lower()
     if any(t in s for t in _QUOTA):
         return QUOTA
-    if any(t in s for t in _REFUSAL):
-        return REFUSAL
-    if any(t in s for t in _TRANSIENT):
+    if any(t in s for t in _TRANSIENT_WORDS) or _TRANSIENT_CODES.search(s):
         return TRANSIENT
+    # NETWORK before REFUSAL so "connection refused" reads as network, not a
+    # content-filter refusal (a real refusal comes typed or says safety/blocked).
     if any(t in s for t in _NETWORK):
         return NETWORK
+    if any(t in s for t in _REFUSAL):
+        return REFUSAL
     return UNKNOWN
 
 
