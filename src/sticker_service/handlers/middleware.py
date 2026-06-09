@@ -19,8 +19,26 @@ from aiogram.types import TelegramObject
 
 from sticker_service.config import get_settings
 from sticker_service.db import Database
-from sticker_service.observability import tag_component
+from sticker_service.observability import isolated_scope, tag_component
 from sticker_service.services import modes
+
+
+class SentryScopeMiddleware(BaseMiddleware):
+    """Run every update in its own Sentry scope so handler tags don't leak.
+
+    Registered as the outermost middleware: ``tag_component`` calls anywhere in
+    the update's handling write to this per-update scope and are discarded when
+    it returns, instead of accumulating on the process-wide current scope.
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        with isolated_scope():
+            return await handler(event, data)
 
 
 class WhitelistMiddleware(BaseMiddleware):

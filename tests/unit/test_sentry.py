@@ -61,3 +61,18 @@ def test_tag_component(monkeypatch: pytest.MonkeyPatch) -> None:
     obs.tag_component("reflection", extra=[("layer", "core")])
     assert tags["component"] == "reflection"
     assert tags["layer"] == "core"
+
+
+def test_isolated_scope_discards_tags_on_exit() -> None:
+    """A tag set inside the per-update scope must not leak to the next update."""
+    import sentry_sdk
+
+    def tags_of(scope: Any) -> dict[str, str]:
+        return dict(getattr(scope, "_tags", {}))
+
+    before = tags_of(sentry_sdk.get_current_scope())
+    with obs.isolated_scope():
+        obs.tag_component("handlers.flow")
+        assert tags_of(sentry_sdk.get_current_scope())["component"] == "handlers.flow"
+    after = tags_of(sentry_sdk.get_current_scope())
+    assert after == before  # the per-update tag was discarded, not carried forward

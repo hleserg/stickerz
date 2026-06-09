@@ -8,7 +8,7 @@ from aiogram.fsm.storage.base import BaseStorage
 from sticker_service.db import Database
 from sticker_service.handlers import admin, apply, flow, report, start
 from sticker_service.handlers.errors import on_error
-from sticker_service.handlers.middleware import WhitelistMiddleware
+from sticker_service.handlers.middleware import SentryScopeMiddleware, WhitelistMiddleware
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.orchestrator import Orchestrator
 
@@ -30,6 +30,9 @@ def build_dispatcher(
     """
     dp = Dispatcher(storage=storage) if storage is not None else Dispatcher()
     dp.errors.register(on_error)
+    # Outermost: isolate each update's Sentry scope before any tagging runs.
+    dp.message.outer_middleware(SentryScopeMiddleware())
+    dp.callback_query.outer_middleware(SentryScopeMiddleware())
     if db is not None:
         dp["db"] = db
         dp.message.outer_middleware(WhitelistMiddleware(db))
