@@ -47,10 +47,20 @@ async def test_cmd_start_answers() -> None:
 
 
 async def test_cmd_help_lists_capabilities_and_prices() -> None:
-    message = AsyncMock()
-    await cmd_help(message)
-    text = message.answer.await_args.args[0]
-    assert "/new" in text and "пак" in text.lower()  # capabilities + pricing
+    from types import SimpleNamespace
+
+    from sticker_service.db import Database
+
+    db = await Database.connect(":memory:")
+    try:
+        message = AsyncMock()
+        message.from_user = SimpleNamespace(id=1)
+        await cmd_help(message, db)
+        text = message.answer.await_args.args[0]
+        assert "/new" in text and "пак" in text.lower()  # capabilities + pricing
+        assert "/balance" in text
+    finally:
+        await db.close()
 
 
 async def test_cmd_rules_answers() -> None:

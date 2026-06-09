@@ -21,17 +21,22 @@ async def on_apply(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(Apply.source)
     await callback.answer()
     if isinstance(callback.message, Message):
-        await callback.message.answer("Откуда вы узнали о боте? Напишите пару слов.")
+        await callback.message.answer(
+            "Откуда вы узнали о боте? Напишите пару слов (до 300 символов)."
+        )
 
 
 async def on_apply_source(message: Message, state: FSMContext, db: Database) -> None:
     """Store the application (link + source + date + pending status)."""
     tag_component("handlers.apply")
-    source = (message.text or "").strip()[:300] or "—"
+    source = (message.text or "").strip()
+    if not source:
+        await message.answer("Напишите пару слов текстом, пожалуйста.")
+        return
     await state.clear()
     user = message.from_user
     if user is not None:
-        await db.add_application(user.id, user.username, source)
+        await db.add_application(user.id, user.username, source[:300])
     await message.answer("✅ Заявка отправлена! Мы пригласим вас, как только появится место. 🙌")
 
 
@@ -39,5 +44,7 @@ def build_router() -> Router:
     """Build a fresh apply router."""
     router = Router(name="apply")
     router.callback_query.register(on_apply, F.data == "apply:new")
-    router.message.register(on_apply_source, Apply.source)
+    # Commands (/cancel, /start, …) fall through to their real handlers instead
+    # of being swallowed as the application's "source" text.
+    router.message.register(on_apply_source, Apply.source, ~F.text.startswith("/"))
     return router

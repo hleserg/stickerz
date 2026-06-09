@@ -7,6 +7,7 @@ resolution happens on first contact (post-MVP convenience).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 
 from aiogram import Bot, F, Router
@@ -91,7 +92,7 @@ async def cmd_stats(message: Message, db: Database) -> None:
         ("Дополнено", await db.count_events(analytics.EXTENDED)),
         ("Скачано", await db.count_events(analytics.DOWNLOADED)),
     ]
-    png = charts.render_bar_chart("Воронка Stickerz", items)
+    png = await asyncio.to_thread(charts.render_bar_chart, "Воронка Stickerz", items)
     await message.answer_photo(
         BufferedInputFile(png, filename="stats.png"), caption=await budget.summary_line(db)
     )
@@ -329,8 +330,9 @@ async def on_app_approve(callback: CallbackQuery, db: Database, bot: Bot) -> Non
         await bot.send_message(
             user_id,
             f"🎉 Рады приветствовать вас в тестировании! Вам доступно "
-            f"{packs} бесплатных паков (новый пак — 1, добавить стикеры — 0.5). "
-            f"За каждый подтверждённый баг из /report начислим ещё. "
+            f"{packs} бесплатных паков (новый пак — 1, добавить стикеры — 0.5); "
+            f"остаток всегда виден по команде /balance. "
+            f"За каждый подтверждённый баг из /report начислим +{BUG_BONUS_PACKS} пака. "
             f"Что умеет бот — /help. Поехали: /new",
         )
     if isinstance(callback.message, Message):

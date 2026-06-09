@@ -14,17 +14,17 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.observability import tag_component
-from sticker_service.services import analytics, modes
+from sticker_service.services import analytics, modes, pricing
 
 WELCOME = (
     "Привет! Я делаю персональные стикерпаки из фото: твой человек "
     "превращается в нарисованного персонажа с русскими подписями, "
     "и пак сразу публикуется в Telegram.\n\n"
     "Бот сейчас в закрытом тестировании.\n\n"
-    "Нажмите /new чтобы создать новый стикерпак, или /addto чтобы дополнить "
+    "Нажми /new чтобы создать новый стикерпак, или /addto чтобы дополнить "
     "существующий — это вдвое дешевле.\n\n"
-    "<i>Нажмите /rules чтобы ознакомиться с правилами. Приступая к созданию "
-    "стикеров вы автоматически соглашаетесь с ними.</i>"
+    "<i>Нажми /rules чтобы ознакомиться с правилами. Приступая к созданию "
+    "стикеров, ты автоматически соглашаешься с ними.</i>"
 )
 
 HELP = (
@@ -33,6 +33,7 @@ HELP = (
     "/mychars — мои персонажи: новый пак про того же человека\n"
     "/mypacks — мои паки: открыть / опубликовать / скачать\n"
     "/addto — добавить стикеры в существующий пак\n"
+    "/balance — остаток паков и цены\n"
     "/cancel — отменить текущее действие\n"
     "/rules — правила · /report — сообщить об ошибке\n\n"
     "<b>Как это работает:</b> пришли фото → выбери стиль → отметь подписи → "
@@ -40,8 +41,47 @@ HELP = (
     "💸 <b>В альфе у тебя бюджет в «паках»</b> (старт — 3):\n"
     "• новый пак — 1 пак\n"
     "• добавить стикеры к готовому персонажу — 0.5 пака\n"
-    "За подтверждённый баг из /report начисляем бонусные паки."
+    "Списание только после успешной генерации, ошибки — бесплатно.\n"
+    "За подтверждённый баг из /report начисляем +2 пака."
 )
+
+
+async def alpha_balance_note(db: Database, user_id: int) -> str | None:
+    """One-line balance reminder for alpha participants (None outside alpha/admins).
+
+    The owner's rule: an alpha tester must always have the remaining budget in
+    front of their eyes — so entry-point screens append this line.
+    """
+    if user_id in get_settings().admin_id_set:
+        return None
+    if await modes.get_mode(db) != modes.ALPHA:
+        return None
+    left = await db.credits_left(user_id)
+    return f"💎 Баланс: {pricing.format_packs(left)} паков · цены и детали: /balance"
+
+
+async def cmd_balance(message: Message, db: Database) -> None:
+    """Show the remaining packs and the alpha price list."""
+    tag_component("handlers.start")
+    user = message.from_user
+    if user is None:
+        return
+    if await modes.get_mode(db) != modes.ALPHA or user.id in get_settings().admin_id_set:
+        await message.answer("Сейчас лимиты не действуют — твори свободно. Начни с /new")
+        return
+    left = await db.credits_left(user.id)
+    await message.answer(
+        f"💎 <b>Баланс: {pricing.format_packs(left)} паков</b>\n\n"
+        "Цены в альфе:\n"
+        f"• новый пак (/new) — {pricing.format_packs(pricing.COST_NEW_PACK)} пак\n"
+        "• дополнить пак / новый пак про сохранённого персонажа "
+        f"(/addto, /mychars) — {pricing.format_packs(pricing.COST_ADD_STICKERS)} пака\n"
+        f"• перерисовать персонажа — {pricing.format_packs(pricing.COST_REDRAW)} пак\n\n"
+        "Списание — только после успешной генерации; ошибки и отмены бесплатны.\n"
+        "🐞 За каждый подтверждённый баг начисляем +2 пака: /report",
+        parse_mode="HTML",
+    )
+
 
 RULES = (
     "📜 <b>Правила</b>\n\n"
@@ -88,7 +128,10 @@ async def cmd_start(message: Message, db: Database) -> None:
             reply_markup=kb.as_markup(),
         )
         return
-    await message.answer(WELCOME, parse_mode="HTML")
+    text = WELCOME
+    if (note := await alpha_balance_note(db, user.id)) is not None:
+        text += f"\n\n{note}"
+    await message.answer(text, parse_mode="HTML")
 
 
 async def cmd_rules(message: Message) -> None:
@@ -97,10 +140,14 @@ async def cmd_rules(message: Message) -> None:
     await message.answer(RULES, parse_mode="HTML")
 
 
-async def cmd_help(message: Message) -> None:
-    """Show what the bot can do and the alpha pricing."""
+async def cmd_help(message: Message, db: Database) -> None:
+    """Show what the bot can do and the alpha pricing (+ live balance)."""
     tag_component("handlers.start")
-    await message.answer(HELP, parse_mode="HTML")
+    text = HELP
+    user = message.from_user
+    if user is not None and (note := await alpha_balance_note(db, user.id)) is not None:
+        text += f"\n\n{note}"
+    await message.answer(text, parse_mode="HTML")
 
 
 def build_router() -> Router:
@@ -109,4 +156,5 @@ def build_router() -> Router:
     router.message.register(cmd_start, CommandStart())
     router.message.register(cmd_rules, Command("rules"))
     router.message.register(cmd_help, Command("help"))
+    router.message.register(cmd_balance, Command("balance"))
     return router

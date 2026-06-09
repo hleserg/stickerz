@@ -130,6 +130,31 @@ def _picked_count(data: dict[str, Any]) -> int:
     return len(std) + len(data.get("custom", []))
 
 
+async def _alpha_wallet(db: Database, user_id: int) -> dict[str, Any]:
+    """FSM seed for money-aware screens: ``{"alpha": True, "bal": credits}``.
+
+    Empty outside alpha and for admins, so the pure screen renderer can decide
+    whether to show the price/balance line without a DB handle. Captured at
+    flow entry and refreshed after every charge — packs change only through
+    those moments, so staleness is bounded to an admin /gen mid-flow.
+    """
+    if _is_admin(user_id) or await modes.get_mode(db) != modes.ALPHA:
+        return {}
+    return {"alpha": True, "bal": await db.credits_left(user_id)}
+
+
+def _money_line(data: dict[str, Any]) -> str | None:
+    """«💸 спишет … · 💎 у тебя …» for alpha flows; None when not applicable."""
+    if not data.get("alpha"):
+        return None
+    cost = pricing.cost_for_mode(data.get("mode", "fresh"))
+    line = f"💸 Создание спишет {pricing.format_packs(cost)} пак"
+    bal = data.get("bal")
+    if isinstance(bal, int):
+        line += f" · 💎 у тебя {pricing.format_packs(bal)}"
+    return line + ". Ошибки бесплатны."
+
+
 def _format_random_idea(item: str) -> str:
     """The 🎲 sub-screen text: the rolled idea + how to use or replace it."""
     return (
@@ -362,14 +387,20 @@ def _screen_for(
     if target == NewPack.select_std.state:
         selected = list(data.get("std_sel", []))
         page = int(data.get("page", 0))
-        return _TXT_CAPTIONS, std_checklist_kb(selected, page)
+        text = _TXT_CAPTIONS
+        if (money := _money_line(data)) is not None:
+            text += f"\n\n{money}"
+        return text, std_checklist_kb(selected, page)
     if target == NewPack.ask_custom.state:
         return _TXT_ASK_CUSTOM, ask_custom_kb()
     if target == NewPack.enter_custom.state:
         return _TXT_ENTER_CUSTOM, enter_custom_kb()
     if target == NewPack.review.state:
         captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
-        return _review_text(captions), review_kb(len(captions))
+        text = _review_text(captions)
+        if (money := _money_line(data)) is not None:
+            text += f"\n\n{money}"
+        return text, review_kb(len(captions))
     raise ValueError(f"no screen for state {target!r}")  # pragma: no cover - guard
 
 
@@ -516,6 +547,7 @@ async def cmd_new(message: Message, state: FSMContext, db: Database) -> None:
     if uid:
         await db.record_consent(uid)
     await state.set_state(NewPack.photo)
+    await state.update_data(**await _alpha_wallet(db, uid))
     sent = await message.answer(_TXT_PHOTO, reply_markup=_nav_kb(back=False))
     await _store_wizard(state, sent)
 
@@ -648,7 +680,7 @@ async def on_age(callback: CallbackQuery, state: FSMContext, loader: StyleLoader
 
 
 async def _enter_captions(
-    callback: CallbackQuery, state: FSMContext, *, mode: str, **extra: Any
+    callback: CallbackQuery, state: FSMContext, db: Database, *, mode: str, **extra: Any
 ) -> None:
     """Seed caption state (all standard selected) and show the checklist.
 
@@ -664,8 +696,14 @@ async def _enter_captions(
     """
     if mode != "fresh":
         await state.set_data({})
+    user_id = callback.from_user.id if callback.from_user else 0
     await state.update_data(
-        mode=mode, std_sel=list(range(len(STANDARD_BLOCK))), custom=[], page=0, **extra
+        mode=mode,
+        std_sel=list(range(len(STANDARD_BLOCK))),
+        custom=[],
+        page=0,
+        **await _alpha_wallet(db, user_id),
+        **extra,
     )
     await callback.answer()
     await _show(callback, state, NewPack.select_std.state, None)
@@ -679,7 +717,7 @@ async def on_style(
     style_id = (callback.data or "").split(":", 1)[-1]
     if callback.from_user is not None:
         await analytics.log(db, callback.from_user.id, analytics.STYLE_CHOSEN, style_id=style_id)
-    await _enter_captions(callback, state, mode="fresh", style_id=style_id)
+    await _enter_captions(callback, state, db, mode="fresh", style_id=style_id)
 
 
 _TXT_CAP_FULL = f"Больше {MAX_CAPTIONS} нельзя — сначала снимите какую-нибудь галочку."
@@ -938,14 +976,8 @@ async def on_rev_create(  # pragma: no cover
             await msg.answer(hint)
             return
 
-        # Inform of the price before doing the (paid) work, for alpha participants.
-        if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
-            have = await db.credits_left(user_id)
-            await msg.answer(
-                f"💸 Это действие спишет {pricing.format_packs(cost)} пак "
-                f"(сейчас у тебя {pricing.format_packs(have)})."
-            )
-
+        # The price/balance line already sits on the selection and review
+        # screens (_money_line), so no extra "спишет…" message here.
         std_names = [STANDARD_BLOCK[i] for i in sorted(set(data.get("std_sel", [])))]
         await analytics.log(
             db,
@@ -1077,10 +1109,17 @@ async def _generate_and_present(  # pragma: no cover
     if await modes.get_mode(db) == modes.ALPHA:
         if not _is_admin(user_id):
             left = await db.consume_credits(user_id, cost)
+            await state.update_data(bal=left)
             await msg.answer(
-                f"Списано {pricing.format_packs(cost)} пак. Осталось: {pricing.format_packs(left)}."
+                f"Списано {pricing.format_packs(cost)} пак. "
+                f"💎 Осталось: {pricing.format_packs(left)} (детали: /balance)."
             )
-        for alert in await budget.pending_alerts(db):
+        try:
+            alerts = await budget.pending_alerts(db)
+        except Exception:  # a broken alert check must not break the user's flow
+            logger.exception("budget alert check failed")
+            alerts = []
+        for alert in alerts:
             for admin_id in get_settings().admin_id_list:
                 with contextlib.suppress(Exception):
                     await msg.bot.send_message(admin_id, alert)  # type: ignore[union-attr]
@@ -1134,7 +1173,9 @@ async def _present_for_publish(  # pragma: no cover
     if cid is not None and mid is not None:
         with contextlib.suppress(TelegramBadRequest):
             await msg.bot.delete_message(cid, mid)  # type: ignore[union-attr]
-    for i, sheet in enumerate(compose_preview([img for img, _ in stickers]), start=1):
+    # PIL composition over ~15 images is CPU work — off the event loop.
+    sheets = await asyncio.to_thread(compose_preview, [img for img, _ in stickers])
+    for i, sheet in enumerate(sheets, start=1):
         await msg.answer_document(BufferedInputFile(sheet, filename=f"preview_{i}.png"))
     sent = await msg.answer(
         f"Готово: {len(stickers)} стикеров (прозрачный фон). Что дальше?",
@@ -1221,7 +1262,7 @@ async def on_pub_download(  # pragma: no cover
         return
     if callback.from_user is not None:
         await analytics.log(db, callback.from_user.id, analytics.DOWNLOADED, count=len(stickers))
-    archive = bundle_zip([img for img, _ in stickers])
+    archive = await asyncio.to_thread(bundle_zip, [img for img, _ in stickers])
     await msg.answer_document(
         BufferedInputFile(archive, filename="stickers.zip"),
         caption="Готовые стикеры (PNG, 512px, прозрачный фон).",
@@ -1292,7 +1333,10 @@ async def cmd_mychars(message: Message, db: Database) -> None:
     if not characters:
         await message.answer("Пока нет сохранённых персонажей. Создай пак: /new")
         return
-    await message.answer(_TXT_CHARS, reply_markup=_chars_markup(characters))
+    text = _TXT_CHARS
+    if (wallet := await _alpha_wallet(db, user_id)).get("alpha"):
+        text += f"\n\n💎 Баланс: {pricing.format_packs(wallet['bal'])} паков."
+    await message.answer(text, reply_markup=_chars_markup(characters))
 
 
 async def on_nav_chars(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
@@ -1356,11 +1400,13 @@ async def on_show_canonical(callback: CallbackQuery, db: Database) -> None:  # p
     )
 
 
-async def on_char_add(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+async def on_char_add(
+    callback: CallbackQuery, state: FSMContext, db: Database
+) -> None:  # pragma: no cover
     """Add stickers to a saved character → caption selection → create (0.5 pack)."""
     tag_component("handlers.flow")
     char_id = int((callback.data or "cadd:0").split(":", 1)[-1])
-    await _enter_captions(callback, state, mode="reuse", character_id=char_id)
+    await _enter_captions(callback, state, db, mode="reuse", character_id=char_id)
 
 
 async def on_char_redraw(  # pragma: no cover
@@ -1475,10 +1521,13 @@ async def cmd_addto(message: Message, db: Database) -> None:
     for pack in packs:
         kb.button(text=pack.title, callback_data=f"extend:{pack.id}")
     kb.adjust(1)
-    await message.answer(
-        "Дополнить пак (тем же персонажем — новое фото нельзя, иначе пак станет разнородным):",
-        reply_markup=kb.as_markup(),
+    text = (
+        "Дополнить пак (тем же персонажем — новое фото нельзя, иначе пак станет "
+        f"разнородным). Это стоит {pricing.format_packs(pricing.COST_ADD_STICKERS)} пака:"
     )
+    if (wallet := await _alpha_wallet(db, user_id)).get("alpha"):
+        text += f"\n\n💎 Баланс: {pricing.format_packs(wallet['bal'])} паков."
+    await message.answer(text, reply_markup=kb.as_markup())
 
 
 # --- saved packs: list → actions (edit in place + back) ----------------------
@@ -1511,7 +1560,10 @@ async def cmd_mypacks(message: Message, db: Database) -> None:
     if not packs:
         await message.answer("Пока нет сохранённых паков. Создай: /new")
         return
-    await message.answer(_TXT_PACKS, reply_markup=_packs_markup(packs))
+    text = _TXT_PACKS
+    if (wallet := await _alpha_wallet(db, user_id)).get("alpha"):
+        text += f"\n💎 Баланс: {pricing.format_packs(wallet['bal'])} паков."
+    await message.answer(text, reply_markup=_packs_markup(packs))
 
 
 async def on_nav_packs(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
@@ -1574,7 +1626,7 @@ async def on_saved_download(  # pragma: no cover
         await analytics.log(
             db, callback.from_user.id, analytics.DOWNLOADED, pack_id=pack_id, count=len(stickers)
         )
-    archive = bundle_zip([img for img, _ in stickers])
+    archive = await asyncio.to_thread(bundle_zip, [img for img, _ in stickers])
     await msg.answer_document(
         BufferedInputFile(archive, filename="stickers.zip"),
         caption="Готовые стикеры (PNG, 512px, прозрачный фон).",
@@ -1638,7 +1690,7 @@ async def on_pick_pack(  # pragma: no cover
             title = pack.title if pack else "этот"
             await msg.answer(f"Пак «{title}» уже заполнен (120/120). Создай новый пак: /new")
         return
-    await _enter_captions(callback, state, mode="extend", pack_id=pack_id)
+    await _enter_captions(callback, state, db, mode="extend", pack_id=pack_id)
 
 
 def build_router() -> Router:

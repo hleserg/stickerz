@@ -19,6 +19,12 @@ services:
     # up. Anything that still couldn't finish resumes via the persistent FSM.
     init: true
     stop_grace_period: 150s
+    # Bound container log growth on the small VDS (json-file has no cap by default).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - sticker-data:/app/data # sqlite db + downloaded photos + generated sheets
 

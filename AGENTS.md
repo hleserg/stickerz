@@ -7,8 +7,13 @@ non-inferable facts. Style rules live in linters; deep detail lives in
 
 ## Overview
 
-TODO: one paragraph — what this project does and its single most important
-constraint. Replace before first real work.
+Telegram bot (@yuki_stickers_bot) that turns a person's photo into a published
+sticker pack: one canonical drawn character per person, then whole sheets of
+stickers generated in a single Gemini image call, chroma-keyed, sliced and
+published to Telegram. The single most important constraint: **every model
+output is post-processed and gated by code** — prompts are never trusted to
+hold geometry/background/text contracts on their own, and user money (alpha
+pack credits) is charged only after a generation succeeds.
 
 ## Stack
 
