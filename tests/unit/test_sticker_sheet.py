@@ -92,13 +92,23 @@ def test_sheet_prompt_quotes_standard_captions_and_resolves_suffix() -> None:
     assert '"Привет!"' in prompt and '"Класс!"' in prompt
     assert "watercolor style" in prompt
     assert "{age_clause}" not in prompt  # placeholder resolved
-    # New semantics: ideas not captions, optional text, free composition, die-cut on magenta.
-    assert "NOT captions" in prompt
-    assert "EXACT caption" in prompt
-    assert "act out" in prompt  # caption-only items get played out, not just written
+    # Freedom-first brief: no text unless asked, emotion in the drawing, free
+    # composition, caption placed naturally; caption-only ideas get acted out.
+    assert "NO text unless the idea explicitly asks" in prompt
+    assert "Show the emotion in the drawing" in prompt
+    assert "yours to invent" in prompt
+    assert "not as a banner pinned to the bottom" in prompt
+    assert "act it out" in prompt
     assert "die-cut" in prompt
     # The old hard "caption ON the figure" rule is gone.
     assert "directly ON the character" not in prompt
+
+
+def test_sheet_prompt_stays_lean() -> None:
+    # The brief must not creep back into a micromanaging wall of text: the
+    # scaffold around the ideas list stays under a hard budget.
+    prompt = build_sheet_prompt(_style(), ["Привет!"], age_clause="")
+    assert len(prompt) < 1400
 
 
 def test_sheet_prompt_keeps_custom_descriptions_unquoted() -> None:
@@ -112,11 +122,11 @@ def test_sheet_prompt_keeps_custom_descriptions_unquoted() -> None:
 
 
 def test_sheet_prompt_bans_decor_and_keeps_unused_tiles_empty() -> None:
-    # The wash ban is always present (the prod "pink watercolor behind the contour"
-    # brak); 13 items on a 5×3 grid leave 2 spare tiles that must stay pure magenta.
+    # The background stays empty (one absolute clause instead of a noun list);
+    # 13 items on a 5×3 grid leave 2 spare tiles that must stay pure magenta.
     thirteen = [f"идея {i}" for i in range(13)]
     prompt = build_sheet_prompt(_style(), thirteen, age_clause="")
-    assert "no watercolor washes" in prompt
+    assert "nothing but the stickers is drawn on the magenta" in prompt
     assert "unused tile" in prompt and "15 tiles" in prompt
     # A full grid (15 of 15) has no spare tiles → no confusing clause.
     fifteen = [f"идея {i}" for i in range(15)]

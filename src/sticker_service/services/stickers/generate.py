@@ -47,11 +47,13 @@ def _as_list_item(item: str) -> str:
 
 
 def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> str:
-    """Build the single-call grid prompt: per-tile sticker ideas, chroma bg, suffix.
+    """Build the single-call grid prompt: a short, freedom-first art brief.
 
-    The list is a set of sticker *ideas/descriptions*, not literal captions. Text is
-    drawn only for an item in quotes (an exact caption) or when it genuinely fits;
-    otherwise each item becomes a funny, expressive sticker with no forced text.
+    Deliberately lean — the model draws best when briefed, not micromanaged.
+    Only the load-bearing constraints stay (chroma background, grid, die-cut
+    outline, connectivity, identity); everything creative is handed to the
+    model. Text appears ONLY where an idea asks for it in quotes; emotion is
+    shown in the drawing, not written under it.
     """
     from sticker_service.services.postprocess import grid_for
 
@@ -68,33 +70,21 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
     )
     return (
         f"Draw the SAME character as in the reference image as a sheet of {len(captions)} "
-        f"die-cut stickers arranged in a regular, even grid of exactly {rows} rows by {cols} "
-        f"columns, with large even gaps; stickers must not touch or overlap. "
-        f"The numbered list below gives a sticker IDEA for each tile — these are descriptions, "
-        f"NOT captions. For EVERY item, draw ONE funny, lively, expressive sticker of the "
-        f"character that brings the idea to life. You are free with poses, gestures, facial "
-        f"expressions, props, outfits and small scene elements — dress the character or add "
-        f"objects whenever it makes the sticker funnier or more emotional, or when the idea "
-        f"calls for it. "
-        f'Text rule: an item written in quotes («…» or "…") is an EXACT caption — render that '
-        f"text. When an item is ONLY a caption (just the quoted text, with no description), "
-        f"don't merely write it: make the character playfully act out or react to what the "
-        f"caption says, or at least depict its meaning literally. "
-        f"An item WITHOUT quotes is only a description: add a short caption ONLY if it "
-        f"genuinely suits the sticker, otherwise draw NO text at all. When you do render a "
-        f"caption, write it in Russian (Cyrillic) only, cleanly and without glyph artifacts, "
-        f"placed where it reads well and does NOT cover the face or the main action; keep it "
-        f"small and tidy, wrapping a long caption onto 2-3 lines. Never make a tile that is "
-        f"only text, and every tile MUST clearly show the character. "
-        f"Items, in order:\n{items}\n"
-        f"Each sticker is a die-cut cut-out of the character (with any props, outfit and its "
-        f"caption) on a solid flat {CHROMA} magenta background. Keep all props and scene "
-        f"objects right next to or touching the character so each sticker stays one connected "
-        f"piece; everything that is not part of a sticker — the whole background between, "
-        f"around and behind the figures — MUST be solid {CHROMA} magenta with NOTHING drawn "
-        f"on it: no shadows, no gradients, no frames, no watercolor washes, no paint smears "
-        f"or splashes, no glows, no decorative shapes or blobs of any kind.{empty_clause} "
-        f"Keep the face, hair and eye color identical to the reference. {suffix}"
+        f"stickers in an even grid of exactly {rows} rows by {cols} columns on a solid flat "
+        f"{CHROMA} magenta background. Wide clean gaps; stickers never touch; nothing but "
+        f"the stickers is drawn on the magenta. Each sticker is a die-cut cut-out with a "
+        f"clean white outline; keep props touching the character so each sticker is one "
+        f"connected piece. Keep the face, hair and eye color identical to the reference.\n"
+        f"Each numbered idea below is ONE sticker. Make it funny, warm and full of "
+        f"character — the pose, expression, outfit, props and composition are yours to "
+        f"invent. Show the emotion in the drawing itself and add NO text unless the idea "
+        f'explicitly asks for it. When an idea has text in quotes («…» or "…"), letter '
+        f"exactly that text in clean Russian Cyrillic, placed where it sits naturally in "
+        f"the composition — not as a banner pinned to the bottom. If an idea is ONLY a "
+        f"quoted caption, act it out: draw the character living that phrase, caption worked "
+        f"in.{empty_clause}\n"
+        f"Ideas:\n{items}\n"
+        f"{suffix}"
     ).strip()
 
 
