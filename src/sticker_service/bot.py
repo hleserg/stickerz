@@ -45,6 +45,12 @@ async def run() -> None:
     bot = build_bot()
     me = await bot.get_me()
 
+    if not settings.admin_id_list:
+        logger.warning(
+            "APP_ADMIN_IDS is empty — bug reports, error DMs and budget alerts "
+            "will reach NO ONE; admin commands are unusable."
+        )
+
     db = await Database.connect(settings.data_dir / "sticker_service.sqlite")
     loader = StyleLoader(settings.styles_dir)
     loader.load()
@@ -60,6 +66,16 @@ async def run() -> None:
     removed = await orchestrator.gc_stale_drafts(older_than_days=settings.draft_retention_days)
     if removed:
         logger.info("startup gc: removed %d stale draft pack(s)", removed)
+    # Same for analytics events — except generation_done, which the alpha
+    # budget counts all-time (services/budget.py).
+    from sticker_service.services import analytics
+
+    pruned = await db.prune_events(
+        older_than_days=settings.events_retention_days,
+        keep_events=(analytics.GENERATION_DONE,),
+    )
+    if pruned:
+        logger.info("startup gc: pruned %d old analytics event(s)", pruned)
 
     # Persist FSM state so an OOM/restart resumes flows instead of dropping them.
     storage = await SqliteStorage.create(settings.data_dir / "fsm.sqlite")
@@ -72,6 +88,17 @@ async def run() -> None:
     refresh_task = asyncio.create_task(
         meme_refresh_loop(model, db, days=settings.meme_refresh_days)
     )
+
+    def _log_refresh_death(task: asyncio.Task[None]) -> None:
+        # The loop is supposed to run forever; any exit besides our own
+        # cancellation means the meme pool will silently go stale — say so.
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("meme_refresh_loop died: %r — pool will go stale", exc)
+
+    refresh_task.add_done_callback(_log_refresh_death)
 
     logger.info("Starting long-polling as @%s", me.username)
     try:

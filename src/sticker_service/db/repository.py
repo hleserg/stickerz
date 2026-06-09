@@ -642,6 +642,38 @@ class Database:
             row = await cur.fetchone()
         return int(row["n"]) if row else 0
 
+    async def count_events_with_modes(self, event: str, event_modes: Sequence[str]) -> int:
+        """Count ``event`` rows whose JSON detail has ``mode`` in ``event_modes``."""
+        if not event_modes:
+            return 0
+        marks = ",".join("?" for _ in event_modes)
+        async with self._conn.execute(
+            f"SELECT COUNT(*) AS n FROM events WHERE event = ? "  # nosec B608 - only '?' marks
+            f"AND json_extract(detail, '$.mode') IN ({marks})",
+            (event, *event_modes),
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def prune_events(self, *, older_than_days: int, keep_events: Sequence[str]) -> int:
+        """Delete analytics events older than the window, except ``keep_events``.
+
+        ``keep_events`` exists because budget accounting counts ALL-TIME
+        ``generation_done`` rows — pruning those would silently inflate the
+        remaining alpha budget. Returns rows deleted; non-positive window = no-op.
+        """
+        if older_than_days <= 0:
+            return 0
+        cutoff = (_now() - timedelta(days=older_than_days)).isoformat()
+        marks = ",".join("?" for _ in keep_events) or "''"
+        cur = await self._conn.execute(
+            # only '?' placeholders are interpolated into the IN(...) list
+            f"DELETE FROM events WHERE created_at < ? AND event NOT IN ({marks})",  # nosec B608
+            (cutoff, *keep_events),
+        )
+        await self._conn.commit()
+        return cur.rowcount or 0
+
 
 async def open_database(paths: Sequence[str | Path] | None = None) -> Database:  # pragma: no cover
     """Convenience opener used by the bot runner (covered indirectly)."""

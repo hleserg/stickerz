@@ -152,7 +152,7 @@ def test_canonical_progress_text_tells_real_stage() -> None:
     assert "Проверяю рисунок" in _canonical_progress_text(1, 1)  # single-step style
 
 
-async def test_enter_captions_extend_drops_stale_fresh_state() -> None:
+async def test_enter_captions_extend_drops_stale_fresh_state(db: Database) -> None:
     from sticker_service.handlers.flow import _enter_captions
 
     state = _state()
@@ -162,27 +162,29 @@ async def test_enter_captions_extend_drops_stale_fresh_state() -> None:
     )
     callback = AsyncMock()
     callback.data = "extend:7"
-    await _enter_captions(callback, state, mode="extend", pack_id=7)
+    callback.from_user = SimpleNamespace(id=1)
+    await _enter_captions(callback, state, db, mode="extend", pack_id=7)
     data = await state.get_data()
     assert data["mode"] == "extend" and data["pack_id"] == 7
     # Stale fresh-flow data is wiped so it can't hijack publish into a new pack.
     assert "name" not in data and "photo" not in data and "style_id" not in data
 
 
-async def test_enter_captions_fresh_keeps_collected_state() -> None:
+async def test_enter_captions_fresh_keeps_collected_state(db: Database) -> None:
     from sticker_service.handlers.flow import _enter_captions
 
     state = _state()
     await state.update_data(photo=b"X", name="Лёша", style_id="watercolor", subject="adult")
     callback = AsyncMock()
     callback.data = "style:watercolor"
-    await _enter_captions(callback, state, mode="fresh", style_id="watercolor")
+    callback.from_user = SimpleNamespace(id=1)
+    await _enter_captions(callback, state, db, mode="fresh", style_id="watercolor")
     data = await state.get_data()
     assert data["mode"] == "fresh"
     assert data["photo"] == b"X" and data["name"] == "Лёша"  # collected data preserved
 
 
-async def test_enter_captions_seeds_full_standard_default() -> None:
+async def test_enter_captions_seeds_full_standard_default(db: Database) -> None:
     # The pre-fill is the plain full standard block again; the meme pool plays
     # through the 🎲 button on the idea-input step, not through pre-seeded items.
     from sticker_service.handlers.flow import _enter_captions
@@ -191,11 +193,48 @@ async def test_enter_captions_seeds_full_standard_default() -> None:
     state = _state()
     callback = AsyncMock()
     callback.data = "style:watercolor"
-    await _enter_captions(callback, state, mode="fresh", style_id="watercolor")
+    callback.from_user = SimpleNamespace(id=1)
+    await _enter_captions(callback, state, db, mode="fresh", style_id="watercolor")
     data = await state.get_data()
     assert data["std_sel"] == list(range(len(STANDARD_BLOCK)))
     assert data["custom"] == []
     assert "meme_items" not in data and "meme_sel" not in data
+
+
+async def test_enter_captions_in_alpha_seeds_wallet(db: Database) -> None:
+    # In alpha the FSM carries {"alpha": True, "bal": credits} so the pure
+    # screen renderer can show the price/balance line without a DB handle.
+    from sticker_service.db import DEFAULT_CREDITS
+    from sticker_service.handlers.flow import _enter_captions
+
+    await modes.set_mode(db, modes.ALPHA)
+    state = _state()
+    callback = AsyncMock()
+    callback.from_user = SimpleNamespace(id=424242)
+    await _enter_captions(callback, state, db, mode="reuse", character_id=3)
+    data = await state.get_data()
+    assert data["alpha"] is True and data["bal"] == DEFAULT_CREDITS
+
+
+def test_money_line_shows_price_and_balance_in_alpha_only() -> None:
+    from sticker_service.handlers.flow import _money_line
+
+    assert _money_line({}) is None  # debug mode / admin → no money talk
+    line = _money_line({"alpha": True, "mode": "fresh", "bal": 5}) or ""
+    assert "спишет 1 пак" in line and "2.5" in line and "бесплатны" in line
+    half = _money_line({"alpha": True, "mode": "extend"}) or ""
+    assert "0.5" in half  # half-price actions say so even without a balance
+
+
+def test_screens_carry_the_money_line_in_alpha() -> None:
+    from sticker_service.handlers.flow import NewPack, _screen_for
+
+    wallet = {"alpha": True, "mode": "fresh", "bal": 6, "std_sel": [0], "custom": []}
+    for target in (NewPack.select_std.state, NewPack.review.state):
+        text, _markup = _screen_for(target, wallet, None)
+        assert "💸" in text and "💎" in text
+        plain, _markup = _screen_for(target, {"std_sel": [0], "custom": []}, None)
+        assert "💸" not in plain  # outside alpha the screens stay money-free
 
 
 def test_enter_custom_screen_offers_random_prompt_button() -> None:

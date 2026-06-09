@@ -83,7 +83,6 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     # Style plugins ship inside the package.
     styles_dir: Path = _PACKAGE_DIR / "services" / "canonical" / "styles"
-    redis_url: str = "redis://localhost:6379/0"
 
     # --- Flow resilience (watchdog): per-step timeouts in seconds ---
     # A hung automated step must not leave the user staring at a frozen flow. The
@@ -97,6 +96,9 @@ class Settings(BaseSettings):
     # their PNGs are garbage-collected once on startup when older than this many
     # days. Published packs are never touched. 0 disables the sweep.
     draft_retention_days: int = 30
+    # Analytics events older than this are pruned on startup (generation_done is
+    # always kept — the alpha budget counts it all-time). 0 disables the sweep.
+    events_retention_days: int = 180
 
     # --- Meme pool refresh (default-pack ideas follow Runet trends) ---
     # Every this many days the text model rewrites the meme-idea pool (a cheap

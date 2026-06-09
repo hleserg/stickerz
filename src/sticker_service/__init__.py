@@ -1,4 +1,4 @@
-"""sticker_service — TODO: one-line description."""
+"""sticker_service — Telegram bot turning a photo into a published sticker pack."""
 
 __version__ = "0.3.0"
 

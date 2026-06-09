@@ -122,6 +122,20 @@ def test_sheet_prompt_stays_lean() -> None:
     assert len(prompt) < 1400
 
 
+def test_sheet_prompt_pins_ideas_to_tiles_and_text_to_its_tile() -> None:
+    # Regression for the «Я проснулся. Технически.» sheet: one idea's caption
+    # bled under a NEIGHBOUR sticker (and left a fragment on its own), and a
+    # caption-only idea came out as a bare speech bubble with no character.
+    prompt = build_sheet_prompt(_style(), ["«Как там Ванька?»"], age_clause="")
+    # 1) idea → tile mapping is explicit and ordered;
+    assert "in its OWN tile, in list order" in prompt
+    # 2) lettering may not cross into (or repeat in) another tile;
+    assert "never spilling into or repeated in another tile" in prompt
+    # 3) caption-only ideas still contain the character — no text-only tiles.
+    assert "never a tile of just text or a bare speech bubble" in prompt
+    assert "the character appears in EVERY sticker" in prompt
+
+
 def test_sheet_prompt_keeps_custom_descriptions_unquoted() -> None:
     # A free-form custom idea is passed through as a description (no added quotes),
     # while an explicit caption the user quoted keeps its quotes.

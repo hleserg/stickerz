@@ -10,6 +10,7 @@ that person (§3.2 / §B.4), so packs stay stylistically consistent.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import shutil
@@ -130,9 +131,15 @@ class Orchestrator:
         The source ``photo`` is kept too (alpha) so the canonical can be inspected
         and redrawn later.
         """
-        path = self._write(self._storage / "canonical" / f"{owner_id}_{name}.png", canonical)
+        path = await asyncio.to_thread(
+            self._write, self._storage / "canonical" / f"{owner_id}_{name}.png", canonical
+        )
         photo_path = (
-            str(self._write(self._storage / "photos" / f"{owner_id}_{name}.jpg", photo))
+            str(
+                await asyncio.to_thread(
+                    self._write, self._storage / "photos" / f"{owner_id}_{name}.jpg", photo
+                )
+            )
             if photo
             else None
         )
@@ -161,11 +168,15 @@ class Orchestrator:
             child_age=character.child_age,
             on_step=on_step,
         )
-        path = self._write(
-            self._storage / "canonical" / f"{character.owner_id}_{character.name}.png", canonical
+        path = await asyncio.to_thread(
+            self._write,
+            self._storage / "canonical" / f"{character.owner_id}_{character.name}.png",
+            canonical,
         )
-        photo_path = self._write(
-            self._storage / "photos" / f"{character.owner_id}_{character.name}.jpg", photo
+        photo_path = await asyncio.to_thread(
+            self._write,
+            self._storage / "photos" / f"{character.owner_id}_{character.name}.jpg",
+            photo,
         )
         await self._db.update_character_canonical(
             character.id, canonical_path=str(path), photo_path=str(photo_path)
@@ -325,7 +336,9 @@ class Orchestrator:
     async def load_pack_stickers(self, pack_id: int) -> list[StickerInput]:
         """Read a pack's persisted sticker files + emoji from disk."""
         rows = await self._db.list_stickers(pack_id)
-        return [(Path(s.file_path).read_bytes(), s.emoji) for s in rows]
+        return await asyncio.to_thread(
+            lambda: [(Path(s.file_path).read_bytes(), s.emoji) for s in rows]
+        )
 
     async def gc_stale_drafts(self, *, older_than_days: int) -> int:
         """Delete unpublished drafts older than the window + their PNGs.
@@ -409,7 +422,7 @@ class Orchestrator:
         on_stage: StageCallback | None = None,
     ) -> tuple[list[bytes], list[str]]:
         style = self._require_style(character.style_id)
-        canonical = Path(character.canonical_path).read_bytes()
+        canonical = await asyncio.to_thread(Path(character.canonical_path).read_bytes)
         captions = (captions if captions is not None else build_caption_set())[:MAX_CAPTIONS]
         pages = [captions[i : i + PER_PAGE] for i in range(0, len(captions), PER_PAGE)]
         stickers: list[bytes] = []
@@ -427,14 +440,20 @@ class Orchestrator:
                 child_age=character.child_age,
             )
             await self._stage(on_stage, "clean")
-            sliced = process_sheet(sheet, grid=grid_for(len(page)), expected=len(page))
+            # Chroma keying + component labeling over a 4K sheet is seconds of
+            # numpy/PIL CPU — off the event loop, or every other user stalls.
+            sliced = await asyncio.to_thread(
+                process_sheet, sheet, grid=grid_for(len(page)), expected=len(page)
+            )
             await self._stage(on_stage, "slice")
             stickers.extend(sliced)
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
         settings = get_settings()
         if settings.watermark_enabled:
-            stickers = [apply_watermark(s, text=settings.watermark_text) for s in stickers]
+            stickers = await asyncio.to_thread(
+                lambda: [apply_watermark(s, text=settings.watermark_text) for s in stickers]
+            )
         logger.info("slice: produced %d stickers total", len(stickers))
         await self._stage(on_stage, "emoji")
         emojis = await assign_emojis(self._model, stickers, captions)
@@ -449,8 +468,10 @@ class Orchestrator:
     async def _persist_pairs(self, pack: Pack, stickers: list[StickerInput], *, start: int) -> None:
         for offset, (image, emoji) in enumerate(stickers):
             position = start + offset
-            path = self._write(
-                self._storage / "stickers" / pack.set_name / f"{position:03d}.png", image
+            path = await asyncio.to_thread(
+                self._write,
+                self._storage / "stickers" / pack.set_name / f"{position:03d}.png",
+                image,
             )
             await self._db.add_sticker(
                 pack_id=pack.id, file_path=str(path), emoji=emoji, position=position
