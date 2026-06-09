@@ -36,6 +36,22 @@ def test_watermark_size_bounded() -> None:
     assert len(out) <= 512 * 1024  # respects the sticker size limit
 
 
+def test_watermark_is_chat_legible() -> None:
+    # HLE-1060: the handle must survive Telegram's ~160px chat downscale. The
+    # default rendering lays down ≥2× the ink of the old illegible 0.034/150
+    # setting — pinned so a "tasteful" tweak can't quietly shrink it again.
+    src = _sticker_png()
+
+    def ink(png: bytes) -> int:
+        base = np.asarray(Image.open(BytesIO(src)).convert("RGBA"))[..., 3].astype(int)
+        out = np.asarray(Image.open(BytesIO(png)).convert("RGBA"))[..., 3].astype(int)
+        return int((out - base).clip(min=0).sum())
+
+    old = apply_watermark(src, opacity=150, scale=0.034)
+    new = apply_watermark(src)
+    assert ink(new) >= 2 * ink(old)
+
+
 def test_watermark_text_is_configurable() -> None:
     # Different text → different output bytes (text actually rendered).
     a = apply_watermark(_sticker_png(), text="@yuki_stickers_bot")
