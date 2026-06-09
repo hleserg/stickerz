@@ -141,6 +141,17 @@ async def test_cancel_when_idle_is_noop() -> None:
     assert "Нечего отменять" in message.answer.await_args.args[0]
 
 
+def test_canonical_progress_text_tells_real_stage() -> None:
+    # While later steps run → style line with the bar; the final callback lands
+    # right after the last advisory gate → the "checking the drawing" line.
+    from sticker_service.handlers.flow import _canonical_progress_text
+
+    mid = _canonical_progress_text(1, 3)
+    assert "Придаю рисунку" in mid and "1/3" in mid and "▰" in mid
+    assert "Проверяю рисунок" in _canonical_progress_text(3, 3)
+    assert "Проверяю рисунок" in _canonical_progress_text(1, 1)  # single-step style
+
+
 async def test_enter_captions_extend_drops_stale_fresh_state(db: Database) -> None:
     from sticker_service.handlers.flow import _enter_captions
 

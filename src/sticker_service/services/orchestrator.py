@@ -43,7 +43,8 @@ from sticker_service.services.stickers import (
 
 logger = logging.getLogger(__name__)
 
-# Awaited with a short human stage label ("sheet", "slice", "emoji", "publish").
+# Awaited with a short stage label as work really progresses ("sheet", "clean",
+# "slice", "emoji", "publish") — the flow renders these as live status lines.
 StageCallback = Callable[[str], Awaitable[None]]
 StepCallback = Callable[[int, int], Awaitable[None]]
 
@@ -411,9 +412,11 @@ class Orchestrator:
         canonical = Path(character.canonical_path).read_bytes()
         captions = (captions if captions is not None else build_caption_set())[:MAX_CAPTIONS]
         pages = [captions[i : i + PER_PAGE] for i in range(0, len(captions), PER_PAGE)]
-        await self._stage(on_stage, "sheet")
         stickers: list[bytes] = []
+        # Stage labels are emitted right BEFORE the work they describe, so the
+        # live status line always tells the truth about what is running now.
         for page_no, page in enumerate(pages, start=1):
+            await self._stage(on_stage, "sheet")
             logger.info("sheet: page %d/%d (%d captions)", page_no, len(pages), len(page))
             sheet = await generate_sheet(
                 self._model,
@@ -423,13 +426,15 @@ class Orchestrator:
                 subject_type=character.subject_type,
                 child_age=character.child_age,
             )
-            stickers.extend(process_sheet(sheet, grid=grid_for(len(page)), expected=len(page)))
+            await self._stage(on_stage, "clean")
+            sliced = process_sheet(sheet, grid=grid_for(len(page)), expected=len(page))
+            await self._stage(on_stage, "slice")
+            stickers.extend(sliced)
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
         settings = get_settings()
         if settings.watermark_enabled:
             stickers = [apply_watermark(s, text=settings.watermark_text) for s in stickers]
-        await self._stage(on_stage, "slice")
         logger.info("slice: produced %d stickers total", len(stickers))
         await self._stage(on_stage, "emoji")
         emojis = await assign_emojis(self._model, stickers, captions)

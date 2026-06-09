@@ -164,7 +164,11 @@ async def test_create_pack_reports_stages(
         stages.append(label)
 
     await orch.create_pack(owner_id=1, character=char, on_stage=on_stage)
-    assert stages == ["sheet", "slice", "emoji", "publish"]
+    assert stages == ["sheet", "clean", "slice", "emoji", "publish"]
+    # Contract with the UI: every emitted label has a live status line.
+    from sticker_service.handlers.flow import _STAGE_TEXT
+
+    assert set(stages) <= set(_STAGE_TEXT)
 
 
 async def test_one_character_many_packs(db: Database, loader: StyleLoader, tmp_path: Path) -> None:

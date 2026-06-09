@@ -55,10 +55,19 @@ from sticker_service.services.strikes import register_strike
 
 logger = logging.getLogger(__name__)
 
+# Live status lines for every real pipeline stage — the message changes as the
+# work actually progresses, so the bot visibly "thinks" instead of idling on one
+# static caption. Keys match the orchestrator's StageCallback labels plus the
+# canonical-phase labels rendered by _canonical_progress_text.
 _STAGE_TEXT = {
-    "sheet": "✨ Рисую лист стикеров…",
-    "slice": "✂️ Нарезаю на отдельные стикеры…",
-    "emoji": "🎭 Подбираю эмодзи…",
+    "photo_to_art": "🎨 Превращаю фото в рисунок…",
+    "style": "✨ Придаю рисунку выбранный стиль…",
+    "gate": "🧐 Проверяю рисунок…",
+    "sheet": "🖼️ Рисую лист стикеров: позы, эмоции, подписи…",
+    "clean": "🪄 Убираю фон — делаю прозрачным…",
+    "slice": "✂️ Режу лист на отдельные стикеры…",
+    "emoji": "🎭 Подбираю каждому стикеру эмодзи…",
+    "preview": "🧩 Собираю превью…",
     "publish": "📦 Публикую пак в Telegram…",
 }
 
@@ -96,6 +105,19 @@ def _progress_bar(done: int, total: int, width: int = 10) -> str:
     total = max(total, 1)
     filled = round(width * max(0, min(done, total)) / total)
     return "▰" * filled + "▱" * (width - filled)
+
+
+def _canonical_progress_text(done: int, total: int) -> str:
+    """Live canonical progress line for the ``on_step(done, total)`` callback.
+
+    The callback lands AFTER a step (and its advisory gate) completes: while
+    later steps run we show the style-refinement line with the bar; the final
+    callback means the drawing just passed its last check, right before the
+    sheet stage takes over.
+    """
+    if done >= total:
+        return _STAGE_TEXT["gate"]
+    return f"{_STAGE_TEXT['style']} {_progress_bar(done, total)} {done}/{total}"
 
 
 @contextlib.asynccontextmanager
@@ -907,14 +929,16 @@ async def _generate_and_present(  # pragma: no cover
 
     async def on_step(done: int, total: int) -> None:
         with contextlib.suppress(Exception):
-            await msg.edit_text(f"🎨 Рисую персонажа… {_progress_bar(done, total)} {done}/{total}")
+            await msg.edit_text(_canonical_progress_text(done, total))
 
     async def on_stage(label: str) -> None:
         with contextlib.suppress(Exception):
             await msg.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
 
+    # Fresh starts by drawing the photo; reuse/extend jump straight to the sheet.
+    start_text = _STAGE_TEXT["photo_to_art"] if mode == "fresh" else "⚙️ Готовлю генерацию…"
     with contextlib.suppress(Exception):
-        await msg.edit_text("🎨 Рисую персонажа…")
+        await msg.edit_text(start_text)
     try:
         async with _typing(msg), _generation_timeout():
             bundle = await orchestrator.build_for_review(
@@ -1012,6 +1036,8 @@ async def _present_for_publish(  # pragma: no cover
     pack_id: int | None = None,
 ) -> None:
     """Send the transparent preview sheet(s), then offer publish/download below them."""
+    with contextlib.suppress(Exception):
+        await msg.edit_text(_STAGE_TEXT["preview"])
     await state.update_data(stickers=stickers, mode=mode, pack_id=pack_id, pub_title=title)
     await state.set_state(NewPack.publish)
     # Drop the progress message, drop previews, then put controls *below* the previews.
