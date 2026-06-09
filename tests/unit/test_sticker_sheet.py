@@ -84,14 +84,30 @@ def test_build_caption_set_with_personal_and_limit() -> None:
 # --- prompt ------------------------------------------------------------------
 
 
-def test_sheet_prompt_has_chroma_captions_and_resolved_suffix() -> None:
+def test_sheet_prompt_quotes_standard_captions_and_resolves_suffix() -> None:
     captions = ["Привет!", "Класс!"]
     prompt = build_sheet_prompt(_style(), captions, age_clause="")
     assert CHROMA in prompt
+    # Standard-block reactions are explicit captions → rendered quoted.
     assert '"Привет!"' in prompt and '"Класс!"' in prompt
     assert "watercolor style" in prompt
-    assert "ONLY the character" in prompt  # no scenery/splashes allowed on a tile
     assert "{age_clause}" not in prompt  # placeholder resolved
+    # New semantics: ideas not captions, optional text, free composition, die-cut on magenta.
+    assert "NOT captions" in prompt
+    assert "EXACT caption" in prompt
+    assert "die-cut" in prompt
+    # The old hard "caption ON the figure" rule is gone.
+    assert "directly ON the character" not in prompt
+
+
+def test_sheet_prompt_keeps_custom_descriptions_unquoted() -> None:
+    # A free-form custom idea is passed through as a description (no added quotes),
+    # while an explicit caption the user quoted keeps its quotes.
+    prompt = build_sheet_prompt(_style(), ["дружит с компьютерами", "«Огонь!»"], age_clause="")
+    assert "1. дружит с компьютерами" in prompt
+    assert "«Огонь!»" in prompt
+    # A bare custom description is not force-wrapped in straight quotes.
+    assert '"дружит с компьютерами"' not in prompt
 
 
 def test_sheet_prompt_child_age_clause() -> None:

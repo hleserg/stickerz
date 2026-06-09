@@ -32,30 +32,56 @@ class SheetRefusedError(RuntimeError):
     """The model refused to generate the sheet after all retries (§6)."""
 
 
+def _as_list_item(item: str) -> str:
+    """Render one sheet item for the prompt.
+
+    Standard-block reactions are explicit captions, so they are quoted (the model
+    renders the quoted text verbatim). A custom item is passed through as the user
+    wrote it: their own quotes mark an exact caption, otherwise it reads as a free
+    description of the sticker idea.
+    """
+    from sticker_service.services.stickers.sets import STANDARD_BLOCK
+
+    item = item.strip()
+    return f'"{item}"' if item in STANDARD_BLOCK else item
+
+
 def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> str:
-    """Build the single-call grid prompt with captions, chroma bg, and suffix."""
+    """Build the single-call grid prompt: per-tile sticker ideas, chroma bg, suffix.
+
+    The list is a set of sticker *ideas/descriptions*, not literal captions. Text is
+    drawn only for an item in quotes (an exact caption) or when it genuinely fits;
+    otherwise each item becomes a funny, expressive sticker with no forced text.
+    """
     from sticker_service.services.postprocess import grid_for
 
-    caption_list = "; ".join(f'"{c}"' for c in captions)
+    items = "\n".join(f"{i}. {_as_list_item(c)}" for i, c in enumerate(captions, 1))
     suffix = style.sticker_style_suffix.replace("{age_clause}", age_clause)
     rows, cols = grid_for(len(captions))
     return (
         f"Draw the SAME character as in the reference image as a sheet of {len(captions)} "
-        f"stickers arranged in a regular, even grid of exactly {rows} rows by {cols} columns. "
-        f"EVERY sticker MUST clearly depict the drawn character in a "
-        f"different emotion or pose with a Russian caption, in this order: {caption_list}. "
-        f"Never make a tile that is only text — text alone is not a sticker. "
-        f"Place each caption directly ON the character (overlapping the lower part of the "
-        f"figure), not floating alone in the background gap. "
-        f"All captions strictly in Russian (Cyrillic) only — no other language; "
-        f"render the text cleanly, with no character artifacts. "
-        f"Each tile must contain ONLY the character with its caption — absolutely no "
-        f"background scenery, furniture, picture frames, extra faces or body parts, and no "
-        f"decorative paint splashes or splatter. Everything that is not the character MUST be "
-        f"the solid {CHROMA} magenta. "
-        f"The background MUST be a solid flat {CHROMA} magenta everywhere between and around "
-        f"the stickers — no shadows, no gradients on the background. Use large even gaps; "
-        f"stickers must not touch or overlap. Keep the face, hair and eye color identical to "
+        f"die-cut stickers arranged in a regular, even grid of exactly {rows} rows by {cols} "
+        f"columns, with large even gaps; stickers must not touch or overlap. "
+        f"The numbered list below gives a sticker IDEA for each tile — these are descriptions, "
+        f"NOT captions. For EVERY item, draw ONE funny, lively, expressive sticker of the "
+        f"character that brings the idea to life. You are free with poses, gestures, facial "
+        f"expressions, props, outfits and small scene elements — dress the character or add "
+        f"objects whenever it makes the sticker funnier or more emotional, or when the idea "
+        f"calls for it. "
+        f'Text rule: an item written in quotes («…» or "…") is an EXACT caption — render that '
+        f"text. An item WITHOUT quotes is only a description: add a short caption ONLY if it "
+        f"genuinely suits the sticker, otherwise draw NO text at all. When you do render a "
+        f"caption, write it in Russian (Cyrillic) only, cleanly and without glyph artifacts, "
+        f"placed where it reads well and does NOT cover the face or the main action; keep it "
+        f"small and tidy, wrapping a long caption onto 2-3 lines. Never make a tile that is "
+        f"only text, and every tile MUST clearly show the character. "
+        f"Items, in order:\n{items}\n"
+        f"Each sticker is a die-cut cut-out of the character (with any props, outfit and its "
+        f"caption) on a solid flat {CHROMA} magenta background. Keep all props and scene "
+        f"objects right next to or touching the character so each sticker stays one connected "
+        f"piece; everything that is not part of a sticker — the whole background between, "
+        f"around and behind the figures — MUST be solid {CHROMA} magenta, with no shadows, "
+        f"gradients, frames or stray splashes. Keep the face, hair and eye color identical to "
         f"the reference. {suffix}"
     ).strip()
 
