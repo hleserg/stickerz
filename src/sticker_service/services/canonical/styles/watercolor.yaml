@@ -10,7 +10,7 @@ distance: far
 #   3) prev  → turn the gaze into the camera (skipped if already looking at it).
 pipeline:
   - step: 1
-    prompt: "Сделай из фото фотореалистичный цветной рисунок. Помести человека на простом однотонном фоне — без предметов, мебели, текста и сцены позади."
+    prompt: "Сделай из фото фотореалистичный цветной рисунок. {clean_bg}"
     refs: [photo]
     gate: vision_judge
   - step: 2

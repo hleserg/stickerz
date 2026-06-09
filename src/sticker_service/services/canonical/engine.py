@@ -21,6 +21,7 @@ from sticker_service.services.canonical.schema import PipelineStep, Style
 from sticker_service.services.models.base import (
     ImageModel,
     Ladder,
+    ModelError,
     ModelRefusalError,
     generate_via_ladder,
 )
@@ -33,6 +34,14 @@ StepCallback = Callable[[int, int], Awaitable[None]]
 
 #: Advisory geometry threshold: below this we log an alert (no re-shoot).
 DEFAULT_ALERT_THRESHOLD = 0.25
+
+#: Resolves ``{clean_bg}`` — the pipeline-wide instruction to isolate the
+#: subject on a plain background (no props/furniture/text/scenery). It is a
+#: product-wide constraint, not a per-style choice, so it lives here once
+#: instead of being duplicated across every style's first-step prompt.
+CLEAN_BACKGROUND_CLAUSE = (
+    "Помести человека на простом однотонном фоне — без предметов, мебели, текста и сцены позади."
+)
 
 # Appended on a child-safety refusal to steer past the filter (§6). The empty
 # first element means "try the plain prompt first". Russian — matches the prompts
@@ -184,10 +193,23 @@ class CanonicalEngine:
         return image
 
     async def _precheck_skips(self, step: PipelineStep, prev: bytes) -> bool:
-        """Ask the configured yes/no question about ``prev``; skip the step on yes."""
+        """Ask the configured yes/no question about ``prev``; skip the step on yes.
+
+        The pre-check is an optimization (skip a redundant turn-to-camera step), so
+        a vision-model outage must not abort the run — on failure we simply don't
+        skip and run the step normally.
+        """
         if not step.skip_if_yes:
             return False
-        answer = await self._model.ask(prev, step.skip_if_yes)
+        try:
+            answer = await self._model.ask(prev, step.skip_if_yes)
+        except ModelError as exc:
+            logger.warning(
+                "canonical step %d: pre-check vision unavailable (%s); running step",
+                step.step,
+                str(exc)[:100],
+            )
+            return False
         logger.info("canonical step %d: pre-check answer=%r", step.step, answer)
         return _is_yes(answer)
 
@@ -219,4 +241,6 @@ class CanonicalEngine:
     @staticmethod
     def _resolve(prompt: str, age_clause: str) -> str:
         # Only known placeholders are substituted (schema already validated them).
-        return prompt.replace("{age_clause}", age_clause)
+        return prompt.replace("{age_clause}", age_clause).replace(
+            "{clean_bg}", CLEAN_BACKGROUND_CLAUSE
+        )
