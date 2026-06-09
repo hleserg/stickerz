@@ -37,11 +37,19 @@ def chroma_key(
     chroma: str = CHROMA_DEFAULT,
     tolerance: float = 80.0,
     despill: bool = True,
+    loose_tolerance: float = 130.0,
 ) -> Image.Image:
     """Return an RGBA copy with the chroma background made transparent.
 
-    Pixels within ``tolerance`` (euclidean RGB distance) of ``chroma`` become
-    fully transparent. With ``despill`` the leftover colored fringe on edges is
+    Pixels within ``tolerance`` (euclidean RGB distance) of ``chroma`` seed the
+    background. A **hysteresis** pass then also removes pixels within the wider
+    ``loose_tolerance`` that are *connected* to that seed — so a washed-out
+    magenta/pink smear bleeding off the background (which the strict threshold
+    misses and which would otherwise stay inside the sticker) is absorbed, while
+    an isolated magenta detail *on* the character (not connected to the
+    background sea) is kept. ``loose_tolerance`` stays modest so distinctly
+    coloured clothing/props (further from magenta) survive even when they touch
+    the background. With ``despill`` the leftover colored fringe on edges is
     pulled toward neutral so stickers don't keep a magenta rim.
     """
     cr, cg, cb = _hex_to_rgb(chroma)
@@ -50,6 +58,13 @@ def chroma_key(
 
     distance = np.sqrt((r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2)
     background = distance < tolerance
+    if loose_tolerance > tolerance:
+        loose = distance < loose_tolerance
+        structure = ndimage.generate_binary_structure(2, 2)
+        labeled = cast(Any, ndimage.label(loose, structure=structure))[0]
+        seeds = np.unique(labeled[background])
+        seeds = seeds[seeds != 0]  # 0 is the non-loose region, never a seed
+        background = np.isin(labeled, seeds)
     arr[..., 3] = np.where(background, 0.0, 255.0)
 
     if despill:

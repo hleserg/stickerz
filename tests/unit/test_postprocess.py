@@ -57,14 +57,35 @@ def test_chroma_key_makes_background_transparent() -> None:
 
 
 def test_despill_reduces_magenta_fringe() -> None:
-    img = Image.new("RGBA", (2, 1), MAGENTA)
-    img.putpixel((1, 0), (255, 100, 255, 255))  # magenta-tinted foreground
+    # magenta | blue buffer | magenta-tinted foreground. The buffer keeps the tint
+    # from being absorbed by the hysteresis (it's a kept pixel), so despill applies.
+    img = Image.new("RGBA", (3, 1), MAGENTA)
+    img.putpixel((1, 0), (0, 0, 255, 255))  # opaque blue buffer (not magenta-ish)
+    img.putpixel((2, 0), (255, 100, 255, 255))  # magenta-tinted foreground
     keyed = chroma_key(img, tolerance=40.0)
     arr = np.asarray(keyed)
     assert arr[0, 0, 3] == 0  # pure magenta keyed out
-    assert arr[0, 1, 3] == 255  # foreground kept
-    assert arr[0, 1, 0] < 255  # red pulled down by despill
-    assert arr[0, 1, 2] < 255  # blue pulled down by despill
+    assert arr[0, 2, 3] == 255  # foreground kept
+    assert arr[0, 2, 0] < 255  # red pulled down by despill
+    assert arr[0, 2, 2] < 255  # blue pulled down by despill
+
+
+def test_hysteresis_absorbs_connected_wash_keeps_isolated_speck() -> None:
+    # A pink/purple wash (magenta-ish but outside the strict tolerance) bleeding off
+    # the magenta background must be removed; an isolated magenta speck *on* the
+    # figure (not connected to the background) must stay. (The user's "smear behind
+    # the contour" artifact.)
+    img = Image.new("RGBA", (20, 20), MAGENTA)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([5, 5, 14, 14], fill=(0, 0, 200, 255))  # blue figure
+    # Wash strip from the figure to the top border → connected to the magenta sea.
+    draw.rectangle([9, 0, 10, 5], fill=(230, 80, 210, 255))
+    img.putpixel((10, 10), (235, 70, 215, 255))  # isolated magenta-ish speck inside figure
+    arr = np.asarray(chroma_key(img))
+    assert arr[0, 0, 3] == 0  # background corner transparent
+    assert arr[2, 9, 3] == 0  # wash absorbed (was magenta-ish, connected to bg)
+    assert arr[10, 10, 3] == 255  # isolated speck on the figure kept
+    assert arr[10, 7, 3] == 255  # figure body kept
 
 
 def test_slice_sheet_finds_all_components() -> None:
