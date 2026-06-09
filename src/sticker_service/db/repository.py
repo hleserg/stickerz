@@ -130,6 +130,10 @@ class Database:
         conn.row_factory = aiosqlite.Row
         db = cls(conn)
         await conn.execute("PRAGMA foreign_keys = ON")
+        # WAL + a busy timeout so concurrent handler coroutines don't trip over
+        # "database is locked" under load (the FSM store already uses WAL).
+        await conn.execute("PRAGMA journal_mode = WAL")
+        await conn.execute("PRAGMA busy_timeout = 5000")
         await db._init_schema()
         return db
 
@@ -549,15 +553,38 @@ class Database:
         )
         await self._conn.commit()
 
+    async def _ensure_quota_row(self, user_id: int) -> None:
+        """Materialize the default balance so an atomic UPDATE has a row to touch."""
+        await self._conn.execute(
+            "INSERT INTO quotas (user_id, remaining) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING",
+            (user_id, DEFAULT_CREDITS),
+        )
+
     async def add_credits(self, user_id: int, delta: int) -> int:
-        """Add (or subtract) credits in half-packs; clamps at 0; returns new value."""
-        new_value = max(0, await self.credits_left(user_id) + delta)
-        await self.set_credits(user_id, new_value)
-        return new_value
+        """Add (or subtract) credits in half-packs atomically; clamps at 0; returns new value."""
+        await self._ensure_quota_row(user_id)
+        await self._conn.execute(
+            "UPDATE quotas SET remaining = MAX(0, remaining + ?) WHERE user_id = ?",
+            (delta, user_id),
+        )
+        await self._conn.commit()
+        return await self.credits_left(user_id)
 
     async def consume_credits(self, user_id: int, amount: int) -> int:
-        """Spend ``amount`` credits (half-packs) if available; returns new balance."""
-        return await self.add_credits(user_id, -abs(amount))
+        """Atomically spend ``amount`` credits if the balance covers it; returns new balance.
+
+        A single conditional UPDATE, so two concurrent spends can't lose a
+        decrement the way the old read-modify-write could. If the balance is
+        insufficient, nothing is spent.
+        """
+        amount = abs(amount)
+        await self._ensure_quota_row(user_id)
+        await self._conn.execute(
+            "UPDATE quotas SET remaining = remaining - ? WHERE user_id = ? AND remaining >= ?",
+            (amount, user_id, amount),
+        )
+        await self._conn.commit()
+        return await self.credits_left(user_id)
 
     # --- analytics events ----------------------------------------------------
 
