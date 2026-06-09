@@ -35,16 +35,22 @@ def _silhouette_bottom(alpha: np.ndarray) -> int:
 
 
 def apply_watermark(
-    sticker: bytes, *, text: str = DEFAULT_TEXT, opacity: int = 150, scale: float = 0.034
+    sticker: bytes, *, text: str = DEFAULT_TEXT, opacity: int = 205, scale: float = 0.055
 ) -> bytes:
-    """Overlay the watermark along the bottom of a 512px sticker; return PNG bytes."""
+    """Overlay the watermark along the bottom of a 512px sticker; return PNG bytes.
+
+    Sized for the CHAT, not the editor: Telegram renders stickers at ~160px in
+    a conversation, so the 512px master needs ~28px text (scale 0.055) for the
+    handle to stay legible after downscaling — the old 0.034/150 setting shrank
+    to ~5px and read as noise (HLE-1060).
+    """
     img = Image.open(BytesIO(sticker)).convert("RGBA")
     w, h = img.size
     size = max(10, int(h * scale))
     font = _font(size)
     layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
-    stroke = 1
+    stroke = 2
     bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     bottom = _silhouette_bottom(np.asarray(img)[..., 3])
@@ -53,8 +59,8 @@ def apply_watermark(
         ((w - tw) // 2, y),
         text,
         font=font,
-        fill=(245, 245, 245, opacity),
+        fill=(255, 255, 255, opacity),
         stroke_width=stroke,
-        stroke_fill=(60, 60, 60, min(255, opacity + 60)),
+        stroke_fill=(45, 45, 45, min(255, opacity + 50)),
     )
     return encode_sticker(Image.alpha_composite(img, layer))
