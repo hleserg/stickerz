@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator, Sequence
 from io import BytesIO
 from pathlib import Path
@@ -55,7 +56,8 @@ class _SheetModel(ImageModel):
 
     async def generate(self, prompt: str, refs: Sequence[bytes] = (), **_: object) -> bytes:
         self.generate_calls.append(prompt)
-        n = prompt.count('"') // 2 or 1  # captions are quoted in the sheet prompt
+        # One numbered "Ideas:" line per sticker (standard items are no longer quoted).
+        n = len(re.findall(r"^\d+\. ", prompt, flags=re.MULTILINE)) or 1
         return _sheet_bytes(n)
 
     async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:

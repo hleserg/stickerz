@@ -35,15 +35,16 @@ class SheetRefusedError(RuntimeError):
 def _as_list_item(item: str) -> str:
     """Render one sheet item for the prompt.
 
-    Standard-block reactions are explicit captions, so they are quoted (the model
-    renders the quoted text verbatim). A custom item is passed through as the user
-    wrote it: their own quotes mark an exact caption, otherwise it reads as a free
+    A standard-block reaction becomes its unquoted scene description — the
+    emotion is drawn, never captioned (quoting it would order the model to
+    letter the label). A custom item is passed through as the user wrote it:
+    their own quotes mark an exact caption, otherwise it reads as a free
     description of the sticker idea.
     """
-    from sticker_service.services.stickers.sets import STANDARD_BLOCK
+    from sticker_service.services.stickers.sets import STANDARD_IDEAS
 
     item = item.strip()
-    return f'"{item}"' if item in STANDARD_BLOCK else item
+    return STANDARD_IDEAS.get(item, item)
 
 
 def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> str:
