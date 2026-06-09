@@ -88,6 +88,46 @@ def test_hysteresis_absorbs_connected_wash_keeps_isolated_speck() -> None:
     assert arr[10, 7, 3] == 255  # figure body kept
 
 
+def test_family_flood_removes_light_pink_wash_keeps_pink_inside_outline() -> None:
+    # Prod brak: a LIGHT watercolor wash (euclidean ~186 from #FF00FF — beyond any
+    # safe loose tolerance, light pinks read closer to white than to magenta) glued
+    # to the figure. The pink-family flood (min(R,B)-G) absorbs it at any lightness,
+    # while the white die-cut outline is a wall it cannot cross — the identical
+    # pink "clothing" INSIDE the outline survives.
+    img = Image.new("RGBA", (30, 20), MAGENTA)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([4, 4, 15, 15], fill=(255, 255, 255, 255))  # white die-cut figure
+    draw.rectangle([7, 7, 12, 12], fill=(232, 180, 216, 255))  # pink clothing inside
+    draw.rectangle([16, 6, 27, 13], fill=(232, 180, 216, 255))  # same pink as a wash
+    arr = np.asarray(chroma_key(img))
+    assert arr[8, 20, 3] == 0  # the wash is flooded away…
+    assert arr[8, 8, 3] == 255  # …the identical pink inside the outline stays
+    assert arr[5, 5, 3] == 255  # the white outline itself stays
+    assert arr[8, 8, 0] > 0  # clothing keeps colour (despill trims, not erases)
+
+
+def test_family_flood_spares_red_prop_touching_background() -> None:
+    # Red is not pink-family (its blue ≈ green): a red heart sitting straight on
+    # the background must NOT be flooded, however warm it looks.
+    img = Image.new("RGBA", (12, 12), MAGENTA)
+    ImageDraw.Draw(img).rectangle([4, 4, 7, 7], fill=(224, 48, 48, 255))
+    arr = np.asarray(chroma_key(img))
+    assert arr[5, 5, 3] == 255
+
+
+def test_wash_no_longer_inflates_sticker_size() -> None:
+    # The size brak: a wash glued to the figure inflated the component's bbox, so
+    # the character shrank after fitting to 512. Flooded away, the piece is exactly
+    # the figure's own box again.
+    sheet = Image.new("RGBA", (60, 40), MAGENTA)
+    draw = ImageDraw.Draw(sheet)
+    draw.rectangle([5, 5, 24, 34], fill=(255, 255, 255, 255))  # 20×30 figure
+    draw.rectangle([25, 10, 54, 20], fill=(226, 168, 204, 255))  # wash dragging right
+    pieces = slice_sheet(chroma_key(sheet))
+    assert len(pieces) == 1
+    assert pieces[0].size == (20, 30)
+
+
 def test_slice_sheet_finds_all_components() -> None:
     keyed = chroma_key(_make_sheet())
     pieces = slice_sheet(keyed)
