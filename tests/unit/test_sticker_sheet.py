@@ -84,12 +84,15 @@ def test_build_caption_set_with_personal_and_limit() -> None:
 # --- prompt ------------------------------------------------------------------
 
 
-def test_sheet_prompt_quotes_standard_captions_and_resolves_suffix() -> None:
+def test_sheet_prompt_turns_standard_reactions_into_drawn_ideas() -> None:
     captions = ["Привет!", "Класс!"]
     prompt = build_sheet_prompt(_style(), captions, age_clause="")
     assert CHROMA in prompt
-    # Standard-block reactions are explicit captions → rendered quoted.
-    assert '"Привет!"' in prompt and '"Класс!"' in prompt
+    # Standard reactions become unquoted scene descriptions: the emotion is
+    # drawn, never captioned (a quoted label would order the model to letter it).
+    assert '"Привет!"' not in prompt and '"Класс!"' not in prompt
+    assert "машет рукой в знак приветствия" in prompt
+    assert "большой палец вверх" in prompt
     assert "watercolor style" in prompt
     assert "{age_clause}" not in prompt  # placeholder resolved
     # Freedom-first brief: no text unless asked, emotion in the drawing, free
@@ -102,6 +105,14 @@ def test_sheet_prompt_quotes_standard_captions_and_resolves_suffix() -> None:
     assert "die-cut" in prompt
     # The old hard "caption ON the figure" rule is gone.
     assert "directly ON the character" not in prompt
+
+
+def test_every_standard_reaction_has_a_quote_free_drawn_idea() -> None:
+    from sticker_service.services.stickers.sets import STANDARD_BLOCK, STANDARD_IDEAS
+
+    assert set(STANDARD_IDEAS) == set(STANDARD_BLOCK)
+    # No quote characters inside ideas — quotes would order the model to letter text.
+    assert all('"' not in v and "«" not in v for v in STANDARD_IDEAS.values())
 
 
 def test_sheet_prompt_stays_lean() -> None:
