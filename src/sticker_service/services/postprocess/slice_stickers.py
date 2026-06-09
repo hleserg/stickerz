@@ -5,7 +5,7 @@ that color is background, everything else is a sticker — so the white outline 
 longer fuses with the background the way white-detection suffered from.
 
 Flow (a sheet is NEVER published as-is — slicing is mandatory, §B.4):
-1. chroma-key the background to transparency (+ light despill of the fringe);
+1. chroma-key the background to transparency (pink-family flood + light despill);
 2. split into connected components (one per sticker);
 3. fit each to 512 on its longest side (no distortion) and encode ≤512 KB.
 """
@@ -31,18 +31,45 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
     return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
 
 
+# PLAYBOOK-START
+# pattern: color-family-flood-with-barrier
+# status: draft
+# problem: removing a decorated background by color *distance* fails when the
+#   decoration shares the background's hue family but not its lightness — a pale
+#   wash sits euclidean-closer to white than to the key color, so any tolerance
+#   wide enough to take it also eats the subject's white outline.
+# solution: seed with a strict tolerance, then flood-fill every *connected*
+#   pixel that passes a hue-family test instead of a distance ball (for magenta:
+#   min(R,B)-G ≥ margin — ≈0 for white/grey/skin/red/blue at any lightness).
+#   Keep the subject's silhouette in a non-family color (the white die-cut
+#   outline) so the flood has a hard barrier; family-colored details inside the
+#   subject survive because they never connect to the seed.
 def chroma_key(
     image: Image.Image,
     *,
     chroma: str = CHROMA_DEFAULT,
     tolerance: float = 80.0,
     despill: bool = True,
+    loose_tolerance: float = 130.0,
 ) -> Image.Image:
     """Return an RGBA copy with the chroma background made transparent.
 
-    Pixels within ``tolerance`` (euclidean RGB distance) of ``chroma`` become
-    fully transparent. With ``despill`` the leftover colored fringe on edges is
-    pulled toward neutral so stickers don't keep a magenta rim.
+    Pixels within ``tolerance`` (euclidean RGB distance) of ``chroma`` seed the
+    background; a hysteresis pass then also removes looser background-ish pixels
+    *connected* to that seed, while isolated details on the character are kept.
+
+    For a magenta-family ``chroma`` (the sheet default) the loose mask is the
+    whole **pink family** — every pixel whose R and B both clearly dominate G.
+    A watercolor wash stays pink at any lightness, but euclidean distance puts a
+    light pink further from ``#FF00FF`` than from white, so no distance
+    tolerance can absorb the wash without also eating the white die-cut
+    outline. The family test scores white/grey/skin/red/blue ≈ 0, so the
+    outline is a wall the flood cannot cross: pink clothing or lips inside it
+    survive, and only pink connected to the background sea is removed. For any
+    other ``chroma`` (the auto-detected fallback) the loose mask is the wider
+    ``loose_tolerance`` ball, as before. With ``despill`` the leftover colored
+    fringe on edges is pulled toward neutral so stickers don't keep a magenta
+    rim.
     """
     cr, cg, cb = _hex_to_rgb(chroma)
     arr = np.asarray(image.convert("RGBA"), dtype=np.float32)
@@ -50,6 +77,17 @@ def chroma_key(
 
     distance = np.sqrt((r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2)
     background = distance < tolerance
+    if min(cr, cb) - cg >= 128:
+        # Margin 16: pale pinks down to min(R,B)-G==16 flood away, while a white
+        # outline blocks once its magenta blend fades past ~94% white.
+        loose = background | (np.minimum(r, b) - g >= 16.0)
+    else:
+        loose = distance < max(loose_tolerance, tolerance)
+    structure = ndimage.generate_binary_structure(2, 2)
+    labeled = cast(Any, ndimage.label(loose, structure=structure))[0]
+    seeds = np.unique(labeled[background])
+    seeds = seeds[seeds != 0]  # 0 is the non-loose region, never a seed
+    background = np.isin(labeled, seeds)
     arr[..., 3] = np.where(background, 0.0, 255.0)
 
     if despill:
@@ -60,6 +98,9 @@ def chroma_key(
         arr[..., 2] = np.where(foreground, np.clip(b - spill, 0, 255), arr[..., 2])
 
     return Image.fromarray(arr.astype(np.uint8), mode="RGBA")
+
+
+# PLAYBOOK-END
 
 
 @dataclass(frozen=True)

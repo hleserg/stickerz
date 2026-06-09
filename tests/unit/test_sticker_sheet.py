@@ -111,6 +111,18 @@ def test_sheet_prompt_keeps_custom_descriptions_unquoted() -> None:
     assert '"дружит с компьютерами"' not in prompt
 
 
+def test_sheet_prompt_bans_decor_and_keeps_unused_tiles_empty() -> None:
+    # The wash ban is always present (the prod "pink watercolor behind the contour"
+    # brak); 13 items on a 5×3 grid leave 2 spare tiles that must stay pure magenta.
+    thirteen = [f"идея {i}" for i in range(13)]
+    prompt = build_sheet_prompt(_style(), thirteen, age_clause="")
+    assert "no watercolor washes" in prompt
+    assert "unused tile" in prompt and "15 tiles" in prompt
+    # A full grid (15 of 15) has no spare tiles → no confusing clause.
+    fifteen = [f"идея {i}" for i in range(15)]
+    assert "unused tile" not in build_sheet_prompt(_style(), fifteen, age_clause="")
+
+
 def test_sheet_prompt_child_age_clause() -> None:
     prompt = build_sheet_prompt(_style(), ["Привет!"], age_clause="Это ребёнок примерно 6 лет: ...")
     assert "ребёнок" in prompt

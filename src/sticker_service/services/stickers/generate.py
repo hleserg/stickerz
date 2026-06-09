@@ -58,6 +58,14 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
     items = "\n".join(f"{i}. {_as_list_item(c)}" for i, c in enumerate(captions, 1))
     suffix = style.sticker_style_suffix.replace("{age_clause}", age_clause)
     rows, cols = grid_for(len(captions))
+    # Junk (washes, flourishes) clusters in leftover cells — forbid them explicitly.
+    spare = rows * cols - len(captions)
+    empty_clause = (
+        f" Items fill only {len(captions)} of the {rows * cols} tiles: leave every unused "
+        f"tile completely empty — pure flat {CHROMA} magenta, nothing drawn in it."
+        if spare
+        else ""
+    )
     return (
         f"Draw the SAME character as in the reference image as a sheet of {len(captions)} "
         f"die-cut stickers arranged in a regular, even grid of exactly {rows} rows by {cols} "
@@ -83,9 +91,10 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
         f"caption) on a solid flat {CHROMA} magenta background. Keep all props and scene "
         f"objects right next to or touching the character so each sticker stays one connected "
         f"piece; everything that is not part of a sticker — the whole background between, "
-        f"around and behind the figures — MUST be solid {CHROMA} magenta, with no shadows, "
-        f"gradients, frames or stray splashes. Keep the face, hair and eye color identical to "
-        f"the reference. {suffix}"
+        f"around and behind the figures — MUST be solid {CHROMA} magenta with NOTHING drawn "
+        f"on it: no shadows, no gradients, no frames, no watercolor washes, no paint smears "
+        f"or splashes, no glows, no decorative shapes or blobs of any kind.{empty_clause} "
+        f"Keep the face, hair and eye color identical to the reference. {suffix}"
     ).strip()
 
 
