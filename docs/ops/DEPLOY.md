@@ -2,7 +2,7 @@
 
 The bot can't be published to Telegram from the Claude Code web environment
 (its egress allowlist blocks `api.telegram.org`). Run it on your own server,
-where Telegram is reachable. Docker Compose brings up the bot + Redis.
+where Telegram is reachable. Docker Compose runs the bot (one container).
 
 ## Prerequisites
 
@@ -73,4 +73,43 @@ Idempotent: existing `Kate_<style>` characters are skipped, so re-running fills 
 - Generated data (sqlite, photos, sheets, stickers) lives in the named volume
   `sticker-data` (owned by the container's appuser). Inspect/back up with
   `docker compose cp bot:/app/data ./data-backup`.
-- To update: `git checkout main && git pull`, then `docker compose up -d --build`.
+- Manual update (if not using auto-deploy below): `git pull`, then
+  `docker compose pull bot && docker compose up -d bot`.
+
+## Automatic deploy (soft, on every green `main`)
+
+CI builds the image and pushes it to GHCR; the `Deploy` workflow then redeploys
+the VDS over SSH **after CI passes** (never a red commit). The redeploy is
+**soft**: `SIGTERM` makes the bot stop fetching new updates and finish the flow
+already running (within `stop_grace_period: 150s`) before the new container
+starts. Telegram queues incoming updates during the few-second swap, and the
+persistent SQLite FSM means any flow that still couldn't finish resumes — so a
+deploy doesn't cut users off mid-pack.
+
+> Note: a single long-polling bot can't be *zero-gap* (Telegram allows one
+> `getUpdates` consumer per token, so the old instance must stop before the new
+> one starts). "Soft" here = no lost state, queued updates, in-flight flow drains.
+> True zero-gap needs webhook mode + a reverse proxy (blue-green) — a later step.
+
+### One-time setup
+
+1. **GitHub → repo → Settings → Secrets and variables → Actions → New secret** —
+   add four:
+   - `VDS_HOST` — server IP/hostname
+   - `VDS_USER` — SSH user (e.g. `deploy` or `root`)
+   - `VDS_SSH_KEY` — that user's **private** SSH key (the matching public key is
+     in the server's `~/.ssh/authorized_keys`)
+   - `VDS_PATH` — absolute path to the repo on the server, e.g. `/opt/stickerz`
+2. **On the VDS**, do the normal one-time setup once (clone + `.env` as above) at
+   `VDS_PATH`, then let the image come from GHCR:
+   ```bash
+   # if the GHCR package is private, log in once (PAT with read:packages):
+   echo <GHCR_PAT> | docker login ghcr.io -u hleserg --password-stdin
+   # or make the package public (GitHub → Packages → stickerz → Package settings
+   # → Change visibility → Public) and skip the login entirely.
+   docker compose pull bot && docker compose up -d bot
+   ```
+
+That's it. From then on, every merge to `main` that passes CI auto-redeploys the
+VDS. Roll back by pulling a specific tag: each build is also tagged with its
+commit SHA (`ghcr.io/hleserg/stickerz:<sha>`).

@@ -1,0 +1,67 @@
+name: Deploy
+
+# Runs only after the CI workflow finishes successfully on main, so we never
+# deploy a red commit. Builds the image, pushes it to GHCR, then triggers a soft
+# redeploy on the VDS (pull + recreate; in-flight flows drain, see compose).
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      # Secrets can't be used in `if:` directly; surface presence via env so the
+      # SSH step is skipped (not failed) until the VDS secrets are configured.
+      HAS_VDS: ${{ secrets.VDS_HOST != '' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.event.workflow_run.head_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Soft redeploy on VDS over SSH
+        if: ${{ env.HAS_VDS == 'true' }}
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VDS_HOST }}
+          username: ${{ secrets.VDS_USER }}
+          key: ${{ secrets.VDS_SSH_KEY }}
+          script: |
+            set -e
+            cd "${{ secrets.VDS_PATH }}"
+            docker compose pull bot
+            # Recreate only the bot; SIGTERM lets it drain in-flight flows within
+            # the compose stop_grace_period before the new container starts.
+            docker compose up -d bot
+            docker image prune -f
