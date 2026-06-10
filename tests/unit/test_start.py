@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 import pytest_asyncio
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
@@ -172,9 +173,22 @@ async def test_apply_empty_source_reprompts(db: Database) -> None:
 
 
 # --- showcase page surfacing ----------------------------------------------------
+# The default demo URL is empty while the promo is reworked, so these tests
+# configure one explicitly; the last test pins the hidden-by-default behavior.
 
 
-async def test_start_offers_demo_button_unobtrusively(db: Database) -> None:
+@pytest.fixture
+def demo_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    from sticker_service.config import get_settings
+
+    url = "https://telegra.ph/test-demo"
+    monkeypatch.setenv("APP_DEMO_PAGE_URL", url)
+    get_settings.cache_clear()
+    yield url
+    get_settings.cache_clear()
+
+
+async def test_start_offers_demo_button_unobtrusively(db: Database, demo_url: str) -> None:
     # The Telegraph showcase is a url-button on /start — visible to every
     # newcomer, zero extra text (owner's rule: visible, never pushy).
     message = AsyncMock()
@@ -185,12 +199,12 @@ async def test_start_offers_demo_button_unobtrusively(db: Database) -> None:
     markup = message.answer.await_args.kwargs.get("reply_markup")
     assert markup is not None
     buttons = [b for row in markup.inline_keyboard for b in row]
-    assert any(b.url and "telegra.ph" in b.url and "Примеры" in b.text for b in buttons)
+    assert any(b.url == demo_url and "Примеры" in b.text for b in buttons)
     # The greeting text itself did not grow a link paragraph.
     assert "telegra.ph" not in message.answer.await_args.args[0]
 
 
-async def test_alpha_application_screen_offers_demo(db: Database) -> None:
+async def test_alpha_application_screen_offers_demo(db: Database, demo_url: str) -> None:
     # An applicant can't try the bot yet — the demo button shows what it makes.
     from sticker_service.handlers.start import cmd_start
 
@@ -201,13 +215,30 @@ async def test_alpha_application_screen_offers_demo(db: Database) -> None:
     markup = message.answer.await_args.kwargs.get("reply_markup")
     buttons = [b for row in markup.inline_keyboard for b in row]
     assert any(b.callback_data == "apply:new" for b in buttons)
-    assert any(b.url and "telegra.ph" in b.url for b in buttons)
+    assert any(b.url == demo_url for b in buttons)
 
 
-async def test_help_links_demo_page(db: Database) -> None:
+async def test_help_links_demo_page(db: Database, demo_url: str) -> None:
     from sticker_service.handlers.start import cmd_help
 
     message = AsyncMock()
     message.from_user = SimpleNamespace(id=7)
     await cmd_help(message, db)
-    assert "telegra.ph" in message.answer.await_args.args[0]
+    assert demo_url in message.answer.await_args.args[0]
+
+
+async def test_showcase_hidden_when_url_empty(db: Database) -> None:
+    # Default while the promo is reworked: no button on /start, no /help line.
+    from sticker_service.handlers.start import cmd_help, cmd_start
+
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=7)
+    await cmd_start(message, db)
+    markup = message.answer.await_args.kwargs.get("reply_markup")
+    assert markup is None or all(
+        not (b.url and "telegra.ph" in b.url) for row in markup.inline_keyboard for b in row
+    )
+    help_message = AsyncMock()
+    help_message.from_user = SimpleNamespace(id=7)
+    await cmd_help(help_message, db)
+    assert "Примеры работ" not in help_message.answer.await_args.args[0]
