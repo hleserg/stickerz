@@ -1,23 +1,32 @@
-# Local/VDS deployment: the bot plus a Redis instance for the generation queue.
-# Build the image from docker/Dockerfile; secrets come from .env (git-ignored).
+# VDS/local deployment. On the VDS the image is pulled from GHCR (built by CI on
+# every green main); locally you can still `docker compose up -d --build`.
+# Secrets come from .env (git-ignored). FSM state lives in SQLite on the volume,
+# so a redeploy never loses a user's in-flight flow.
 services:
   bot:
+    image: ghcr.io/hleserg/stickerz:latest
     build:
       context: .
       dockerfile: docker/Dockerfile
     env_file: .env
-    depends_on:
-      - redis
     restart: unless-stopped
+    # --- soft redeploy ---
+    # init: a tiny PID-1 (tini) that forwards SIGTERM to Python and reaps zombies.
+    # stop_grace_period: on redeploy, SIGTERM makes aiogram stop fetching new
+    # updates and finish the handler already running (e.g. a generation) before
+    # the container exits — so a deploy doesn't cut off a user mid-flow. Telegram
+    # queues incoming updates during the brief swap; the new container picks them
+    # up. Anything that still couldn't finish resumes via the persistent FSM.
+    init: true
+    stop_grace_period: 150s
+    # Bound container log growth on the small VDS (json-file has no cap by default).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - sticker-data:/app/data # sqlite db + downloaded photos + generated sheets
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    volumes:
-      - redis-data:/data
-
 volumes:
   sticker-data:
-  redis-data:

@@ -5,7 +5,7 @@ that color is background, everything else is a sticker — so the white outline 
 longer fuses with the background the way white-detection suffered from.
 
 Flow (a sheet is NEVER published as-is — slicing is mandatory, §B.4):
-1. chroma-key the background to transparency (+ light despill of the fringe);
+1. chroma-key the background to transparency (pink-family flood + light despill);
 2. split into connected components (one per sticker);
 3. fit each to 512 on its longest side (no distortion) and encode ≤512 KB.
 """
@@ -31,18 +31,45 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
     return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
 
 
+# PLAYBOOK-START
+# pattern: color-family-flood-with-barrier
+# status: draft
+# problem: removing a decorated background by color *distance* fails when the
+#   decoration shares the background's hue family but not its lightness — a pale
+#   wash sits euclidean-closer to white than to the key color, so any tolerance
+#   wide enough to take it also eats the subject's white outline.
+# solution: seed with a strict tolerance, then flood-fill every *connected*
+#   pixel that passes a hue-family test instead of a distance ball (for magenta:
+#   min(R,B)-G ≥ margin — ≈0 for white/grey/skin/red/blue at any lightness).
+#   Keep the subject's silhouette in a non-family color (the white die-cut
+#   outline) so the flood has a hard barrier; family-colored details inside the
+#   subject survive because they never connect to the seed.
 def chroma_key(
     image: Image.Image,
     *,
     chroma: str = CHROMA_DEFAULT,
     tolerance: float = 80.0,
     despill: bool = True,
+    loose_tolerance: float = 130.0,
 ) -> Image.Image:
     """Return an RGBA copy with the chroma background made transparent.
 
-    Pixels within ``tolerance`` (euclidean RGB distance) of ``chroma`` become
-    fully transparent. With ``despill`` the leftover colored fringe on edges is
-    pulled toward neutral so stickers don't keep a magenta rim.
+    Pixels within ``tolerance`` (euclidean RGB distance) of ``chroma`` seed the
+    background; a hysteresis pass then also removes looser background-ish pixels
+    *connected* to that seed, while isolated details on the character are kept.
+
+    For a magenta-family ``chroma`` (the sheet default) the loose mask is the
+    whole **pink family** — every pixel whose R and B both clearly dominate G.
+    A watercolor wash stays pink at any lightness, but euclidean distance puts a
+    light pink further from ``#FF00FF`` than from white, so no distance
+    tolerance can absorb the wash without also eating the white die-cut
+    outline. The family test scores white/grey/skin/red/blue ≈ 0, so the
+    outline is a wall the flood cannot cross: pink clothing or lips inside it
+    survive, and only pink connected to the background sea is removed. For any
+    other ``chroma`` (the auto-detected fallback) the loose mask is the wider
+    ``loose_tolerance`` ball, as before. With ``despill`` the leftover colored
+    fringe on edges is pulled toward neutral so stickers don't keep a magenta
+    rim.
     """
     cr, cg, cb = _hex_to_rgb(chroma)
     arr = np.asarray(image.convert("RGBA"), dtype=np.float32)
@@ -50,6 +77,17 @@ def chroma_key(
 
     distance = np.sqrt((r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2)
     background = distance < tolerance
+    if min(cr, cb) - cg >= 128:
+        # Margin 16: pale pinks down to min(R,B)-G==16 flood away, while a white
+        # outline blocks once its magenta blend fades past ~94% white.
+        loose = background | (np.minimum(r, b) - g >= 16.0)
+    else:
+        loose = distance < max(loose_tolerance, tolerance)
+    structure = ndimage.generate_binary_structure(2, 2)
+    labeled = cast(Any, ndimage.label(loose, structure=structure))[0]
+    seeds = np.unique(labeled[background])
+    seeds = seeds[seeds != 0]  # 0 is the non-loose region, never a seed
+    background = np.isin(labeled, seeds)
     arr[..., 3] = np.where(background, 0.0, 255.0)
 
     if despill:
@@ -60,6 +98,9 @@ def chroma_key(
         arr[..., 2] = np.where(foreground, np.clip(b - spill, 0, 255), arr[..., 2])
 
     return Image.fromarray(arr.astype(np.uint8), mode="RGBA")
+
+
+# PLAYBOOK-END
 
 
 @dataclass(frozen=True)
@@ -177,6 +218,74 @@ def _trim_transparent(image: Image.Image) -> Image.Image:
     return image.crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
 
 
+def _opaque_area(image: Image.Image) -> int:
+    """Count the non-transparent pixels of an RGBA image (its real footprint)."""
+    return int((np.asarray(image.convert("RGBA"))[..., 3] > 0).sum())
+
+
+# PLAYBOOK-START
+# pattern: keep-dominant-component-plus-neighbours
+# status: draft
+# problem: segmenting a subject from a tile leaves stray blobs the colour key
+#   missed (corner scenery, a detached glyph, paint splatter) that must go,
+#   while small *adjacent* blobs that belong to the subject (a heart by the
+#   hand, an emoji on the caption) must stay.
+# solution: keep the largest component; also keep any component that is either
+#   large relative to it OR whose bounding box is near the main one's (grown by
+#   a margin); zero the rest. Proximity — not mere size — is the keep signal.
+def _clean_satellites(
+    image: Image.Image, *, margin_frac: float = 0.12, keep_frac: float = 0.30
+) -> Image.Image:
+    """Keep a tile's main figure (+ blobs touching it) and drop far stray bits.
+
+    A painterly tile can carry scenery the chroma key missed — a picture frame in
+    a corner, a stray eye, a paint splash — sitting *away* from the central
+    figure. Keep the largest component plus any component that is large
+    (``keep_frac`` of it) or near it (its box overlaps the figure box grown by
+    ``margin_frac`` of the tile), zeroing everything else. A heart or 😉 next to
+    the face survives; a corner shard does not.
+    """
+    arr = np.asarray(image.convert("RGBA")).copy()
+    solid = arr[..., 3] > 0
+    if not solid.any():
+        return image
+    structure = ndimage.generate_binary_structure(2, 2)
+    labeled, count = cast(Any, ndimage.label(solid, structure=structure))
+    if count <= 1:
+        return _trim_transparent(image)
+    slices = ndimage.find_objects(labeled)
+    # One pass over the label image yields every component's area; index 0 is the
+    # background, so labels line up with ``areas[label]`` (no 1-based bookkeeping).
+    areas = np.bincount(labeled.ravel(), minlength=count + 1)
+    main = int(np.argmax(areas[1:])) + 1
+    main_area = int(areas[main])
+    mr, mc = slices[main - 1]
+    height, width = arr.shape[:2]
+    margin_y, margin_x = margin_frac * height, margin_frac * width
+    kept = [main]
+    for idx, sl in enumerate(slices, start=1):
+        if idx == main or sl is None:
+            continue
+        if int(areas[idx]) >= keep_frac * main_area:
+            kept.append(idx)
+            continue
+        rr, cc = sl
+        near = (
+            rr.start <= mr.stop + margin_y
+            and rr.stop >= mr.start - margin_y
+            and cc.start <= mc.stop + margin_x
+            and cc.stop >= mc.start - margin_x
+        )
+        if near:
+            kept.append(idx)
+    # Build the keep-mask once instead of OR-ing a full-image mask per component.
+    arr[..., 3] = np.where(np.isin(labeled, kept), arr[..., 3], 0)
+    return _trim_transparent(Image.fromarray(arr, mode="RGBA"))
+
+
+# PLAYBOOK-END
+
+
 def grid_slice(
     image: Image.Image, rows: int, cols: int, *, tolerance: float = 70.0, min_content: int = 64
 ) -> list[Image.Image]:
@@ -197,8 +306,8 @@ def grid_slice(
                 round((c + 1) * cell_w),
                 round((r + 1) * cell_h),
             )
-            cell = _trim_transparent(chroma_key_auto(rgba.crop(box), tolerance=tolerance))
-            if int((np.asarray(cell.convert("RGBA"))[..., 3] > 0).sum()) >= min_content:
+            cell = _clean_satellites(chroma_key_auto(rgba.crop(box), tolerance=tolerance))
+            if _opaque_area(cell) >= min_content:
                 out.append(cell)
     return out
 
@@ -222,6 +331,43 @@ def drop_text_strips(pieces: list[Image.Image]) -> list[Image.Image]:
     return kept or pieces
 
 
+def drop_outlier_fragments(
+    pieces: list[Image.Image], *, expected: int | None = None, area_frac: float = 0.4
+) -> list[Image.Image]:
+    """Drop small-area outlier pieces: stray glyphs, scenery shards, paint splashes.
+
+    A valid sticker fills its tile with the character, so every real piece has a
+    similar opaque footprint; a detached letter (e.g. a lone «Я»), a corner
+    picture-frame or a splash is an outlier. Two modes:
+
+    - ``expected`` known: cap to it by dropping the smallest extras. A stray
+      fragment isn't always *small* (a duplicated limb, a blob the chroma key
+      missed), so an area threshold alone can't catch it — we must land on
+      exactly ``expected`` (this is the "7 pieces for 6 captions" fix).
+    - ``expected`` unknown: drop only clear small-area outliers (below
+      ``area_frac`` of the median).
+
+    Complements ``drop_text_strips`` (short-wide caption lines). Never returns an
+    empty list.
+    """
+    if len(pieces) < 2:
+        return pieces
+    if expected is not None and len(pieces) <= expected:
+        return pieces  # already at/under target — nothing to drop, skip the scan
+    areas = [_opaque_area(p) for p in pieces]
+    smallest_first = sorted(range(len(pieces)), key=lambda i: areas[i])
+    if expected is not None:
+        to_drop = set(smallest_first[: len(pieces) - expected])
+    else:
+        median = sorted(areas)[len(areas) // 2]
+        if median == 0:
+            return pieces
+        threshold = area_frac * median
+        to_drop = {i for i in smallest_first if areas[i] < threshold}
+    kept = [p for i, p in enumerate(pieces) if i not in to_drop]
+    return kept or pieces
+
+
 def process_sheet(
     sheet: bytes | Image.Image,
     *,
@@ -231,14 +377,16 @@ def process_sheet(
     grid: tuple[int, int] | None = None,
     expected: int | None = None,
 ) -> list[bytes]:
-    """Full pipeline: chroma-key → slice → drop text strips → fit 512 → encode.
+    """Full pipeline: chroma-key → slice → drop junk → fit 512 → encode.
 
     Detached caption-only fragments are dropped first so no sticker is text without
     a character. Only when connected-component slicing falls short of the expected
     number of stickers do we fall back to cutting the regular ``grid`` (for sheets
     where the model used an off background or left no gaps); we then keep whichever
     result is closest to ``expected``. ``expected`` defaults to ``rows*cols-1`` so
-    callers that don't know the exact count keep the previous behaviour.
+    callers that don't know the exact count keep the previous behaviour. Finally
+    small-area outliers (stray glyphs, scenery shards, paint splashes the chroma
+    key missed) are dropped down to ``expected`` so no junk tile is published.
     """
     image = sheet if isinstance(sheet, Image.Image) else Image.open(BytesIO(sheet))
     keyed = chroma_key(image, chroma=chroma, tolerance=tolerance)
@@ -253,4 +401,5 @@ def process_sheet(
                 pieces = min((pieces, grid_pieces), key=lambda ps: abs(len(ps) - expected))
             else:
                 pieces = grid_pieces
+    pieces = drop_outlier_fragments(pieces, expected=expected)
     return [encode_sticker(fit_to_512(piece)) for piece in pieces]

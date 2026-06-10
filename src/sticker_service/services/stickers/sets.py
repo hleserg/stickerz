@@ -23,6 +23,26 @@ STANDARD_BLOCK: tuple[str, ...] = (
     "Пока!",
 )
 
+# What each standard reaction LOOKS like — sent to the sheet prompt as an
+# unquoted scene description, so the emotion is drawn, not captioned. The
+# label itself stays a UI string (checklist button, emoji key). No quote
+# characters here: quotes in an idea mean "letter this text" to the model.
+STANDARD_IDEAS: dict[str, str] = {
+    "Привет!": "Радостно машет рукой в знак приветствия.",
+    "Класс!": "Довольно показывает большой палец вверх.",
+    "Ха-ха-ха": "Хохочет во весь голос, запрокинув голову.",
+    "Грустно": "Грустит: плечи опущены, глаза на мокром месте.",
+    "Шок!": "В шоке: глаза круглые, ладони прижаты к щекам.",
+    "Люблю": "Влюблённо прижимает руки к сердцу, вокруг витают сердечки.",
+    "Задумался": "Глубоко задумался, палец у подбородка, взгляд вверх.",
+    "Устал": "Выжат до предела: устало выдыхает, глаза полузакрыты.",
+    "Окей 😉": "Подмигивает и показывает пальцами жест окей.",
+    "Фейспалм": "Классический фейспалм — ладонь на лице, вселенская усталость.",
+    "Ты!": "Указывает пальцем прямо на зрителя с азартной ухмылкой.",
+    "Я крутой": "Стоит в самоуверенной позе победителя, максимально крутой вид.",
+    "Пока!": "Тепло машет рукой на прощание.",
+}
+
 # Known emoji per standard caption — lets us skip a per-sticker vision call (§9).
 STANDARD_EMOJI: dict[str, str] = {
     "Привет!": "👋",

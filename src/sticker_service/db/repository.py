@@ -108,6 +108,15 @@ CREATE TABLE IF NOT EXISTS quotas (
     user_id   INTEGER PRIMARY KEY,
     remaining INTEGER NOT NULL
 );
+-- Indexes for the per-user / per-pack lookups and the budget hot path
+-- (count_events). Without these they are full table scans that grow with usage.
+CREATE INDEX IF NOT EXISTS idx_stickers_pack_id ON stickers(pack_id);
+CREATE INDEX IF NOT EXISTS idx_packs_owner_id ON packs(owner_id);
+CREATE INDEX IF NOT EXISTS idx_packs_character_id ON packs(character_id);
+CREATE INDEX IF NOT EXISTS idx_characters_owner_id ON characters(owner_id);
+CREATE INDEX IF NOT EXISTS idx_strikes_user_id ON strikes(user_id);
+CREATE INDEX IF NOT EXISTS idx_events_user_id ON events(user_id);
+CREATE INDEX IF NOT EXISTS idx_events_event ON events(event);
 """
 
 
@@ -130,6 +139,10 @@ class Database:
         conn.row_factory = aiosqlite.Row
         db = cls(conn)
         await conn.execute("PRAGMA foreign_keys = ON")
+        # WAL + a busy timeout so concurrent handler coroutines don't trip over
+        # "database is locked" under load (the FSM store already uses WAL).
+        await conn.execute("PRAGMA journal_mode = WAL")
+        await conn.execute("PRAGMA busy_timeout = 5000")
         await db._init_schema()
         return db
 
@@ -334,6 +347,29 @@ class Database:
         ) as cur:
             rows = await cur.fetchall()
         return [Pack(**dict(r)) for r in rows]
+
+    async def list_stale_drafts(self, cutoff: datetime) -> list[Pack]:
+        """Unpublished draft packs created before ``cutoff`` (GC candidates).
+
+        ISO-8601 UTC timestamps sort lexicographically, so a string compare on
+        ``created_at`` is a correct chronological filter without parsing.
+        """
+        async with self._conn.execute(
+            "SELECT * FROM packs WHERE published = 0 AND created_at < ? ORDER BY created_at",
+            (cutoff.isoformat(),),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [Pack(**dict(r)) for r in rows]
+
+    async def delete_pack(self, pack_id: int) -> None:
+        """Delete a pack and its sticker rows (DB only — files are the caller's).
+
+        Stickers go first to satisfy the ``stickers.pack_id`` foreign key; the
+        bound character is left intact (it may own other packs / the canonical).
+        """
+        await self._conn.execute("DELETE FROM stickers WHERE pack_id = ?", (pack_id,))
+        await self._conn.execute("DELETE FROM packs WHERE id = ?", (pack_id,))
+        await self._conn.commit()
 
     # --- stickers ------------------------------------------------------------
 
@@ -549,15 +585,38 @@ class Database:
         )
         await self._conn.commit()
 
+    async def _ensure_quota_row(self, user_id: int) -> None:
+        """Materialize the default balance so an atomic UPDATE has a row to touch."""
+        await self._conn.execute(
+            "INSERT INTO quotas (user_id, remaining) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING",
+            (user_id, DEFAULT_CREDITS),
+        )
+
     async def add_credits(self, user_id: int, delta: int) -> int:
-        """Add (or subtract) credits in half-packs; clamps at 0; returns new value."""
-        new_value = max(0, await self.credits_left(user_id) + delta)
-        await self.set_credits(user_id, new_value)
-        return new_value
+        """Add (or subtract) credits in half-packs atomically; clamps at 0; returns new value."""
+        await self._ensure_quota_row(user_id)
+        await self._conn.execute(
+            "UPDATE quotas SET remaining = MAX(0, remaining + ?) WHERE user_id = ?",
+            (delta, user_id),
+        )
+        await self._conn.commit()
+        return await self.credits_left(user_id)
 
     async def consume_credits(self, user_id: int, amount: int) -> int:
-        """Spend ``amount`` credits (half-packs) if available; returns new balance."""
-        return await self.add_credits(user_id, -abs(amount))
+        """Atomically spend ``amount`` credits if the balance covers it; returns new balance.
+
+        A single conditional UPDATE, so two concurrent spends can't lose a
+        decrement the way the old read-modify-write could. If the balance is
+        insufficient, nothing is spent.
+        """
+        amount = abs(amount)
+        await self._ensure_quota_row(user_id)
+        await self._conn.execute(
+            "UPDATE quotas SET remaining = remaining - ? WHERE user_id = ? AND remaining >= ?",
+            (amount, user_id, amount),
+        )
+        await self._conn.commit()
+        return await self.credits_left(user_id)
 
     # --- analytics events ----------------------------------------------------
 
@@ -582,6 +641,38 @@ class Database:
         ) as cur:
             row = await cur.fetchone()
         return int(row["n"]) if row else 0
+
+    async def count_events_with_modes(self, event: str, event_modes: Sequence[str]) -> int:
+        """Count ``event`` rows whose JSON detail has ``mode`` in ``event_modes``."""
+        if not event_modes:
+            return 0
+        marks = ",".join("?" for _ in event_modes)
+        async with self._conn.execute(
+            f"SELECT COUNT(*) AS n FROM events WHERE event = ? "  # nosec B608 - only '?' marks
+            f"AND json_extract(detail, '$.mode') IN ({marks})",
+            (event, *event_modes),
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def prune_events(self, *, older_than_days: int, keep_events: Sequence[str]) -> int:
+        """Delete analytics events older than the window, except ``keep_events``.
+
+        ``keep_events`` exists because budget accounting counts ALL-TIME
+        ``generation_done`` rows — pruning those would silently inflate the
+        remaining alpha budget. Returns rows deleted; non-positive window = no-op.
+        """
+        if older_than_days <= 0:
+            return 0
+        cutoff = (_now() - timedelta(days=older_than_days)).isoformat()
+        marks = ",".join("?" for _ in keep_events) or "''"
+        cur = await self._conn.execute(
+            # only '?' placeholders are interpolated into the IN(...) list
+            f"DELETE FROM events WHERE created_at < ? AND event NOT IN ({marks})",  # nosec B608
+            (cutoff, *keep_events),
+        )
+        await self._conn.commit()
+        return cur.rowcount or 0
 
 
 async def open_database(paths: Sequence[str | Path] | None = None) -> Database:  # pragma: no cover

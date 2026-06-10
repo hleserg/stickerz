@@ -40,7 +40,7 @@ class _RefuserModel(ImageModel):
         self._left = refuse_times
         self.calls: list[str] = []
 
-    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
+    async def generate(self, prompt: str, refs: Sequence[bytes] = (), **_: object) -> bytes:
         self.calls.append(prompt)
         if self._left > 0:
             self._left -= 1
@@ -84,13 +84,78 @@ def test_build_caption_set_with_personal_and_limit() -> None:
 # --- prompt ------------------------------------------------------------------
 
 
-def test_sheet_prompt_has_chroma_captions_and_resolved_suffix() -> None:
+def test_sheet_prompt_turns_standard_reactions_into_drawn_ideas() -> None:
     captions = ["Привет!", "Класс!"]
     prompt = build_sheet_prompt(_style(), captions, age_clause="")
     assert CHROMA in prompt
-    assert '"Привет!"' in prompt and '"Класс!"' in prompt
+    # Standard reactions become unquoted scene descriptions: the emotion is
+    # drawn, never captioned (a quoted label would order the model to letter it).
+    assert '"Привет!"' not in prompt and '"Класс!"' not in prompt
+    assert "машет рукой в знак приветствия" in prompt
+    assert "большой палец вверх" in prompt
     assert "watercolor style" in prompt
     assert "{age_clause}" not in prompt  # placeholder resolved
+    # Freedom-first brief: no text unless asked, emotion in the drawing, free
+    # composition, caption placed naturally; caption-only ideas get acted out.
+    assert "NO text unless the idea explicitly asks" in prompt
+    assert "Show the emotion in the drawing" in prompt
+    assert "yours to invent" in prompt
+    assert "not as a banner pinned to the bottom" in prompt
+    assert "act it out" in prompt
+    assert "die-cut" in prompt
+    # The old hard "caption ON the figure" rule is gone.
+    assert "directly ON the character" not in prompt
+
+
+def test_every_standard_reaction_has_a_quote_free_drawn_idea() -> None:
+    from sticker_service.services.stickers.sets import STANDARD_BLOCK, STANDARD_IDEAS
+
+    assert set(STANDARD_IDEAS) == set(STANDARD_BLOCK)
+    # No quote characters inside ideas — quotes would order the model to letter text.
+    assert all('"' not in v and "«" not in v for v in STANDARD_IDEAS.values())
+
+
+def test_sheet_prompt_stays_lean() -> None:
+    # The brief must not creep back into a micromanaging wall of text: the
+    # scaffold around the ideas list stays under a hard budget.
+    prompt = build_sheet_prompt(_style(), ["Привет!"], age_clause="")
+    assert len(prompt) < 1400
+
+
+def test_sheet_prompt_pins_ideas_to_tiles_and_text_to_its_tile() -> None:
+    # Regression for the «Я проснулся. Технически.» sheet: one idea's caption
+    # bled under a NEIGHBOUR sticker (and left a fragment on its own), and a
+    # caption-only idea came out as a bare speech bubble with no character.
+    prompt = build_sheet_prompt(_style(), ["«Как там Ванька?»"], age_clause="")
+    # 1) idea → tile mapping is explicit and ordered;
+    assert "in its OWN tile, in list order" in prompt
+    # 2) lettering may not cross into (or repeat in) another tile;
+    assert "never spilling into or repeated in another tile" in prompt
+    # 3) caption-only ideas still contain the character — no text-only tiles.
+    assert "never a tile of just text or a bare speech bubble" in prompt
+    assert "the character appears in EVERY sticker" in prompt
+
+
+def test_sheet_prompt_keeps_custom_descriptions_unquoted() -> None:
+    # A free-form custom idea is passed through as a description (no added quotes),
+    # while an explicit caption the user quoted keeps its quotes.
+    prompt = build_sheet_prompt(_style(), ["дружит с компьютерами", "«Огонь!»"], age_clause="")
+    assert "1. дружит с компьютерами" in prompt
+    assert "«Огонь!»" in prompt
+    # A bare custom description is not force-wrapped in straight quotes.
+    assert '"дружит с компьютерами"' not in prompt
+
+
+def test_sheet_prompt_bans_decor_and_keeps_unused_tiles_empty() -> None:
+    # The background stays empty (one absolute clause instead of a noun list);
+    # 13 items on a 5×3 grid leave 2 spare tiles that must stay pure magenta.
+    thirteen = [f"идея {i}" for i in range(13)]
+    prompt = build_sheet_prompt(_style(), thirteen, age_clause="")
+    assert "nothing but the stickers is drawn on the magenta" in prompt
+    assert "unused tile" in prompt and "15 tiles" in prompt
+    # A full grid (15 of 15) has no spare tiles → no confusing clause.
+    fifteen = [f"идея {i}" for i in range(15)]
+    assert "unused tile" not in build_sheet_prompt(_style(), fifteen, age_clause="")
 
 
 def test_sheet_prompt_child_age_clause() -> None:
@@ -121,10 +186,9 @@ async def test_generate_sheet_retries_then_succeeds() -> None:
     assert len(model.calls) == 3  # 2 refusals + 1 success
 
 
-async def test_generate_sheet_gives_up_after_retries() -> None:
-    model = _RefuserModel(refuse_times=5)
+async def test_generate_sheet_gives_up_after_reformulations() -> None:
+    model = _RefuserModel(refuse_times=99)  # always refuses
     with pytest.raises(SheetRefusedError):
-        await generate_sheet(
-            model, b"CANON", _style(), ["Привет!"], subject_type="adult", max_refusal_retries=3
-        )
+        await generate_sheet(model, b"CANON", _style(), ["Привет!"], subject_type="adult")
+    # refusal doesn't fail over to other models (flash won't un-flag) → one rung of nudges
     assert len(model.calls) == 3

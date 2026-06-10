@@ -9,12 +9,13 @@ author's projects.
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 from sticker_service.config import get_settings
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
 _EXTRA_DENYLIST: list[str] = [
     "user_text",
@@ -75,6 +76,25 @@ def init_sentry(*, dsn: str | None = None, release: str | None = None) -> bool:
         event_scrubber=_build_scrubber(),
     )
     return True
+
+
+@contextlib.contextmanager
+def isolated_scope() -> Iterator[None]:
+    """Fork a fresh Sentry scope for the duration of one unit of work.
+
+    The bot runs every update on the same event loop, so without isolation the
+    ``component`` (and any other) tag set by :func:`tag_component` lives on the
+    shared current scope and bleeds into the next update's events. Wrapping each
+    update in this scope means tags set inside are discarded on exit and never
+    leak across handlers. No-op when Sentry is not installed.
+    """
+    try:
+        import sentry_sdk
+    except ImportError:  # pragma: no cover - sentry always present in deps
+        yield
+        return
+    with sentry_sdk.isolation_scope():
+        yield
 
 
 def tag_component(component: str, *, extra: Sequence[tuple[str, str]] = ()) -> None:

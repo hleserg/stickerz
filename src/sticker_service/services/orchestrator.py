@@ -10,20 +10,28 @@ that person (§3.2 / §B.4), so packs stay stylistically consistent.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sticker_service.config import get_settings
-from sticker_service.db import Character, Database, Pack
+from sticker_service.db import Character, Database, Pack, Sticker
 from sticker_service.db.models import SubjectType
 from sticker_service.services.canonical.engine import CanonicalEngine
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.canonical.schema import Style
 from sticker_service.services.models.base import ImageModel
 from sticker_service.services.postprocess import apply_watermark, grid_for, process_sheet
-from sticker_service.services.publish import Publisher
+from sticker_service.services.publish import (
+    MAX_STICKERS_PER_SET,
+    Publisher,
+    capacity_error,
+)
 from sticker_service.services.publish.naming import build_set_name
 from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers import (
@@ -36,7 +44,8 @@ from sticker_service.services.stickers import (
 
 logger = logging.getLogger(__name__)
 
-# Awaited with a short human stage label ("sheet", "slice", "emoji", "publish").
+# Awaited with a short stage label as work really progresses ("sheet", "clean",
+# "slice", "emoji", "publish") — the flow renders these as live status lines.
 StageCallback = Callable[[str], Awaitable[None]]
 StepCallback = Callable[[int, int], Awaitable[None]]
 
@@ -84,6 +93,10 @@ class Orchestrator:
         self._loader = loader
         self._storage = Path(storage_dir)
         self._engine = engine or CanonicalEngine(model)
+        # Global gate for CPU/RAM-heavy sheet postprocessing: each 4K key+slice
+        # holds ~0.6-0.9 GB and ~7 s of CPU, so concurrent users must queue here
+        # instead of stacking memory peaks until the box OOMs (CAPACITY.md).
+        self._postprocess_gate = asyncio.Semaphore(max(1, get_settings().postprocess_concurrency))
 
     async def build_canonical(
         self,
@@ -122,9 +135,15 @@ class Orchestrator:
         The source ``photo`` is kept too (alpha) so the canonical can be inspected
         and redrawn later.
         """
-        path = self._write(self._storage / "canonical" / f"{owner_id}_{name}.png", canonical)
+        path = await asyncio.to_thread(
+            self._write, self._storage / "canonical" / f"{owner_id}_{name}.png", canonical
+        )
         photo_path = (
-            str(self._write(self._storage / "photos" / f"{owner_id}_{name}.jpg", photo))
+            str(
+                await asyncio.to_thread(
+                    self._write, self._storage / "photos" / f"{owner_id}_{name}.jpg", photo
+                )
+            )
             if photo
             else None
         )
@@ -153,11 +172,15 @@ class Orchestrator:
             child_age=character.child_age,
             on_step=on_step,
         )
-        path = self._write(
-            self._storage / "canonical" / f"{character.owner_id}_{character.name}.png", canonical
+        path = await asyncio.to_thread(
+            self._write,
+            self._storage / "canonical" / f"{character.owner_id}_{character.name}.png",
+            canonical,
         )
-        photo_path = self._write(
-            self._storage / "photos" / f"{character.owner_id}_{character.name}.jpg", photo
+        photo_path = await asyncio.to_thread(
+            self._write,
+            self._storage / "photos" / f"{character.owner_id}_{character.name}.jpg",
+            photo,
         )
         await self._db.update_character_canonical(
             character.id, canonical_path=str(path), photo_path=str(photo_path)
@@ -209,6 +232,12 @@ class Orchestrator:
             pack = await self._db.get_pack(pack_id)
             if pack is None:
                 raise OrchestratorError("pack not found")
+            # Capacity pre-check BEFORE generating (and before the caller charges):
+            # an extend that can't fit the 120-sticker limit must fail for free,
+            # not after a paid generation that publish_extend would then reject.
+            current = await self._db.count_stickers(pack.id)
+            if len(captions) + current > MAX_STICKERS_PER_SET:
+                raise capacity_error(pack.title, current)
             character = await self._db.get_character(pack.character_id)
             title: str = pack.title
         elif mode == "reuse":
@@ -311,7 +340,39 @@ class Orchestrator:
     async def load_pack_stickers(self, pack_id: int) -> list[StickerInput]:
         """Read a pack's persisted sticker files + emoji from disk."""
         rows = await self._db.list_stickers(pack_id)
-        return [(Path(s.file_path).read_bytes(), s.emoji) for s in rows]
+        return await asyncio.to_thread(
+            lambda: [(Path(s.file_path).read_bytes(), s.emoji) for s in rows]
+        )
+
+    async def gc_stale_drafts(self, *, older_than_days: int) -> int:
+        """Delete unpublished drafts older than the window + their PNGs.
+
+        Drafts are ephemeral (created mid-flow, then published or abandoned), so
+        an old one is safe to remove; this bounds disk/DB growth on the small
+        VDS. Published packs are never touched. Returns the count removed; a
+        non-positive window disables the sweep.
+        """
+        if older_than_days <= 0:
+            return 0
+        cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
+        drafts = await self._db.list_stale_drafts(cutoff)
+        for pack in drafts:
+            stickers = await self._db.list_stickers(pack.id)
+            await self._db.delete_pack(pack.id)
+            self._remove_sticker_files(pack, stickers)
+        if drafts:
+            logger.info("gc: removed %d stale draft pack(s)", len(drafts))
+        return len(drafts)
+
+    def _remove_sticker_files(self, pack: Pack, stickers: list[Sticker]) -> None:
+        """Best-effort delete a draft's PNGs and its per-set directory."""
+        for sticker in stickers:
+            with contextlib.suppress(OSError):
+                Path(sticker.file_path).unlink(missing_ok=True)
+        set_dir = self._storage / "stickers" / pack.set_name
+        with contextlib.suppress(OSError):
+            if set_dir.is_dir():
+                shutil.rmtree(set_dir)
 
     async def publish_extend(
         self, *, owner_id: int, pack: Pack, stickers: list[StickerInput]
@@ -365,12 +426,14 @@ class Orchestrator:
         on_stage: StageCallback | None = None,
     ) -> tuple[list[bytes], list[str]]:
         style = self._require_style(character.style_id)
-        canonical = Path(character.canonical_path).read_bytes()
+        canonical = await asyncio.to_thread(Path(character.canonical_path).read_bytes)
         captions = (captions if captions is not None else build_caption_set())[:MAX_CAPTIONS]
         pages = [captions[i : i + PER_PAGE] for i in range(0, len(captions), PER_PAGE)]
-        await self._stage(on_stage, "sheet")
         stickers: list[bytes] = []
+        # Stage labels are emitted right BEFORE the work they describe, so the
+        # live status line always tells the truth about what is running now.
         for page_no, page in enumerate(pages, start=1):
+            await self._stage(on_stage, "sheet")
             logger.info("sheet: page %d/%d (%d captions)", page_no, len(pages), len(page))
             sheet = await generate_sheet(
                 self._model,
@@ -380,13 +443,24 @@ class Orchestrator:
                 subject_type=character.subject_type,
                 child_age=character.child_age,
             )
-            stickers.extend(process_sheet(sheet, grid=grid_for(len(page)), expected=len(page)))
+            await self._stage(on_stage, "clean")
+            # Chroma keying + component labeling over a 4K sheet is seconds of
+            # numpy/PIL CPU — off the event loop, or every other user stalls;
+            # and through the gate, or concurrent users stack ~0.7 GB peaks.
+            async with self._postprocess_gate:
+                sliced = await asyncio.to_thread(
+                    process_sheet, sheet, grid=grid_for(len(page)), expected=len(page)
+                )
+            await self._stage(on_stage, "slice")
+            stickers.extend(sliced)
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
         settings = get_settings()
         if settings.watermark_enabled:
-            stickers = [apply_watermark(s, text=settings.watermark_text) for s in stickers]
-        await self._stage(on_stage, "slice")
+            async with self._postprocess_gate:
+                stickers = await asyncio.to_thread(
+                    lambda: [apply_watermark(s, text=settings.watermark_text) for s in stickers]
+                )
         logger.info("slice: produced %d stickers total", len(stickers))
         await self._stage(on_stage, "emoji")
         emojis = await assign_emojis(self._model, stickers, captions)
@@ -401,8 +475,10 @@ class Orchestrator:
     async def _persist_pairs(self, pack: Pack, stickers: list[StickerInput], *, start: int) -> None:
         for offset, (image, emoji) in enumerate(stickers):
             position = start + offset
-            path = self._write(
-                self._storage / "stickers" / pack.set_name / f"{position:03d}.png", image
+            path = await asyncio.to_thread(
+                self._write,
+                self._storage / "stickers" / pack.set_name / f"{position:03d}.png",
+                image,
             )
             await self._db.add_sticker(
                 pack_id=pack.id, file_path=str(path), emoji=emoji, position=position

@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw
 from sticker_service.services.postprocess import (
     chroma_key,
     chroma_key_auto,
+    drop_outlier_fragments,
     drop_text_strips,
     encode_sticker,
     fit_to_512,
@@ -18,6 +19,7 @@ from sticker_service.services.postprocess import (
     process_sheet,
     slice_sheet,
 )
+from sticker_service.services.postprocess.slice_stickers import _clean_satellites, _opaque_area
 
 PINK = (240, 80, 160, 255)
 
@@ -55,14 +57,75 @@ def test_chroma_key_makes_background_transparent() -> None:
 
 
 def test_despill_reduces_magenta_fringe() -> None:
-    img = Image.new("RGBA", (2, 1), MAGENTA)
-    img.putpixel((1, 0), (255, 100, 255, 255))  # magenta-tinted foreground
+    # magenta | blue buffer | magenta-tinted foreground. The buffer keeps the tint
+    # from being absorbed by the hysteresis (it's a kept pixel), so despill applies.
+    img = Image.new("RGBA", (3, 1), MAGENTA)
+    img.putpixel((1, 0), (0, 0, 255, 255))  # opaque blue buffer (not magenta-ish)
+    img.putpixel((2, 0), (255, 100, 255, 255))  # magenta-tinted foreground
     keyed = chroma_key(img, tolerance=40.0)
     arr = np.asarray(keyed)
     assert arr[0, 0, 3] == 0  # pure magenta keyed out
-    assert arr[0, 1, 3] == 255  # foreground kept
-    assert arr[0, 1, 0] < 255  # red pulled down by despill
-    assert arr[0, 1, 2] < 255  # blue pulled down by despill
+    assert arr[0, 2, 3] == 255  # foreground kept
+    assert arr[0, 2, 0] < 255  # red pulled down by despill
+    assert arr[0, 2, 2] < 255  # blue pulled down by despill
+
+
+def test_hysteresis_absorbs_connected_wash_keeps_isolated_speck() -> None:
+    # A pink/purple wash (magenta-ish but outside the strict tolerance) bleeding off
+    # the magenta background must be removed; an isolated magenta speck *on* the
+    # figure (not connected to the background) must stay. (The user's "smear behind
+    # the contour" artifact.)
+    img = Image.new("RGBA", (20, 20), MAGENTA)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([5, 5, 14, 14], fill=(0, 0, 200, 255))  # blue figure
+    # Wash strip from the figure to the top border → connected to the magenta sea.
+    draw.rectangle([9, 0, 10, 5], fill=(230, 80, 210, 255))
+    img.putpixel((10, 10), (235, 70, 215, 255))  # isolated magenta-ish speck inside figure
+    arr = np.asarray(chroma_key(img))
+    assert arr[0, 0, 3] == 0  # background corner transparent
+    assert arr[2, 9, 3] == 0  # wash absorbed (was magenta-ish, connected to bg)
+    assert arr[10, 10, 3] == 255  # isolated speck on the figure kept
+    assert arr[10, 7, 3] == 255  # figure body kept
+
+
+def test_family_flood_removes_light_pink_wash_keeps_pink_inside_outline() -> None:
+    # Prod brak: a LIGHT watercolor wash (euclidean ~186 from #FF00FF — beyond any
+    # safe loose tolerance, light pinks read closer to white than to magenta) glued
+    # to the figure. The pink-family flood (min(R,B)-G) absorbs it at any lightness,
+    # while the white die-cut outline is a wall it cannot cross — the identical
+    # pink "clothing" INSIDE the outline survives.
+    img = Image.new("RGBA", (30, 20), MAGENTA)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([4, 4, 15, 15], fill=(255, 255, 255, 255))  # white die-cut figure
+    draw.rectangle([7, 7, 12, 12], fill=(232, 180, 216, 255))  # pink clothing inside
+    draw.rectangle([16, 6, 27, 13], fill=(232, 180, 216, 255))  # same pink as a wash
+    arr = np.asarray(chroma_key(img))
+    assert arr[8, 20, 3] == 0  # the wash is flooded away…
+    assert arr[8, 8, 3] == 255  # …the identical pink inside the outline stays
+    assert arr[5, 5, 3] == 255  # the white outline itself stays
+    assert arr[8, 8, 0] > 0  # clothing keeps colour (despill trims, not erases)
+
+
+def test_family_flood_spares_red_prop_touching_background() -> None:
+    # Red is not pink-family (its blue ≈ green): a red heart sitting straight on
+    # the background must NOT be flooded, however warm it looks.
+    img = Image.new("RGBA", (12, 12), MAGENTA)
+    ImageDraw.Draw(img).rectangle([4, 4, 7, 7], fill=(224, 48, 48, 255))
+    arr = np.asarray(chroma_key(img))
+    assert arr[5, 5, 3] == 255
+
+
+def test_wash_no_longer_inflates_sticker_size() -> None:
+    # The size brak: a wash glued to the figure inflated the component's bbox, so
+    # the character shrank after fitting to 512. Flooded away, the piece is exactly
+    # the figure's own box again.
+    sheet = Image.new("RGBA", (60, 40), MAGENTA)
+    draw = ImageDraw.Draw(sheet)
+    draw.rectangle([5, 5, 24, 34], fill=(255, 255, 255, 255))  # 20×30 figure
+    draw.rectangle([25, 10, 54, 20], fill=(226, 168, 204, 255))  # wash dragging right
+    pieces = slice_sheet(chroma_key(sheet))
+    assert len(pieces) == 1
+    assert pieces[0].size == (20, 30)
 
 
 def test_slice_sheet_finds_all_components() -> None:
@@ -117,6 +180,69 @@ def test_process_sheet_drops_text_only_sticker() -> None:
     draw.rectangle([60, 250, 190, 280], fill=(255, 255, 255, 255))  # detached caption line
     stickers = process_sheet(sheet)
     assert len(stickers) == 1  # only the character survives; text-only strip dropped
+
+
+def _tile_with_satellites() -> Image.Image:
+    """A keyed tile: central figure + a heart next to it + a far corner shard."""
+    tile = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(tile)
+    draw.rectangle([60, 40, 140, 170], fill=(0, 128, 255, 255))  # figure (10611 px)
+    draw.rectangle([142, 90, 160, 108], fill=(255, 0, 0, 255))  # heart, adjacent (361 px)
+    draw.rectangle([180, 5, 198, 23], fill=(0, 0, 0, 255))  # picture-frame corner (361 px)
+    return tile
+
+
+def test_clean_satellites_keeps_adjacent_drops_far_corner() -> None:
+    cleaned = _clean_satellites(_tile_with_satellites())
+    # figure (10611) + adjacent heart (361) kept; far corner shard (361) dropped.
+    assert _opaque_area(cleaned) == 10611 + 361
+    assert cleaned.size[0] <= 105  # trimmed box excludes the x≥180 corner
+
+
+def test_clean_satellites_single_component_is_noop() -> None:
+    tile = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    ImageDraw.Draw(tile).rectangle([20, 20, 80, 80], fill=(0, 128, 255, 255))
+    assert _opaque_area(_clean_satellites(tile)) == _opaque_area(tile)
+
+
+def test_drop_outlier_fragments_drops_lone_glyph() -> None:
+    # Two characters + one tall-but-small detached glyph (a lone «Я»): the glyph
+    # is NOT a short-wide strip, so drop_text_strips misses it — area catches it.
+    char = Image.new("RGBA", (300, 400), (0, 0, 0, 255))
+    glyph = Image.new("RGBA", (60, 250), (0, 0, 0, 255))  # tall, thin, small area
+    pieces = [char.copy(), char.copy(), glyph]
+    assert len(drop_text_strips(pieces)) == 3  # shape heuristic keeps the glyph
+    assert len(drop_outlier_fragments(pieces)) == 2  # area heuristic drops it
+
+
+def test_drop_outlier_fragments_respects_expected() -> None:
+    char = Image.new("RGBA", (300, 400), (0, 0, 0, 255))
+    glyph = Image.new("RGBA", (60, 250), (0, 0, 0, 255))
+    pieces = [char.copy(), char.copy(), glyph]
+    # expected already met by the real characters → never thin below it.
+    assert len(drop_outlier_fragments(pieces, expected=3)) == 3
+
+
+def test_drop_outlier_fragments_caps_to_expected_for_large_extra() -> None:
+    # The "7 for 6" bug: a sizeable stray fragment (>40% of the median, so the
+    # small-area heuristic can't catch it) must still be dropped when the count
+    # is known. The old budget could only remove sub-threshold pieces.
+    char = Image.new("RGBA", (300, 400), (0, 0, 0, 255))
+    extra = Image.new("RGBA", (220, 300), (0, 0, 0, 255))  # large-ish, not "small"
+    pieces = [char.copy() for _ in range(6)] + [extra]
+    kept = drop_outlier_fragments(pieces, expected=6)
+    assert len(kept) == 6  # capped to expected; the extra (smallest) is dropped
+
+
+def test_process_sheet_drops_lone_letter_tile() -> None:
+    # Two characters in a 1×3 grid plus a lone letter-sized tile in the third cell.
+    sheet = Image.new("RGBA", (360, 200), MAGENTA)
+    draw = ImageDraw.Draw(sheet)
+    draw.rectangle([20, 20, 120, 180], fill=(0, 128, 255, 255))  # character
+    draw.rectangle([140, 20, 240, 180], fill=(0, 200, 0, 255))  # character
+    draw.rectangle([285, 60, 305, 140], fill=(0, 0, 0, 255))  # lone glyph «Я»
+    stickers = process_sheet(sheet, grid=(1, 3), expected=2)
+    assert len(stickers) == 2  # the letter-only tile is dropped
 
 
 def test_process_sheet_end_to_end() -> None:

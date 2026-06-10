@@ -38,15 +38,26 @@ class MockImageModel(ImageModel):
         judge_score: float = 0.9,
         emoji: str = "😄",
         ask_answer: str = "нет",
+        text_response: str = "",
     ) -> None:
         self._refuse_on = refuse_on
         self._judge_score = judge_score
         self._emoji = emoji
         self._ask_answer = ask_answer
+        self._text_response = text_response
         #: prompts seen, in order — handy for asserting one-call-per-sheet etc.
         self.generate_calls: list[str] = []
+        #: text prompts seen (e.g. the meme-pool refresh instruction).
+        self.text_calls: list[str] = []
 
-    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
+    async def generate(
+        self,
+        prompt: str,
+        refs: Sequence[bytes] = (),
+        *,
+        model: str | None = None,
+        image_size: str | None = None,
+    ) -> bytes:
         self.generate_calls.append(prompt)
         if self._refuse_on is not None and self._refuse_on in prompt:
             raise ModelRefusalError("mock refusal (safety filter simulation)")
@@ -61,3 +72,7 @@ class MockImageModel(ImageModel):
 
     async def ask(self, image: bytes, question: str) -> str:
         return self._ask_answer
+
+    async def generate_text(self, prompt: str) -> str:
+        self.text_calls.append(prompt)
+        return self._text_response

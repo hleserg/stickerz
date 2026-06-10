@@ -39,7 +39,9 @@ async def test_assign_emoji_falls_back_on_invalid() -> None:
 class _ErroringModel(ImageModel):
     name = "err"
 
-    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:  # pragma: no cover
+    async def generate(  # pragma: no cover
+        self, prompt: str, refs: Sequence[bytes] = (), **_: object
+    ) -> bytes:
         return b""
 
     async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:  # pragma: no cover

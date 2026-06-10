@@ -22,7 +22,11 @@ from sticker_service.handlers.flow import (
     NewPack,
     _alpha_gate,
     _generation_gate,
+    _prev_state,
     _progress_bar,
+    _retry_kb,
+    _review_text,
+    _screen_for,
     cmd_addto,
     cmd_cancel,
     cmd_mychars,
@@ -137,6 +141,156 @@ async def test_cancel_when_idle_is_noop() -> None:
     assert "Нечего отменять" in message.answer.await_args.args[0]
 
 
+def test_canonical_progress_text_tells_real_stage() -> None:
+    # While later steps run → style line with the bar; the final callback lands
+    # right after the last advisory gate → the "checking the drawing" line.
+    from sticker_service.handlers.flow import _canonical_progress_text
+
+    mid = _canonical_progress_text(1, 3)
+    assert "Придаю рисунку" in mid and "1/3" in mid and "▰" in mid
+    assert "Проверяю рисунок" in _canonical_progress_text(3, 3)
+    assert "Проверяю рисунок" in _canonical_progress_text(1, 1)  # single-step style
+
+
+async def test_enter_captions_extend_drops_stale_fresh_state(db: Database) -> None:
+    from sticker_service.handlers.flow import _enter_captions
+
+    state = _state()
+    # Leftover from a previous, unfinished /new flow sitting in the persistent FSM.
+    await state.update_data(
+        mode="fresh", name="Серг", photo=b"X", style_id="watercolor", subject="adult"
+    )
+    callback = AsyncMock()
+    callback.data = "extend:7"
+    callback.from_user = SimpleNamespace(id=1)
+    await _enter_captions(callback, state, db, mode="extend", pack_id=7)
+    data = await state.get_data()
+    assert data["mode"] == "extend" and data["pack_id"] == 7
+    # Stale fresh-flow data is wiped so it can't hijack publish into a new pack.
+    assert "name" not in data and "photo" not in data and "style_id" not in data
+
+
+async def test_enter_captions_fresh_keeps_collected_state(db: Database) -> None:
+    from sticker_service.handlers.flow import _enter_captions
+
+    state = _state()
+    await state.update_data(photo=b"X", name="Лёша", style_id="watercolor", subject="adult")
+    callback = AsyncMock()
+    callback.data = "style:watercolor"
+    callback.from_user = SimpleNamespace(id=1)
+    await _enter_captions(callback, state, db, mode="fresh", style_id="watercolor")
+    data = await state.get_data()
+    assert data["mode"] == "fresh"
+    assert data["photo"] == b"X" and data["name"] == "Лёша"  # collected data preserved
+
+
+async def test_enter_captions_seeds_full_standard_default(db: Database) -> None:
+    # The pre-fill is the plain full standard block again; the meme pool plays
+    # through the 🎲 button on the idea-input step, not through pre-seeded items.
+    from sticker_service.handlers.flow import _enter_captions
+    from sticker_service.services.stickers import STANDARD_BLOCK
+
+    state = _state()
+    callback = AsyncMock()
+    callback.data = "style:watercolor"
+    callback.from_user = SimpleNamespace(id=1)
+    await _enter_captions(callback, state, db, mode="fresh", style_id="watercolor")
+    data = await state.get_data()
+    assert data["std_sel"] == list(range(len(STANDARD_BLOCK)))
+    assert data["custom"] == []
+    assert "meme_items" not in data and "meme_sel" not in data
+
+
+async def test_enter_captions_in_alpha_seeds_wallet(db: Database) -> None:
+    # In alpha the FSM carries {"alpha": True, "bal": credits} so the pure
+    # screen renderer can show the price/balance line without a DB handle.
+    from sticker_service.db import DEFAULT_CREDITS
+    from sticker_service.handlers.flow import _enter_captions
+
+    await modes.set_mode(db, modes.ALPHA)
+    state = _state()
+    callback = AsyncMock()
+    callback.from_user = SimpleNamespace(id=424242)
+    await _enter_captions(callback, state, db, mode="reuse", character_id=3)
+    data = await state.get_data()
+    assert data["alpha"] is True and data["bal"] == DEFAULT_CREDITS
+
+
+def test_money_line_shows_price_and_balance_in_alpha_only() -> None:
+    from sticker_service.handlers.flow import _money_line
+
+    assert _money_line({}) is None  # debug mode / admin → no money talk
+    line = _money_line({"alpha": True, "mode": "fresh", "bal": 5}) or ""
+    assert "спишет 1 пак" in line and "2.5" in line and "бесплатны" in line
+    half = _money_line({"alpha": True, "mode": "extend"}) or ""
+    assert "0.5" in half  # half-price actions say so even without a balance
+
+
+def test_screens_carry_the_money_line_in_alpha() -> None:
+    from sticker_service.handlers.flow import NewPack, _screen_for
+
+    wallet = {"alpha": True, "mode": "fresh", "bal": 6, "std_sel": [0], "custom": []}
+    for target in (NewPack.select_std.state, NewPack.review.state):
+        text, _markup = _screen_for(target, wallet, None)
+        assert "💸" in text and "💎" in text
+        plain, _markup = _screen_for(target, {"std_sel": [0], "custom": []}, None)
+        assert "💸" not in plain  # outside alpha the screens stay money-free
+
+
+def test_enter_custom_screen_offers_random_prompt_button() -> None:
+    from sticker_service.handlers.flow import NewPack, _screen_for
+
+    _text, markup = _screen_for(NewPack.enter_custom.state, {}, None)
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    assert any(b.callback_data == "randidea" for b in buttons)
+    assert any("Случайный промт" in b.text for b in buttons)
+
+
+def test_random_idea_kb_offers_take_reroll_and_copy() -> None:
+    from sticker_service.handlers.flow import random_idea_kb
+
+    markup = random_idea_kb("Пьёт кофе. Подпись: «Первый глоток.»")
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    assert any(b.callback_data == "randtake" for b in buttons)
+    assert any(b.callback_data == "randidea" for b in buttons)  # reroll
+    copies = [b for b in buttons if b.copy_text is not None]
+    assert len(copies) == 1  # paste-into-input helper
+    assert copies[0].copy_text.text.startswith("Пьёт кофе.")
+
+
+async def test_random_idea_roll_then_take_appends_custom(db: Database) -> None:
+    from sticker_service.handlers.flow import on_random_idea, on_random_take
+
+    state = _state()
+    await state.update_data(std_sel=[0], custom=[])
+    callback = AsyncMock()
+    callback.data = "randidea"
+    callback.message = None  # no real message → screen edit is skipped, state still set
+    await on_random_idea(callback, state, db)
+    item = (await state.get_data())["rand_idea"]
+    assert "Подпись: «" in item or item.endswith("Без подписи.")  # prompt-ready
+    take = AsyncMock()
+    take.data = "randtake"
+    await on_random_take(take, state)
+    data = await state.get_data()
+    assert data["custom"] == [item]
+    assert data["rand_idea"] is None  # consumed
+
+
+async def test_random_take_respects_the_15_cap() -> None:
+    from sticker_service.handlers.flow import on_random_take
+
+    state = _state()
+    await state.update_data(
+        std_sel=list(range(13)), custom=["а", "б"], rand_idea="Идея. Без подписи."
+    )
+    callback = AsyncMock()
+    await on_random_take(callback, state)
+    data = await state.get_data()
+    assert data["custom"] == ["а", "б"]  # unchanged — the cap held
+    assert "15" in callback.answer.await_args.args[0]  # unobtrusive toast
+
+
 async def test_alpha_gate_blocks_unapproved_then_allows(db: Database) -> None:
     await modes.set_mode(db, modes.ALPHA)
     uid = 99999  # not an admin
@@ -219,3 +373,95 @@ async def test_addto_lists_packs(db: Database) -> None:
     message.from_user = SimpleNamespace(id=1)
     await cmd_addto(message, db)
     assert message.answer.await_args.kwargs.get("reply_markup") is not None
+
+
+# --- single-message wizard: back map + screen rendering ----------------------
+
+
+def test_prev_state_back_map() -> None:
+    assert _prev_state(NewPack.subject.state, {}) == NewPack.name.state
+    assert _prev_state(NewPack.child_age.state, {}) == NewPack.subject.state
+    # style goes back to subject for adults, to age for children (§B.4)
+    assert _prev_state(NewPack.style.state, {"subject": "adult"}) == NewPack.subject.state
+    assert _prev_state(NewPack.style.state, {"subject": "child"}) == NewPack.child_age.state
+    assert _prev_state(NewPack.select_std.state, {}) == NewPack.style.state
+    assert _prev_state(NewPack.ask_custom.state, {}) == NewPack.select_std.state
+    assert _prev_state(NewPack.review.state, {}) == NewPack.ask_custom.state
+    assert _prev_state(NewPack.photo.state, {}) is None  # no back from the entry step
+    assert _prev_state(None, {}) is None
+
+
+def test_prev_state_enter_custom_returns_to_its_entry_point() -> None:
+    # entered from review's "add" → back to review; otherwise back to ask_custom
+    assert (
+        _prev_state(NewPack.enter_custom.state, {"custom_back": NewPack.review.state})
+        == NewPack.review.state
+    )
+    assert _prev_state(NewPack.enter_custom.state, {}) == NewPack.ask_custom.state
+
+
+def test_screen_for_renders_every_step(loader: StyleLoader) -> None:
+    data = {"std_sel": [0, 1], "page": 0, "custom": ["Своё"]}
+    for target in (
+        NewPack.name.state,
+        NewPack.subject.state,
+        NewPack.child_age.state,
+        NewPack.style.state,
+        NewPack.select_std.state,
+        NewPack.ask_custom.state,
+        NewPack.enter_custom.state,
+        NewPack.review.state,
+    ):
+        text, markup = _screen_for(target, data, loader)
+        assert isinstance(text, str) and text
+        assert markup is not None  # every step carries an inline keyboard
+
+
+def test_screen_for_style_requires_loader() -> None:
+    with pytest.raises(ValueError, match="StyleLoader"):
+        _screen_for(NewPack.style.state, {}, None)
+
+
+def test_review_text_numbers_captions_and_handles_empty() -> None:
+    listing = _review_text(["Привет", "Пока"])
+    assert "1. Привет" in listing and "2. Пока" in listing
+    assert "ничего не выбрано" in _review_text([])
+
+
+def test_retry_kb_counts_down_then_activates() -> None:
+    # While counting down the button is inactive (a "wait" callback) and shows the
+    # remaining seconds; at zero it becomes the live "try again" retry button.
+    waiting = _retry_kb(20).inline_keyboard[0][0]
+    assert "20" in waiting.text and waiting.callback_data == "retry:wait"
+    ready = _retry_kb(0).inline_keyboard[0][0]
+    assert "ещё раз" in ready.text.lower() and ready.callback_data == "retry:gen"
+
+
+def test_review_text_shows_limit_notice_only_when_full() -> None:
+    from sticker_service.services.stickers.sets import MAX_CAPTIONS
+
+    full = [f"c{i}" for i in range(MAX_CAPTIONS)]
+    assert "максимум" in _review_text(full)  # at the cap → explain the 15-per-pass limit
+    assert "максимум" not in _review_text(full[:-1])  # one below → no notice
+
+
+def test_single_flight_guard_blocks_reentry() -> None:
+    # A second paid/publish action for the same user is refused while one runs,
+    # which prevents double-tap double-spend / duplicate packs.
+    from sticker_service.handlers.flow import _begin_action, _end_action
+
+    assert _begin_action(123) is True  # first acquire wins
+    assert _begin_action(123) is False  # re-entry blocked while in-flight
+    _end_action(123)
+    assert _begin_action(123) is True  # released → acquirable again
+    _end_action(123)
+
+
+def test_std_checklist_has_bulk_select_buttons() -> None:
+    # The standard-caption menu offers "select all" / "clear all" shortcuts.
+    from sticker_service.handlers.flow import std_checklist_kb
+
+    markup = std_checklist_kb(selected=[0], page=0)
+    callbacks = {b.callback_data for row in markup.inline_keyboard for b in row}
+    assert "stdall" in callbacks
+    assert "stdclear" in callbacks

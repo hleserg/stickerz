@@ -1,8 +1,10 @@
 """Alpha-test budget accounting (in USD) and low-budget alerts.
 
 Total generations come from the ``generation_done`` analytics events; the total
-cost is generations × a per-generation cost estimate (configurable). Alerts at
-≤$10 and ≤$5 remaining fire once each (re-armed when the budget is raised).
+cost weights them by mode — a full pack (fresh) costs ``cost_per_gen``, while a
+half-price action (reuse/extend: no canonical, just one sheet) costs half of
+it, mirroring the real Gemini spend (§12, HLE-1040). Alerts at ≤$10 and ≤$5
+remaining fire once each (re-armed when the budget is raised).
 """
 
 from __future__ import annotations
@@ -10,7 +12,13 @@ from __future__ import annotations
 from sticker_service.db import Database
 from sticker_service.services import analytics
 
-DEFAULT_COST_PER_GEN = 0.7  # USD per generated pack (rough, §12)
+# USD per FULL generated pack. Measured June 2026 (services/cost.py prices):
+# canonical 2–3 × pro@1K ($0.27–0.40) + sheet pro@4K ($0.24) + vision/refs
+# (~$0.015) ≈ $0.52–0.66 → 0.65 is the conservative full-pack estimate.
+DEFAULT_COST_PER_GEN = 0.65
+# Pack-building modes billed to the user at half price — and costing roughly
+# half for us too (one 4K sheet, no canonical pipeline).
+HALF_COST_MODES = ("reuse", "extend")
 
 _BUDGET_KEY = "alpha_budget"
 _COST_KEY = "cost_per_gen"
@@ -38,7 +46,11 @@ async def total_generations(db: Database) -> int:
 
 
 async def total_cost(db: Database) -> float:
-    return await total_generations(db) * await cost_per_gen(db)
+    """All-time spend estimate: full-price gens × per + half-price gens × per/2."""
+    per = await cost_per_gen(db)
+    total = await db.count_events(analytics.GENERATION_DONE)
+    half = await db.count_events_with_modes(analytics.GENERATION_DONE, HALF_COST_MODES)
+    return (total - half) * per + half * per / 2
 
 
 async def remaining_budget(db: Database) -> float:

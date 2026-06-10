@@ -18,7 +18,14 @@ from collections.abc import Awaitable, Callable
 from sticker_service.db.models import SubjectType
 from sticker_service.services.canonical.gate import run_gate
 from sticker_service.services.canonical.schema import PipelineStep, Style
-from sticker_service.services.models.base import ImageModel, ModelRefusalError
+from sticker_service.services.models.base import (
+    ImageModel,
+    Ladder,
+    ModelError,
+    ModelRefusalError,
+    generate_via_ladder,
+)
+from sticker_service.services.models.gemini import CANONICAL_LADDER
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +34,14 @@ StepCallback = Callable[[int, int], Awaitable[None]]
 
 #: Advisory geometry threshold: below this we log an alert (no re-shoot).
 DEFAULT_ALERT_THRESHOLD = 0.25
+
+#: Resolves ``{clean_bg}`` — the pipeline-wide instruction to isolate the
+#: subject on a plain background (no props/furniture/text/scenery). It is a
+#: product-wide constraint, not a per-style choice, so it lives here once
+#: instead of being duplicated across every style's first-step prompt.
+CLEAN_BACKGROUND_CLAUSE = (
+    "Помести человека на простом однотонном фоне — без предметов, мебели, текста и сцены позади."
+)
 
 # Appended on a child-safety refusal to steer past the filter (§6). The empty
 # first element means "try the plain prompt first". Russian — matches the prompts
@@ -71,9 +86,11 @@ class CanonicalEngine:
         model: ImageModel,
         *,
         alert_threshold: float = DEFAULT_ALERT_THRESHOLD,
+        ladder: Ladder = CANONICAL_LADDER,
     ) -> None:
         self._model = model
         self._alert_threshold = alert_threshold
+        self._ladder = ladder
 
     async def run(
         self,
@@ -151,7 +168,14 @@ class CanonicalEngine:
         gate_prev: bytes,
     ) -> bytes:
         logger.info("canonical step %d: generating (refs=%s)", step.step, step.refs)
-        image = await self._generate_with_refusal_retry(prompt, refs, step)
+        try:
+            image = await generate_via_ladder(
+                self._model, prompt, refs, self._ladder, reformulations=_WHOLESOME_NUDGES
+            )
+        except ModelRefusalError as exc:
+            raise CanonicalError(
+                f"step {step.step}: model refused generation after reformulations ({exc})"
+            ) from exc
         # Advisory gate only: a real face vs a stylised drawing can't be a hard
         # pass/fail, so we never re-shoot — just alert on a large deviation (§4.3).
         result = await run_gate(
@@ -169,27 +193,25 @@ class CanonicalEngine:
         return image
 
     async def _precheck_skips(self, step: PipelineStep, prev: bytes) -> bool:
-        """Ask the configured yes/no question about ``prev``; skip the step on yes."""
+        """Ask the configured yes/no question about ``prev``; skip the step on yes.
+
+        The pre-check is an optimization (skip a redundant turn-to-camera step), so
+        a vision-model outage must not abort the run — on failure we simply don't
+        skip and run the step normally.
+        """
         if not step.skip_if_yes:
             return False
-        answer = await self._model.ask(prev, step.skip_if_yes)
+        try:
+            answer = await self._model.ask(prev, step.skip_if_yes)
+        except ModelError as exc:
+            logger.warning(
+                "canonical step %d: pre-check vision unavailable (%s); running step",
+                step.step,
+                str(exc)[:100],
+            )
+            return False
         logger.info("canonical step %d: pre-check answer=%r", step.step, answer)
         return _is_yes(answer)
-
-    async def _generate_with_refusal_retry(
-        self, prompt: str, refs: list[bytes], step: PipelineStep
-    ) -> bytes:
-        """Generate, retrying with a wholesome reformulation on a safety refusal (§6)."""
-        last: ModelRefusalError | None = None
-        for nudge in _WHOLESOME_NUDGES:
-            try:
-                return await self._model.generate(prompt + nudge, refs)
-            except ModelRefusalError as exc:
-                last = exc
-                logger.warning("canonical step %d: refused (%s); reformulating", step.step, exc)
-        raise CanonicalError(
-            f"step {step.step}: model refused generation after reformulations ({last})"
-        )
 
     @staticmethod
     def _collect_refs(
@@ -219,4 +241,6 @@ class CanonicalEngine:
     @staticmethod
     def _resolve(prompt: str, age_clause: str) -> str:
         # Only known placeholders are substituted (schema already validated them).
-        return prompt.replace("{age_clause}", age_clause)
+        return prompt.replace("{age_clause}", age_clause).replace(
+            "{clean_bg}", CLEAN_BACKGROUND_CLAUSE
+        )

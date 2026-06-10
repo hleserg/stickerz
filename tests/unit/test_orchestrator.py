@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator, Sequence
 from io import BytesIO
 from pathlib import Path
@@ -11,7 +12,7 @@ import pytest_asyncio
 from PIL import Image, ImageDraw
 
 from sticker_service.config import get_settings
-from sticker_service.db import Database
+from sticker_service.db import Database, Pack
 from sticker_service.services.canonical import StyleLoader
 from sticker_service.services.models.base import ImageModel
 from sticker_service.services.orchestrator import Orchestrator, OrchestratorError
@@ -53,9 +54,10 @@ class _SheetModel(ImageModel):
     def __init__(self) -> None:
         self.generate_calls: list[str] = []
 
-    async def generate(self, prompt: str, refs: Sequence[bytes] = ()) -> bytes:
+    async def generate(self, prompt: str, refs: Sequence[bytes] = (), **_: object) -> bytes:
         self.generate_calls.append(prompt)
-        n = prompt.count('"') // 2 or 1  # captions are quoted in the sheet prompt
+        # One numbered "Ideas:" line per sticker (standard items are no longer quoted).
+        n = len(re.findall(r"^\d+\. ", prompt, flags=re.MULTILINE)) or 1
         return _sheet_bytes(n)
 
     async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:
@@ -164,7 +166,11 @@ async def test_create_pack_reports_stages(
         stages.append(label)
 
     await orch.create_pack(owner_id=1, character=char, on_stage=on_stage)
-    assert stages == ["sheet", "slice", "emoji", "publish"]
+    assert stages == ["sheet", "clean", "slice", "emoji", "publish"]
+    # Contract with the UI: every emitted label has a live status line.
+    from sticker_service.handlers.flow import _STAGE_TEXT
+
+    assert set(stages) <= set(_STAGE_TEXT)
 
 
 async def test_one_character_many_packs(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
@@ -337,6 +343,35 @@ async def test_build_for_review_extend_skips_draft(
     assert len(await db.list_packs(13)) == 1
 
 
+async def test_build_for_review_extend_rejects_when_no_room(
+    db: Database, loader: StyleLoader, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An extend that can't fit the 120-limit fails for free, before generating."""
+    from sticker_service.services.publish import MAX_STICKERS_PER_SET, PackFullError
+
+    bot = _FakeBot()
+    orch = _orchestrator(db, loader, bot, tmp_path)
+    char = await orch.save_character(
+        owner_id=14,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(EXPECTED),
+    )
+    await orch.create_pack(owner_id=14, character=char)
+    pack = (await db.list_packs(14))[0]
+
+    async def _full(_pack_id: int) -> int:
+        return MAX_STICKERS_PER_SET  # pretend the set is already at the limit
+
+    monkeypatch.setattr(db, "count_stickers", _full)
+    generate_calls_before = len(bot.added)
+    with pytest.raises(PackFullError):
+        await orch.build_for_review(mode="extend", owner_id=14, captions=["Эй"], pack_id=pack.id)
+    assert len(bot.added) == generate_calls_before  # nothing was generated/appended
+
+
 async def test_build_for_review_validates_required_args(
     db: Database, loader: StyleLoader, tmp_path: Path
 ) -> None:
@@ -392,3 +427,133 @@ async def test_unknown_style_raises(db: Database, loader: StyleLoader, tmp_path:
         await orch.build_canonical(
             photo=b"P", style_id="nope", subject_type="adult", child_age=None
         )
+
+
+# --- draft garbage collection ------------------------------------------------
+
+
+async def _backdate_pack(db: Database, pack_id: int, days: int) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    old = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    await db._conn.execute("UPDATE packs SET created_at = ? WHERE id = ?", (old, pack_id))
+    await db._conn.commit()
+
+
+async def _draft_with_files(orch: Orchestrator, db: Database, owner: int) -> Pack:
+    char = await orch.save_character(
+        owner_id=owner,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(3),
+    )
+    stickers = await orch.build_stickers(char)
+    return await orch.save_draft(owner_id=owner, character=char, title="D", stickers=stickers)
+
+
+async def test_gc_removes_stale_draft_and_files(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    draft = await _draft_with_files(orch, db, owner=1)
+    set_dir = tmp_path / "stickers" / draft.set_name
+    assert set_dir.is_dir() and any(set_dir.iterdir())  # PNGs persisted
+    await _backdate_pack(db, draft.id, days=60)
+
+    removed = await orch.gc_stale_drafts(older_than_days=30)
+
+    assert removed == 1
+    assert await db.get_pack(draft.id) is None
+    assert await db.count_stickers(draft.id) == 0
+    assert not set_dir.exists()  # files swept too
+
+
+async def test_gc_keeps_published_and_recent(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    char = await orch.save_character(
+        owner_id=2,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(3),
+    )
+    await orch.create_pack(owner_id=2, character=char)  # published
+    published = (await db.list_packs(2))[0]
+    await _backdate_pack(db, published.id, days=60)  # old, but published → keep
+    recent_draft = await _draft_with_files(orch, db, owner=2)  # within window → keep
+
+    removed = await orch.gc_stale_drafts(older_than_days=30)
+
+    assert removed == 0
+    assert await db.get_pack(published.id) is not None
+    assert await db.get_pack(recent_draft.id) is not None
+
+
+async def test_gc_disabled_with_nonpositive_window(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    draft = await _draft_with_files(orch, db, owner=3)
+    await _backdate_pack(db, draft.id, days=999)
+    assert await orch.gc_stale_drafts(older_than_days=0) == 0
+    assert await db.get_pack(draft.id) is not None  # untouched when disabled
+
+
+async def test_postprocess_gate_bounds_concurrent_sheet_keying(
+    db: Database, loader: StyleLoader, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Heavy postprocess from many users queues at the global gate (max 2).
+
+    One 4K key+slice holds ~0.7 GB; without the gate four simultaneous users
+    would stack peaks until the VDS OOMs (see docs/operations/CAPACITY.md).
+    """
+    import asyncio
+    import threading
+
+    lock = threading.Lock()
+    running = 0
+    max_seen = 0
+
+    def tiny_png() -> bytes:
+        buf = BytesIO()
+        Image.new("RGBA", (64, 64), (0, 120, 200, 255)).save(buf, format="PNG")
+        return buf.getvalue()
+
+    sticker = tiny_png()
+
+    def fake_process_sheet(_sheet: bytes, *, grid=None, expected=None) -> list[bytes]:
+        nonlocal running, max_seen
+        import time
+
+        with lock:
+            running += 1
+            max_seen = max(max_seen, running)
+        time.sleep(0.12)  # long enough for all four tasks to pile up
+        with lock:
+            running -= 1
+        return [sticker]
+
+    monkeypatch.setattr("sticker_service.services.orchestrator.process_sheet", fake_process_sheet)
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    chars = []
+    for i in range(4):
+        path = tmp_path / f"canon{i}.png"
+        path.write_bytes(sticker)
+        chars.append(
+            await db.add_character(
+                owner_id=100 + i,
+                name=f"C{i}",
+                style_id="watercolor",
+                subject_type="adult",
+                canonical_path=str(path),
+            )
+        )
+    results = await asyncio.gather(*(orch.build_stickers(c, captions=["Привет!"]) for c in chars))
+    assert all(len(r) == 1 for r in results)
+    assert max_seen <= 2  # the gate held: never more than 2 keyings at once
+    assert max_seen >= 2  # and it actually ran in parallel, not serialized

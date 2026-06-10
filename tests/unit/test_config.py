@@ -69,3 +69,10 @@ def test_admin_id_set_parses_and_ignores_blanks(monkeypatch: pytest.MonkeyPatch)
 
 def test_admin_id_set_empty_by_default() -> None:
     assert get_settings().admin_id_set == frozenset()
+
+
+def test_admin_id_list_skips_non_integer_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A typo must not hard-fail every admin/access check — bad tokens are skipped.
+    monkeypatch.setenv("APP_ADMIN_IDS", "111, oops, 222")
+    get_settings.cache_clear()
+    assert get_settings().admin_id_list == [111, 222]

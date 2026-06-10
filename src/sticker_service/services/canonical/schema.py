@@ -15,7 +15,10 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 # Placeholders the engine knows how to resolve at run time (§5.1.2). A prompt
 # referencing anything else fails validation, so the style is skipped.
-KNOWN_PLACEHOLDERS = frozenset({"age_clause"})
+# ``clean_bg`` is the pipeline-wide "isolate the subject on a plain background"
+# clause shared by every style's first step — kept in one place (the engine)
+# instead of copy-pasted into each YAML.
+KNOWN_PLACEHOLDERS = frozenset({"age_clause", "clean_bg"})
 
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 _STEP_REF_RE = re.compile(r"^step_(\d+)$")
