@@ -100,7 +100,9 @@ async def run() -> None:
 
     logger.info("Starting long-polling as @%s", me.username)
     try:
-        await dp.start_polling(bot)
+        # Bound concurrent update-handler tasks: without a cap, update bursts
+        # (or button spam) fan out into unbounded coroutines and memory.
+        await dp.start_polling(bot, tasks_concurrency_limit=settings.polling_tasks_limit or None)
     finally:
         for task in (refresh_task, maintenance_task):
             task.cancel()

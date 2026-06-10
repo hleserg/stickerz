@@ -8,9 +8,11 @@ retry once — no proactive availability check (§3.3).
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import BufferedInputFile, InputSticker
 
 from sticker_service.services.publish.naming import build_set_name, sticker_set_link
@@ -18,9 +20,39 @@ from sticker_service.services.publish.naming import build_set_name, sticker_set_
 logger = logging.getLogger(__name__)
 
 MAX_STICKERS_PER_SET = 120
+# How many RetryAfter sleeps to tolerate per API call before giving up.
+_FLOOD_RETRIES = 3
+# Telegram's retry_after is uncapped (can announce minutes-hours under abuse
+# heuristics). Sleeping that out would pin the user's single-flight slot and a
+# polling task slot — longer waits are re-raised so the user gets the friendly
+# error now and can simply retry later (the resume marker makes that safe).
+_FLOOD_WAIT_MAX_S = 60
 
 # A (sticker_png_bytes, emoji) pair.
 StickerInput = tuple[bytes, str]
+
+# Awaited after each sticker lands in the set (position, sticker) — lets the
+# caller persist progress so a crash mid-batch never desyncs DB from Telegram.
+AddedCallback = Callable[[int, StickerInput], Awaitable[None]]
+
+
+async def _flood_wait[T](call: Callable[[], Awaitable[T]], *, retries: int = _FLOOD_RETRIES) -> T:
+    """Await ``call``, sleeping out short Telegram RetryAfter waits.
+
+    Re-raises immediately when the announced wait exceeds ``_FLOOD_WAIT_MAX_S``
+    or after ``retries`` sleeps — a pathological 429 must become a visible
+    error, not a multi-hour silent hang.
+    """
+    for _attempt in range(retries):
+        try:
+            return await call()
+        except TelegramRetryAfter as exc:
+            if exc.retry_after > _FLOOD_WAIT_MAX_S:
+                logger.warning("telegram flood wait %ss exceeds cap — giving up", exc.retry_after)
+                raise
+            logger.warning("telegram flood wait: sleeping %ss", exc.retry_after)
+            await asyncio.sleep(exc.retry_after)
+    return await call()
 
 
 class PackFullError(RuntimeError):
@@ -89,8 +121,10 @@ class Publisher:
         for attempt in range(attempts):
             name = build_set_name(title, self._bot_username)
             try:
-                await self._bot.create_new_sticker_set(  # type: ignore[attr-defined]
-                    user_id=user_id, name=name, title=title, stickers=input_stickers
+                await _flood_wait(
+                    lambda name=name: self._bot.create_new_sticker_set(  # type: ignore[attr-defined]
+                        user_id=user_id, name=name, title=title, stickers=input_stickers
+                    )
                 )
             except Exception as exc:  # narrow by message below, then re-raise
                 if attempt < attempts - 1 and _is_name_occupied(exc):
@@ -111,6 +145,9 @@ class Publisher:
         from sticker_service.services.postprocess import make_cover
 
         try:
+            # No flood-wait here on purpose: the cover is decorative, and the
+            # user is waiting for the publish result — a 429 falls straight
+            # into the best-effort except instead of stalling completion.
             cover = make_cover(secrets.choice(list(stickers))[0])
             await self._bot.set_sticker_set_thumbnail(  # type: ignore[attr-defined]
                 name=name,
@@ -128,14 +165,38 @@ class Publisher:
         set_name: str,
         stickers: Sequence[StickerInput],
         current_count: int,
+        on_added: AddedCallback | None = None,
     ) -> None:
-        """Append stickers to an existing set, respecting the 120 limit."""
+        """Append stickers to an existing set, respecting the 120 limit.
+
+        ``on_added`` (if given) is awaited after each sticker actually lands,
+        so the caller can persist progress — a crash mid-batch then leaves the
+        DB at most one sticker behind the Telegram set, and the orchestrator's
+        resume marker can retry the same batch without duplicates.
+        """
         if current_count + len(stickers) > MAX_STICKERS_PER_SET:
             raise capacity_error(set_name, current_count)
         for i, (image, emoji) in enumerate(stickers, start=current_count):
-            await self._bot.add_sticker_to_set(  # type: ignore[attr-defined]
-                user_id=user_id, name=set_name, sticker=_input_sticker(image, emoji, i)
+            await _flood_wait(
+                lambda i=i, image=image, emoji=emoji: self._bot.add_sticker_to_set(  # type: ignore[attr-defined]
+                    user_id=user_id, name=set_name, sticker=_input_sticker(image, emoji, i)
+                )
             )
+            if on_added is not None:
+                await on_added(i, (image, emoji))
+
+    async def live_count(self, set_name: str) -> int | None:
+        """The set's actual sticker count per Telegram; None when the bot can't tell.
+
+        RetryAfter (and other API errors) propagate: deciding whether to resume
+        or skip MUST NOT silently degrade under flood — a wrong guess here is
+        exactly what duplicates or drops stickers.
+        """
+        getter = getattr(self._bot, "get_sticker_set", None)
+        if getter is None:  # test doubles / providers without the method
+            return None
+        sticker_set = await _flood_wait(lambda: getter(name=set_name))
+        return len(sticker_set.stickers)
 
     @staticmethod
     def link(set_name: str) -> str:

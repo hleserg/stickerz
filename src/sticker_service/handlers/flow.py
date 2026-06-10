@@ -532,7 +532,9 @@ async def _generation_gate(db: Database, user_id: int, cost: int) -> str | None:
     return None
 
 
-async def cmd_new(message: Message, state: FSMContext, db: Database) -> None:
+async def cmd_new(
+    message: Message, state: FSMContext, db: Database, orchestrator: Orchestrator
+) -> None:
     """Start a new pack: record implicit photo-rights consent, then ask for a photo.
 
     Sending a photo to the bot is itself the consent act (§15.2): we record the
@@ -543,6 +545,7 @@ async def cmd_new(message: Message, state: FSMContext, db: Database) -> None:
     if (hint := await _alpha_gate(db, uid)) is not None:
         await message.answer(hint)
         return
+    await _drop_review_scratch(orchestrator, state)
     await state.clear()
     if uid:
         await db.record_consent(uid)
@@ -680,7 +683,13 @@ async def on_age(callback: CallbackQuery, state: FSMContext, loader: StyleLoader
 
 
 async def _enter_captions(
-    callback: CallbackQuery, state: FSMContext, db: Database, *, mode: str, **extra: Any
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    orchestrator: Orchestrator,
+    *,
+    mode: str,
+    **extra: Any,
 ) -> None:
     """Seed caption state (all standard selected) and show the checklist.
 
@@ -695,6 +704,8 @@ async def _enter_captions(
     extending the chosen one. ``fresh`` keeps the data it just collected.
     """
     if mode != "fresh":
+        # The wipe below would orphan a previous review's scratch dir — drop it.
+        await _drop_review_scratch(orchestrator, state)
         await state.set_data({})
     user_id = callback.from_user.id if callback.from_user else 0
     await state.update_data(
@@ -710,14 +721,14 @@ async def _enter_captions(
 
 
 async def on_style(
-    callback: CallbackQuery, state: FSMContext, db: Database
+    callback: CallbackQuery, state: FSMContext, db: Database, orchestrator: Orchestrator
 ) -> None:  # pragma: no cover
     """Store the style and start caption selection (canonical is built on Create)."""
     tag_component("handlers.flow")
     style_id = (callback.data or "").split(":", 1)[-1]
     if callback.from_user is not None:
         await analytics.log(db, callback.from_user.id, analytics.STYLE_CHOSEN, style_id=style_id)
-    await _enter_captions(callback, state, db, mode="fresh", style_id=style_id)
+    await _enter_captions(callback, state, db, orchestrator, mode="fresh", style_id=style_id)
 
 
 _TXT_CAP_FULL = f"Больше {MAX_CAPTIONS} нельзя — сначала снимите какую-нибудь галочку."
@@ -920,9 +931,12 @@ async def on_nav_back(callback: CallbackQuery, state: FSMContext, loader: StyleL
         await _show(callback, state, target, loader, data)
 
 
-async def on_nav_cancel(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+async def on_nav_cancel(  # pragma: no cover
+    callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator
+) -> None:
     """``❌ Отмена`` — abort the flow and collapse the wizard message."""
     tag_component("handlers.flow")
+    await _drop_review_scratch(orchestrator, state)
     await state.clear()
     await callback.answer()
     if isinstance(callback.message, Message):
@@ -960,6 +974,7 @@ async def on_rev_create(  # pragma: no cover
     if not _begin_action(user_id):
         await callback.answer(_BUSY_TEXT, show_alert=True)
         return
+    spawned = False
     try:
         data = await state.get_data()
         captions = selected_captions(data.get("std_sel", []), data.get("custom", []))
@@ -987,15 +1002,44 @@ async def on_rev_create(  # pragma: no cover
             custom=list(data.get("custom", [])),
             total=len(captions),
         )
-        await _generate_and_present(msg, state, orchestrator, db, user_id)
+        _spawn_generation(msg, state, orchestrator, db, user_id)
+        spawned = True
     finally:
-        _end_action(user_id)
+        if not spawned:
+            _end_action(user_id)
 
 
 # --- generation core + retry-on-overload (shared by create & retry) ----------
 
 _RETRY_DELAY_S = 20
 _bg_tasks: set[asyncio.Task[None]] = set()
+
+
+def _spawn_generation(  # pragma: no cover
+    msg: Message, state: FSMContext, orchestrator: Orchestrator, db: Database, user_id: int
+) -> None:
+    """Run generation as a tracked background task, freeing the dispatcher slot.
+
+    Generation waits on Gemini for minutes; holding one of the bounded polling
+    task slots (APP_POLLING_TASKS_LIMIT) that long would starve all update
+    processing. The user's single-flight slot stays held by the task and is
+    released in its ``finally`` — double-taps remain blocked for the duration.
+    """
+
+    async def _run() -> None:
+        try:
+            await _generate_and_present(msg, state, orchestrator, db, user_id)
+        except Exception:
+            # _generate_and_present reports its own failures to the user; this
+            # catches the unexpected (e.g. a Telegram edit dying) so the task
+            # never vanishes silently.
+            logger.exception("background generation task failed")
+        finally:
+            _end_action(user_id)
+
+    task = asyncio.create_task(_run())
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 def _retry_kb(seconds_left: int) -> Any:
@@ -1101,7 +1145,13 @@ async def _generate_and_present(  # pragma: no cover
         seconds=round(time.monotonic() - started, 1),
     )
     await _present_for_publish(
-        msg, state, bundle.stickers, mode=mode, title=bundle.title, pack_id=bundle.pack_id
+        msg,
+        state,
+        bundle.stickers,
+        mode=mode,
+        title=bundle.title,
+        pack_id=bundle.pack_id,
+        scratch_path=bundle.scratch_path,
     )
 
     # Alpha-only: charge the action's credits and watch the USD budget. In debug
@@ -1134,6 +1184,7 @@ async def on_retry(  # pragma: no cover
     if not _begin_action(user_id):
         await callback.answer(_BUSY_TEXT, show_alert=True)
         return
+    spawned = False
     try:
         await callback.answer()
         msg = callback.message if isinstance(callback.message, Message) else None
@@ -1141,9 +1192,11 @@ async def on_retry(  # pragma: no cover
             return
         with contextlib.suppress(Exception):
             await msg.edit_reply_markup(reply_markup=None)  # drop the button while retrying
-        await _generate_and_present(msg, state, orchestrator, db, user_id)
+        _spawn_generation(msg, state, orchestrator, db, user_id)
+        spawned = True
     finally:
-        _end_action(user_id)
+        if not spawned:
+            _end_action(user_id)
 
 
 async def on_retry_wait(callback: CallbackQuery) -> None:  # pragma: no cover
@@ -1160,11 +1213,20 @@ async def _present_for_publish(  # pragma: no cover
     mode: str,
     title: str,
     pack_id: int | None = None,
+    scratch_path: str | None = None,
 ) -> None:
-    """Send the transparent preview sheet(s), then offer publish/download below them."""
+    """Send the transparent preview sheet(s), then offer publish/download below them.
+
+    Only pointers go into the FSM — the generated bytes already live on disk
+    (draft pack for fresh/reuse, scratch dir for extend). Stuffing megabytes
+    of PNGs into fsm.sqlite both leaked disk and blocked the event loop on
+    every state write.
+    """
     with contextlib.suppress(Exception):
         await msg.edit_text(_STAGE_TEXT["preview"])
-    await state.update_data(stickers=stickers, mode=mode, pack_id=pack_id, pub_title=title)
+    await state.update_data(
+        stickers=None, mode=mode, pack_id=pack_id, pub_title=title, scratch_path=scratch_path
+    )
     await state.set_state(NewPack.publish)
     # Drop the progress message, drop previews, then put controls *below* the previews.
     data = await state.get_data()
@@ -1184,6 +1246,26 @@ async def _present_for_publish(  # pragma: no cover
     await _store_wizard(state, sent)
 
 
+async def _review_stickers(orchestrator: Orchestrator, data: dict[str, Any]) -> list[StickerInput]:
+    """Load the reviewed stickers from their on-disk home (FSM holds pointers only).
+
+    Falls back to raw bytes in the FSM for states written before this change,
+    so in-flight reviews survive the deploy. The ``pack_id`` branch is valid
+    ONLY outside extend mode: there ``pack_id`` is the draft holding exactly
+    the reviewed stickers, while in extend mode it is the TARGET pack — loading
+    that would re-publish the pack's own existing stickers (a stale review
+    button mid-extend would silently double the whole set).
+    """
+    legacy: list[StickerInput] = data.get("stickers") or []
+    if legacy:
+        return legacy
+    if scratch_path := data.get("scratch_path"):
+        return await orchestrator.load_scratch(str(scratch_path))
+    if data.get("mode") != "extend" and (pack_id := data.get("pack_id")):
+        return await orchestrator.load_pack_stickers(int(pack_id))
+    return []
+
+
 async def on_publish_yes(  # pragma: no cover
     callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator, db: Database
 ) -> None:
@@ -1199,7 +1281,7 @@ async def on_publish_yes(  # pragma: no cover
         msg = callback.message if isinstance(callback.message, Message) else None
         if msg is None:
             return
-        stickers: list[StickerInput] = data.get("stickers") or []
+        stickers: list[StickerInput] = await _review_stickers(orchestrator, data)
         if not stickers:
             with contextlib.suppress(TelegramBadRequest):
                 await msg.edit_text(f"Нет готовых стикеров. {_TXT_NEW_OR_ADDTO}")
@@ -1213,6 +1295,15 @@ async def on_publish_yes(  # pragma: no cover
                 pack = await db.get_pack(int(data["pack_id"])) if data.get("pack_id") else None
                 if pack is None:
                     raise RuntimeError("pack not found")
+                # A non-extend publish targets a draft; if it is already
+                # published (e.g. via the /mypacks button while this review
+                # screen was still open), a second create would duplicate the
+                # Telegram set. Extend legitimately targets a published pack.
+                if data.get("mode") != "extend" and pack.published:
+                    await state.clear()
+                    with contextlib.suppress(TelegramBadRequest):
+                        await msg.edit_text(f"Уже опубликован: {pack.link}")
+                    return
                 # Diagnostic: which branch a publish takes (extend vs new set) and on
                 # which pack — so a "made a new set instead of extending" report is
                 # traceable to the mode/pack_id the FSM actually held at publish time.
@@ -1239,6 +1330,8 @@ async def on_publish_yes(  # pragma: no cover
 
         event = analytics.EXTENDED if data.get("mode") == "extend" else analytics.PUBLISHED
         await analytics.log(db, user_id, event, set_name=result.set_name, count=result.count)
+        if scratch_path := data.get("scratch_path"):  # extend: published, bytes now redundant
+            await orchestrator.drop_scratch(str(scratch_path))
         await state.clear()
         with contextlib.suppress(TelegramBadRequest):
             await msg.edit_text(f"✅ Готово! Пак: {result.link}")
@@ -1247,31 +1340,54 @@ async def on_publish_yes(  # pragma: no cover
 
 
 async def on_pub_download(  # pragma: no cover
-    callback: CallbackQuery, state: FSMContext, db: Database
+    callback: CallbackQuery, state: FSMContext, db: Database, orchestrator: Orchestrator
 ) -> None:
     """Send the stickers as a ZIP; keep state so the user can still publish."""
     tag_component("handlers.flow")
-    data = await state.get_data()
-    await callback.answer()
-    msg = callback.message if isinstance(callback.message, Message) else None
-    if msg is None:
+    user_id = callback.from_user.id if callback.from_user else 0
+    # Single-flight: a zip is tens of MB of disk reads + PIL work; tap-spam on
+    # this button must not stack unbounded memory peaks (same as publish).
+    if not _begin_action(user_id):
+        await callback.answer(_BUSY_TEXT, show_alert=True)
         return
-    stickers: list[StickerInput] = data.get("stickers") or []
-    if not stickers:
-        await msg.answer(f"Нет готовых стикеров. {_TXT_NEW_OR_ADDTO}")
-        return
-    if callback.from_user is not None:
-        await analytics.log(db, callback.from_user.id, analytics.DOWNLOADED, count=len(stickers))
-    archive = await asyncio.to_thread(bundle_zip, [img for img, _ in stickers])
-    await msg.answer_document(
-        BufferedInputFile(archive, filename="stickers.zip"),
-        caption="Готовые стикеры (PNG, 512px, прозрачный фон).",
-    )
+    try:
+        data = await state.get_data()
+        await callback.answer()
+        msg = callback.message if isinstance(callback.message, Message) else None
+        if msg is None:
+            return
+        stickers: list[StickerInput] = await _review_stickers(orchestrator, data)
+        if not stickers:
+            await msg.answer(f"Нет готовых стикеров. {_TXT_NEW_OR_ADDTO}")
+            return
+        if callback.from_user is not None:
+            await analytics.log(
+                db, callback.from_user.id, analytics.DOWNLOADED, count=len(stickers)
+            )
+        archive = await asyncio.to_thread(bundle_zip, [img for img, _ in stickers])
+        await msg.answer_document(
+            BufferedInputFile(archive, filename="stickers.zip"),
+            caption="Готовые стикеры (PNG, 512px, прозрачный фон).",
+        )
+    finally:
+        _end_action(user_id)
 
 
-async def on_publish_no(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+async def _drop_review_scratch(  # pragma: no cover
+    orchestrator: Orchestrator, state: FSMContext
+) -> None:
+    """Best-effort removal of the review's scratch dir when a flow is abandoned."""
+    with contextlib.suppress(Exception):
+        if scratch_path := (await state.get_data()).get("scratch_path"):
+            await orchestrator.drop_scratch(str(scratch_path))
+
+
+async def on_publish_no(  # pragma: no cover
+    callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator
+) -> None:
     """Cancel."""
     tag_component("handlers.flow")
+    await _drop_review_scratch(orchestrator, state)
     await state.clear()
     await callback.answer()
     if isinstance(callback.message, Message):
@@ -1279,12 +1395,13 @@ async def on_publish_no(callback: CallbackQuery, state: FSMContext) -> None:  # 
             await callback.message.edit_text(f"Отменено. {_TXT_NEW_OR_ADDTO}")
 
 
-async def cmd_cancel(message: Message, state: FSMContext) -> None:
+async def cmd_cancel(message: Message, state: FSMContext, orchestrator: Orchestrator) -> None:
     """Abort whatever the user is in the middle of (works from any FSM state)."""
     tag_component("handlers.flow")
     if await state.get_state() is None:
         await message.answer(f"Нечего отменять. {_TXT_NEW_OR_ADDTO}")
         return
+    await _drop_review_scratch(orchestrator, state)
     await state.clear()
     await message.answer(f"Отменено. {_TXT_NEW_OR_ADDTO}")
 
@@ -1401,16 +1518,16 @@ async def on_show_canonical(callback: CallbackQuery, db: Database) -> None:  # p
 
 
 async def on_char_add(
-    callback: CallbackQuery, state: FSMContext, db: Database
+    callback: CallbackQuery, state: FSMContext, db: Database, orchestrator: Orchestrator
 ) -> None:  # pragma: no cover
     """Add stickers to a saved character → caption selection → create (0.5 pack)."""
     tag_component("handlers.flow")
     char_id = int((callback.data or "cadd:0").split(":", 1)[-1])
-    await _enter_captions(callback, state, db, mode="reuse", character_id=char_id)
+    await _enter_captions(callback, state, db, orchestrator, mode="reuse", character_id=char_id)
 
 
 async def on_char_redraw(  # pragma: no cover
-    callback: CallbackQuery, state: FSMContext, db: Database
+    callback: CallbackQuery, state: FSMContext, db: Database, orchestrator: Orchestrator
 ) -> None:
     """Start redrawing a character's canonical: charge gate, then ask for a new photo."""
     tag_component("handlers.flow")
@@ -1427,6 +1544,7 @@ async def on_char_redraw(  # pragma: no cover
     if (hint := await _generation_gate(db, user_id, pricing.COST_REDRAW)) is not None:
         await msg.answer(hint)
         return
+    await _drop_review_scratch(orchestrator, state)
     await state.clear()
     await state.update_data(redraw_char_id=char_id)
     await state.set_state(Redraw.photo)
@@ -1613,24 +1731,36 @@ async def on_saved_download(  # pragma: no cover
 ) -> None:
     """Download a saved pack's stickers as a ZIP (any number of times)."""
     tag_component("handlers.flow")
-    pack_id = int((callback.data or "pkdl:0").split(":", 1)[-1])
-    await callback.answer()
-    msg = callback.message if isinstance(callback.message, Message) else None
-    if msg is None:
+    user_id = callback.from_user.id if callback.from_user else 0
+    # Single-flight: a 120-sticker pack zip holds ~tens of MB in RAM per tap.
+    if not _begin_action(user_id):
+        await callback.answer(_BUSY_TEXT, show_alert=True)
         return
-    stickers = await orchestrator.load_pack_stickers(pack_id)
-    if not stickers:
-        await msg.answer("У этого пака нет сохранённых стикеров.")
-        return
-    if callback.from_user is not None:
-        await analytics.log(
-            db, callback.from_user.id, analytics.DOWNLOADED, pack_id=pack_id, count=len(stickers)
+    try:
+        pack_id = int((callback.data or "pkdl:0").split(":", 1)[-1])
+        await callback.answer()
+        msg = callback.message if isinstance(callback.message, Message) else None
+        if msg is None:
+            return
+        stickers = await orchestrator.load_pack_stickers(pack_id)
+        if not stickers:
+            await msg.answer("У этого пака нет сохранённых стикеров.")
+            return
+        if callback.from_user is not None:
+            await analytics.log(
+                db,
+                callback.from_user.id,
+                analytics.DOWNLOADED,
+                pack_id=pack_id,
+                count=len(stickers),
+            )
+        archive = await asyncio.to_thread(bundle_zip, [img for img, _ in stickers])
+        await msg.answer_document(
+            BufferedInputFile(archive, filename="stickers.zip"),
+            caption="Готовые стикеры (PNG, 512px, прозрачный фон).",
         )
-    archive = await asyncio.to_thread(bundle_zip, [img for img, _ in stickers])
-    await msg.answer_document(
-        BufferedInputFile(archive, filename="stickers.zip"),
-        caption="Готовые стикеры (PNG, 512px, прозрачный фон).",
-    )
+    finally:
+        _end_action(user_id)
 
 
 async def on_saved_publish(  # pragma: no cover
@@ -1640,40 +1770,47 @@ async def on_saved_publish(  # pragma: no cover
     tag_component("handlers.flow")
     pack_id = int((callback.data or "pkpub:0").split(":", 1)[-1])
     user_id = callback.from_user.id if callback.from_user else 0
-    await callback.answer()
-    msg = callback.message if isinstance(callback.message, Message) else None
-    if msg is None:
+    # Single-flight: a double-tap here would create two identical Telegram sets.
+    if not _begin_action(user_id):
+        await callback.answer(_BUSY_TEXT, show_alert=True)
         return
-    pack = await db.get_pack(pack_id)
-    if pack is None:
-        await msg.answer("Пак не найден")
-        return
-    if pack.published:
-        with contextlib.suppress(TelegramBadRequest):
-            await msg.edit_text(f"Уже опубликован: {pack.link}")
-        return
-    stickers = await orchestrator.load_pack_stickers(pack_id)
-    with contextlib.suppress(TelegramBadRequest):
-        await msg.edit_text("📦 Публикую пак в Telegram…")
     try:
-        async with _typing(msg):
-            result = await orchestrator.publish_draft(
-                owner_id=user_id, pack=pack, stickers=stickers
-            )
-    except Exception as exc:
-        logger.exception("publish failed")
+        await callback.answer()
+        msg = callback.message if isinstance(callback.message, Message) else None
+        if msg is None:
+            return
+        pack = await db.get_pack(pack_id)
+        if pack is None:
+            await msg.answer("Пак не найден")
+            return
+        if pack.published:
+            with contextlib.suppress(TelegramBadRequest):
+                await msg.edit_text(f"Уже опубликован: {pack.link}")
+            return
+        stickers = await orchestrator.load_pack_stickers(pack_id)
         with contextlib.suppress(TelegramBadRequest):
-            await msg.edit_text(_friendly_error(exc))
-        return
-    await analytics.log(
-        db, user_id, analytics.PUBLISHED, set_name=result.set_name, count=result.count
-    )
-    with contextlib.suppress(TelegramBadRequest):
-        await msg.edit_text(f"✅ Готово! Пак: {result.link}")
+            await msg.edit_text("📦 Публикую пак в Telegram…")
+        try:
+            async with _typing(msg):
+                result = await orchestrator.publish_draft(
+                    owner_id=user_id, pack=pack, stickers=stickers
+                )
+        except Exception as exc:
+            logger.exception("publish failed")
+            with contextlib.suppress(TelegramBadRequest):
+                await msg.edit_text(_friendly_error(exc))
+            return
+        await analytics.log(
+            db, user_id, analytics.PUBLISHED, set_name=result.set_name, count=result.count
+        )
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.edit_text(f"✅ Готово! Пак: {result.link}")
+    finally:
+        _end_action(user_id)
 
 
 async def on_pick_pack(  # pragma: no cover
-    callback: CallbackQuery, state: FSMContext, db: Database
+    callback: CallbackQuery, state: FSMContext, db: Database, orchestrator: Orchestrator
 ) -> None:
     """Extend an existing pack → caption selection → create → append."""
     tag_component("handlers.flow")
@@ -1690,7 +1827,7 @@ async def on_pick_pack(  # pragma: no cover
             title = pack.title if pack else "этот"
             await msg.answer(f"Пак «{title}» уже заполнен (120/120). Создай новый пак: /new")
         return
-    await _enter_captions(callback, state, db, mode="extend", pack_id=pack_id)
+    await _enter_captions(callback, state, db, orchestrator, mode="extend", pack_id=pack_id)
 
 
 def build_router() -> Router:
