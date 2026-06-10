@@ -12,8 +12,9 @@ import contextlib
 import logging
 
 from aiogram import Bot
+from aiogram.types import BotCommand, BotCommandScopeChat
 
-from sticker_service.config import get_settings
+from sticker_service.config import Settings, get_settings
 from sticker_service.db import Database
 from sticker_service.fsm_storage import SqliteStorage
 from sticker_service.handlers import build_dispatcher
@@ -65,7 +66,7 @@ async def run() -> None:
     # Persist FSM state so an OOM/restart resumes flows instead of dropping them.
     storage = await SqliteStorage.create(settings.data_dir / "fsm.sqlite")
     dp = build_dispatcher(db=db, orchestrator=orchestrator, loader=loader, storage=storage)
-    await _set_commands(bot)
+    await _set_commands(bot, settings)
 
     # Bound disk/DB growth while the container lives, not just at boot: GC stale
     # drafts, prune analytics, sweep abandoned FSM rows, warn before disk fills.
@@ -113,23 +114,70 @@ async def run() -> None:
         await db.close()
 
 
-async def _set_commands(bot: Bot) -> None:
-    """Register the bot's command menu (the "/" list in Telegram clients)."""
-    from aiogram.types import BotCommand
+def _user_commands() -> list[BotCommand]:
+    """The "/" menu every user sees."""
+    return [
+        BotCommand(command="new", description="Новый пак"),
+        BotCommand(command="mychars", description="Мои персонажи (новый пак про того же)"),
+        BotCommand(command="mypacks", description="Мои паки (открыть/опубликовать/скачать)"),
+        BotCommand(command="addto", description="Дополнить существующий пак"),
+        BotCommand(command="cancel", description="Отменить текущее действие"),
+        BotCommand(command="help", description="Что умеет бот и цены"),
+        BotCommand(command="rules", description="Правила"),
+        BotCommand(command="report", description="Сообщить об ошибке"),
+        BotCommand(command="start", description="О боте"),
+    ]
 
-    await bot.set_my_commands(
-        [
-            BotCommand(command="new", description="Новый пак"),
-            BotCommand(command="mychars", description="Мои персонажи (новый пак про того же)"),
-            BotCommand(command="mypacks", description="Мои паки (открыть/опубликовать/скачать)"),
-            BotCommand(command="addto", description="Дополнить существующий пак"),
-            BotCommand(command="cancel", description="Отменить текущее действие"),
-            BotCommand(command="help", description="Что умеет бот и цены"),
-            BotCommand(command="rules", description="Правила"),
-            BotCommand(command="report", description="Сообщить об ошибке"),
-            BotCommand(command="start", description="О боте"),
-        ]
-    )
+
+def _admin_commands() -> list[BotCommand]:
+    """Extra menu entries every admin gets (their toolbox sits on top)."""
+    return [
+        BotCommand(command="stats", description="📊 Статистика и воронка"),
+        BotCommand(command="waiting", description="⏳ Заявки на рассмотрении"),
+        BotCommand(command="approved", description="✅ Одобренные заявки"),
+        BotCommand(command="rejected", description="🚫 Отклонённые заявки"),
+        BotCommand(command="user", description="Карточка пользователя: /user <id>"),
+        BotCommand(command="allow", description="Добавить в whitelist: /allow <id>"),
+        BotCommand(command="deny", description="Убрать из whitelist: /deny <id>"),
+        BotCommand(command="gen", description="Паки пользователю: /gen <id> <±N>"),
+        BotCommand(command="bans", description="Активные баны (снять)"),
+    ]
+
+
+def _owner_commands() -> list[BotCommand]:
+    """Extra menu entries only the FIRST admin sees (mode/budget switches)."""
+    return [
+        BotCommand(command="mode", description="Режим бота: отладка/альфа"),
+        BotCommand(command="setbudget", description="Бюджет альфы: /setbudget <$>"),
+    ]
+
+
+def commands_for(*, admin: bool, owner: bool) -> list[BotCommand]:
+    """The full scoped menu for one chat: toolbox first, daily commands after."""
+    commands: list[BotCommand] = []
+    if admin:
+        commands += _admin_commands()
+    if owner:
+        commands += _owner_commands()
+    return commands + _user_commands()
+
+
+async def _set_commands(bot: Bot, settings: Settings) -> None:
+    """Register scoped "/" menus: users, admins, and the first admin (owner).
+
+    The default scope carries only user commands; each admin's private chat
+    additionally gets the admin toolbox, and the owner also gets mode/budget.
+    A per-chat scope fails with 400 until that user has talked to the bot —
+    logged and skipped; the menu appears on the restart after first contact.
+    """
+    await bot.set_my_commands(_user_commands())
+    first_admin = settings.first_admin_id
+    for admin_id in settings.admin_id_list:
+        scoped = commands_for(admin=True, owner=admin_id == first_admin)
+        try:
+            await bot.set_my_commands(scoped, scope=BotCommandScopeChat(chat_id=admin_id))
+        except Exception as exc:
+            logger.warning("could not set admin menu for %s: %s", admin_id, str(exc)[:100])
 
 
 def main() -> int:
