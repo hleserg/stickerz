@@ -62,25 +62,23 @@ async def run() -> None:
         loader=loader,
         storage_dir=settings.data_dir,
     )
-    # Bound disk/DB growth: drop abandoned drafts + their PNGs once per boot.
-    removed = await orchestrator.gc_stale_drafts(older_than_days=settings.draft_retention_days)
-    if removed:
-        logger.info("startup gc: removed %d stale draft pack(s)", removed)
-    # Same for analytics events — except generation_done, which the alpha
-    # budget counts all-time (services/budget.py).
-    from sticker_service.services import analytics
-
-    pruned = await db.prune_events(
-        older_than_days=settings.events_retention_days,
-        keep_events=(analytics.GENERATION_DONE,),
-    )
-    if pruned:
-        logger.info("startup gc: pruned %d old analytics event(s)", pruned)
-
     # Persist FSM state so an OOM/restart resumes flows instead of dropping them.
     storage = await SqliteStorage.create(settings.data_dir / "fsm.sqlite")
     dp = build_dispatcher(db=db, orchestrator=orchestrator, loader=loader, storage=storage)
     await _set_commands(bot)
+
+    # Bound disk/DB growth while the container lives, not just at boot: GC stale
+    # drafts, prune analytics, sweep abandoned FSM rows, warn before disk fills.
+    from sticker_service.maintenance.loop import maintenance_loop
+
+    async def _notify_admins(text: str) -> None:
+        for admin_id in settings.admin_id_list:
+            with contextlib.suppress(Exception):
+                await bot.send_message(admin_id, text)
+
+    maintenance_task = asyncio.create_task(
+        maintenance_loop(orchestrator=orchestrator, db=db, storage=storage, notify=_notify_admins)
+    )
 
     # Keep the default-pack meme pool in step with Runet trends (weekly rewrite).
     from sticker_service.services.stickers.refresh_memes import meme_refresh_loop
@@ -104,9 +102,10 @@ async def run() -> None:
     try:
         await dp.start_polling(bot)
     finally:
-        refresh_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await refresh_task
+        for task in (refresh_task, maintenance_task):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await storage.close()
         await bot.session.close()
         await db.close()
