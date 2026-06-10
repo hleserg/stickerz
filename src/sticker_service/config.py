@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     # --- Access control (§11.1) ---
     # Comma-separated Telegram user_ids that may administer the whitelist.
     admin_ids: str = ""
+    # Alpha onboarding: while fewer than this many applications are approved
+    # (manual ones count), new applications are approved automatically — the
+    # first cohort gets in without waiting for the admin. 0 disables.
+    alpha_auto_approve_limit: int = 30
 
     # --- Paths ---
     # Runtime data (sqlite, photos, generated stickers): relative to CWD so it
