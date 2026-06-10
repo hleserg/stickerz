@@ -136,7 +136,7 @@ class Settings(BaseSettings):
     # --- Showcase (the Telegraph demo page surfaced to newcomers) ---
     # Shown as a url-button on /start and the alpha-application screen, and as
     # a line in /help. Empty string hides it everywhere.
-    demo_page_url: str = "https://telegra.ph/Yuki--stikerpak-iz-odnogo-foto-06-10"
+    demo_page_url: str = "https://telegra.ph/YUki-risuet-tebya-06-10"
     # Yuki's welcome letter for alpha testers: a url-button on /start for
     # approved users while the bot is in alpha. Empty string hides it.
     alpha_welcome_url: str = "https://telegra.ph/Dobro-pozhalovat-v-alfu-06-10"
