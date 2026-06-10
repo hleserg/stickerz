@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     # CPU, so unbounded parallelism OOMs a small VDS; queued sheets just wait a
     # few seconds. See docs/operations/CAPACITY.md.
     postprocess_concurrency: int = 2
+    # Max update-handler tasks running at once (aiogram long polling). Bounds
+    # the coroutine/memory fan-out under bursts and button spam. 0 = unbounded.
+    polling_tasks_limit: int = 64
 
     # --- Maintenance (bound disk/db growth on the small VDS) ---
     # Unpublished draft packs (created mid-flow, then published or abandoned) and

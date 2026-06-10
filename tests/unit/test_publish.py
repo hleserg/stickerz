@@ -127,6 +127,111 @@ async def test_add_to_pack_appends() -> None:
     assert all(call["user_id"] == 7 for call in bot.added)
 
 
+# --- flood waits (Telegram 429 must neither crash publish nor hang forever) ---
+
+
+def _retry_after(seconds: int = 0) -> Exception:
+    from aiogram.exceptions import TelegramRetryAfter
+    from aiogram.methods import GetMe
+
+    return TelegramRetryAfter(method=GetMe(), message="flood", retry_after=seconds)
+
+
+class _FloodingBot(_FakeBot):
+    """Rejects the first N calls of each method with RetryAfter, then succeeds."""
+
+    def __init__(self, *, floods: int) -> None:
+        super().__init__()
+        self._floods: dict[str, int] = {"create": floods, "add": floods}
+
+    async def create_new_sticker_set(self, **kwargs: object) -> None:
+        if self._floods["create"] > 0:
+            self._floods["create"] -= 1
+            raise _retry_after()
+        await super().create_new_sticker_set(**kwargs)
+
+    async def add_sticker_to_set(self, **kwargs: object) -> None:
+        if self._floods["add"] > 0:
+            self._floods["add"] -= 1
+            raise _retry_after()
+        await super().add_sticker_to_set(**kwargs)
+
+
+async def test_create_pack_sleeps_out_flood_waits() -> None:
+    bot = _FloodingBot(floods=2)
+    pub = Publisher(bot, "yourbot")
+    name = await pub.create_pack(user_id=1, title="T", stickers=[(b"x", "🙂")])
+    assert bot.created[-1]["name"] == name  # succeeded after waiting twice
+
+
+async def test_create_pack_gives_up_after_too_many_flood_waits() -> None:
+    from aiogram.exceptions import TelegramRetryAfter
+
+    bot = _FloodingBot(floods=99)
+    pub = Publisher(bot, "yourbot")
+    with pytest.raises(TelegramRetryAfter):
+        await pub.create_pack(user_id=1, title="T", stickers=[(b"x", "🙂")])
+
+
+async def test_add_to_pack_retries_each_sticker_through_flood_waits() -> None:
+    bot = _FloodingBot(floods=2)
+    pub = Publisher(bot, "yourbot")
+    await pub.add_to_pack(
+        user_id=7, set_name="s_by_yourbot", stickers=[(b"a", "🙂"), (b"b", "👍")], current_count=0
+    )
+    assert len(bot.added) == 2  # both landed despite the 429s
+
+
+async def test_flood_wait_rejects_pathological_retry_after_immediately() -> None:
+    """A multi-minute RetryAfter must become a visible error now, not a silent
+    hang that pins the user's single-flight slot and a polling task slot."""
+    from aiogram.exceptions import TelegramRetryAfter
+
+    class _LongFlood(_FakeBot):
+        async def create_new_sticker_set(self, **kwargs: object) -> None:
+            raise _retry_after(3600)
+
+    pub = Publisher(_LongFlood(), "yourbot")
+    import asyncio
+
+    with pytest.raises(TelegramRetryAfter):
+        # Far under 3600 s: proves we re-raised instead of sleeping it out.
+        await asyncio.wait_for(
+            pub.create_pack(user_id=1, title="T", stickers=[(b"x", "🙂")]), timeout=2
+        )
+
+
+async def test_add_to_pack_reports_each_landed_sticker() -> None:
+    """on_added fires per landed sticker with its set position — the
+    orchestrator persists rows incrementally so the DB never lags the set."""
+    bot = _FakeBot()
+    pub = Publisher(bot, "yourbot")
+    landed: list[tuple[int, bytes]] = []
+
+    async def on_added(position: int, sticker: tuple[bytes, str]) -> None:
+        landed.append((position, sticker[0]))
+
+    await pub.add_to_pack(
+        user_id=7,
+        set_name="s_by_yourbot",
+        stickers=[(b"a", "🙂"), (b"b", "👍")],
+        current_count=3,
+        on_added=on_added,
+    )
+    assert landed == [(3, b"a"), (4, b"b")]
+
+
+async def test_live_count_reads_telegram_and_handles_missing_method() -> None:
+    from types import SimpleNamespace
+
+    class _WithGetter(_FakeBot):
+        async def get_sticker_set(self, *, name: str) -> object:
+            return SimpleNamespace(stickers=[object()] * 7)
+
+    assert await Publisher(_WithGetter(), "b").live_count("s") == 7
+    assert await Publisher(_FakeBot(), "b").live_count("s") is None  # no method → no resume
+
+
 async def test_add_to_pack_enforces_limit() -> None:
     pub = Publisher(_FakeBot(), "yourbot")
     with pytest.raises(PackFullError):

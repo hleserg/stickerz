@@ -62,10 +62,40 @@ async def test_cmd_new_records_consent_and_asks_photo(db: Database) -> None:
     state = _state()
     message = AsyncMock()
     message.from_user = SimpleNamespace(id=55)
-    await cmd_new(message, state, db)
+    await cmd_new(message, state, db, AsyncMock())
     assert await db.has_consent(55) is True  # consent recorded implicitly (§15.2)
     assert await state.get_state() == NewPack.photo.state  # straight to photo
     message.answer.assert_awaited_once()
+
+
+async def test_review_stickers_never_loads_target_pack_in_extend_mode() -> None:
+    """REGRESSION (review blocker): in extend mode pack_id is the TARGET pack —
+    falling back to it would re-publish the pack's own stickers and double the
+    set from a stale review button. Must resolve to empty instead."""
+    from sticker_service.handlers.flow import _review_stickers
+
+    orchestrator = AsyncMock()
+    # Mid-extend state: pack_id seeded, no scratch yet (pre-generation).
+    data = {"mode": "extend", "pack_id": 17}
+    assert await _review_stickers(orchestrator, data) == []
+    orchestrator.load_pack_stickers.assert_not_awaited()
+
+
+async def test_review_stickers_resolution_order() -> None:
+    from sticker_service.handlers.flow import _review_stickers
+
+    orchestrator = AsyncMock()
+    orchestrator.load_scratch.return_value = [(b"s", "🙂")]
+    orchestrator.load_pack_stickers.return_value = [(b"d", "👍")]
+    # Legacy FSM bytes win (pre-deploy in-flight reviews).
+    legacy = {"stickers": [(b"raw", "🔥")], "scratch_path": "/x", "pack_id": 1}
+    assert await _review_stickers(orchestrator, legacy) == [(b"raw", "🔥")]
+    # Extend review: scratch wins, no pack fallback even with pack_id present.
+    extend = {"mode": "extend", "scratch_path": "/data/scratch/1_a", "pack_id": 1}
+    assert await _review_stickers(orchestrator, extend) == [(b"s", "🙂")]
+    # Fresh/reuse: the draft pack holds exactly the reviewed stickers.
+    fresh = {"mode": "fresh", "pack_id": 2}
+    assert await _review_stickers(orchestrator, fresh) == [(b"d", "👍")]
 
 
 async def test_name_advances_to_subject(db: Database) -> None:
@@ -129,7 +159,7 @@ async def test_cancel_clears_active_state() -> None:
     state = _state()
     await state.set_state(NewPack.photo)
     message = AsyncMock()
-    await cmd_cancel(message, state)
+    await cmd_cancel(message, state, AsyncMock())
     assert await state.get_state() is None
     assert "/new" in message.answer.await_args.args[0]
 
@@ -137,8 +167,17 @@ async def test_cancel_clears_active_state() -> None:
 async def test_cancel_when_idle_is_noop() -> None:
     state = _state()
     message = AsyncMock()
-    await cmd_cancel(message, state)
+    await cmd_cancel(message, state, AsyncMock())
     assert "Нечего отменять" in message.answer.await_args.args[0]
+
+
+async def test_cancel_drops_review_scratch() -> None:
+    state = _state()
+    await state.set_state(NewPack.publish)
+    await state.update_data(scratch_path="/data/scratch/1_abc")
+    orchestrator = AsyncMock()
+    await cmd_cancel(AsyncMock(), state, orchestrator)
+    orchestrator.drop_scratch.assert_awaited_once_with("/data/scratch/1_abc")
 
 
 def test_canonical_progress_text_tells_real_stage() -> None:
@@ -163,7 +202,7 @@ async def test_enter_captions_extend_drops_stale_fresh_state(db: Database) -> No
     callback = AsyncMock()
     callback.data = "extend:7"
     callback.from_user = SimpleNamespace(id=1)
-    await _enter_captions(callback, state, db, mode="extend", pack_id=7)
+    await _enter_captions(callback, state, db, AsyncMock(), mode="extend", pack_id=7)
     data = await state.get_data()
     assert data["mode"] == "extend" and data["pack_id"] == 7
     # Stale fresh-flow data is wiped so it can't hijack publish into a new pack.
@@ -178,7 +217,7 @@ async def test_enter_captions_fresh_keeps_collected_state(db: Database) -> None:
     callback = AsyncMock()
     callback.data = "style:watercolor"
     callback.from_user = SimpleNamespace(id=1)
-    await _enter_captions(callback, state, db, mode="fresh", style_id="watercolor")
+    await _enter_captions(callback, state, db, AsyncMock(), mode="fresh", style_id="watercolor")
     data = await state.get_data()
     assert data["mode"] == "fresh"
     assert data["photo"] == b"X" and data["name"] == "Лёша"  # collected data preserved
@@ -194,7 +233,7 @@ async def test_enter_captions_seeds_full_standard_default(db: Database) -> None:
     callback = AsyncMock()
     callback.data = "style:watercolor"
     callback.from_user = SimpleNamespace(id=1)
-    await _enter_captions(callback, state, db, mode="fresh", style_id="watercolor")
+    await _enter_captions(callback, state, db, AsyncMock(), mode="fresh", style_id="watercolor")
     data = await state.get_data()
     assert data["std_sel"] == list(range(len(STANDARD_BLOCK)))
     assert data["custom"] == []
@@ -211,7 +250,7 @@ async def test_enter_captions_in_alpha_seeds_wallet(db: Database) -> None:
     state = _state()
     callback = AsyncMock()
     callback.from_user = SimpleNamespace(id=424242)
-    await _enter_captions(callback, state, db, mode="reuse", character_id=3)
+    await _enter_captions(callback, state, db, AsyncMock(), mode="reuse", character_id=3)
     data = await state.get_data()
     assert data["alpha"] is True and data["bal"] == DEFAULT_CREDITS
 
