@@ -115,6 +115,11 @@ class Settings(BaseSettings):
     watermark_enabled: bool = True
     watermark_text: str = "@yuki_stickers_bot"
 
+    # --- Showcase (the Telegraph demo page surfaced to newcomers) ---
+    # Shown as a url-button on /start and the alpha-application screen, and as
+    # a line in /help. Empty string hides it everywhere.
+    demo_page_url: str = "https://telegra.ph/Yuki--stikerpak-iz-odnogo-foto-06-10"
+
     # --- Sentry (disabled by default; empty DSN is a no-op) ---
     sentry_dsn: str = ""
     sentry_environment: str = "development"
