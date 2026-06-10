@@ -73,6 +73,13 @@
           {
             "type": "command",
             "shell": "bash",
+            "timeout": 600,
+            "statusMessage": "Installing dependencies (uv sync --all-extras)...",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh"
+          },
+          {
+            "type": "command",
+            "shell": "bash",
             "command": "[ -d .venv ] && [ ! -f .git/hooks/pre-commit ] && uv run pre-commit install >/dev/null 2>&1 || true"
           }
         ]
