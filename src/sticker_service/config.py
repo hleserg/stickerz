@@ -137,6 +137,9 @@ class Settings(BaseSettings):
     # Shown as a url-button on /start and the alpha-application screen, and as
     # a line in /help. Empty string hides it everywhere.
     demo_page_url: str = "https://telegra.ph/Yuki--stikerpak-iz-odnogo-foto-06-10"
+    # Yuki's welcome letter for alpha testers: a url-button on /start for
+    # approved users while the bot is in alpha. Empty string hides it.
+    alpha_welcome_url: str = "https://telegra.ph/Dobro-pozhalovat-v-alfu-06-10"
 
     # --- Sentry (disabled by default; empty DSN is a no-op) ---
     sentry_dsn: str = ""

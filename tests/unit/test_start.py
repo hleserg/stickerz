@@ -14,7 +14,13 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from sticker_service.db import Database
 from sticker_service.handlers import apply as apply_handlers
 from sticker_service.handlers import report as report_handlers
-from sticker_service.handlers.start import HELP, WELCOME, alpha_balance_note, cmd_balance
+from sticker_service.handlers.start import (
+    HELP,
+    WELCOME,
+    alpha_balance_note,
+    cmd_balance,
+    cmd_start,
+)
 from sticker_service.services import modes
 
 
@@ -38,6 +44,30 @@ def test_welcome_speaks_one_register() -> None:
     # ты-tone throughout: no formal «Нажмите» mixed into the informal greeting.
     assert "Нажмите" not in WELCOME and "Нажми" in WELCOME
     assert "ты автоматически соглашаешься" in WELCOME
+
+
+def _buttons(markup: object) -> list[tuple[str, str | None]]:
+    rows = getattr(markup, "inline_keyboard", None) or []
+    return [(b.text, b.url) for row in rows for b in row]
+
+
+async def test_start_in_alpha_offers_yuki_welcome_letter(db: Database) -> None:
+    await modes.set_mode(db, modes.ALPHA)
+    await db.allow(42)  # approved tester
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=42)
+    await cmd_start(message, db)
+    buttons = _buttons(message.answer.await_args.kwargs.get("reply_markup"))
+    welcome = [url for text, url in buttons if "Юки" in text]
+    assert welcome and welcome[0] and "telegra.ph" in welcome[0]
+
+
+async def test_start_outside_alpha_has_no_welcome_letter(db: Database) -> None:
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=42)
+    await cmd_start(message, db)  # default mode = debug
+    buttons = _buttons(message.answer.await_args.kwargs.get("reply_markup"))
+    assert all("Юки" not in text for text, _ in buttons)
 
 
 def test_help_lists_balance_and_free_failures() -> None:
