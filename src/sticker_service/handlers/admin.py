@@ -19,11 +19,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sticker_service.config import get_settings
 from sticker_service.db import Database
-from sticker_service.db.repository import CREDITS_PER_PACK, DEFAULT_CREDITS
+from sticker_service.db.repository import CREDITS_PER_PACK
 from sticker_service.observability import tag_component
-from sticker_service.services import analytics, budget, charts, modes, pricing
-
-BUG_BONUS_PACKS = 2  # extra packs for a confirmed bug report
+from sticker_service.services import analytics, approvals, budget, charts, modes, pricing
+from sticker_service.services.approvals import BUG_BONUS_PACKS
 
 
 class AdminFSM(StatesGroup):
@@ -321,20 +320,10 @@ async def on_app_approve(callback: CallbackQuery, db: Database, bot: Bot) -> Non
         await callback.answer()
         return
     user_id = int((callback.data or "appok:0").split(":", 1)[-1])
-    await db.set_application_status(user_id, "approved")
-    await db.allow(user_id)
-    await db.set_credits(user_id, DEFAULT_CREDITS)
+    await approvals.approve_user(db, user_id)
     await callback.answer("Одобрено")
-    packs = pricing.format_packs(DEFAULT_CREDITS)
     with contextlib.suppress(Exception):
-        await bot.send_message(
-            user_id,
-            f"🎉 Рады приветствовать вас в тестировании! Вам доступно "
-            f"{packs} бесплатных паков (новый пак — 1, добавить стикеры — 0.5); "
-            f"остаток всегда виден по команде /balance. "
-            f"За каждый подтверждённый баг из /report начислим +{BUG_BONUS_PACKS} пака. "
-            f"Что умеет бот — /help. Поехали: /new",
-        )
+        await bot.send_message(user_id, approvals.welcome_text())
     if isinstance(callback.message, Message):
         await callback.message.answer(f"✅ {user_id} одобрен и уведомлён.")
 
