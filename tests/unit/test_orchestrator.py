@@ -502,3 +502,58 @@ async def test_gc_disabled_with_nonpositive_window(
     await _backdate_pack(db, draft.id, days=999)
     assert await orch.gc_stale_drafts(older_than_days=0) == 0
     assert await db.get_pack(draft.id) is not None  # untouched when disabled
+
+
+async def test_postprocess_gate_bounds_concurrent_sheet_keying(
+    db: Database, loader: StyleLoader, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Heavy postprocess from many users queues at the global gate (max 2).
+
+    One 4K key+slice holds ~0.7 GB; without the gate four simultaneous users
+    would stack peaks until the VDS OOMs (see docs/operations/CAPACITY.md).
+    """
+    import asyncio
+    import threading
+
+    lock = threading.Lock()
+    running = 0
+    max_seen = 0
+
+    def tiny_png() -> bytes:
+        buf = BytesIO()
+        Image.new("RGBA", (64, 64), (0, 120, 200, 255)).save(buf, format="PNG")
+        return buf.getvalue()
+
+    sticker = tiny_png()
+
+    def fake_process_sheet(_sheet: bytes, *, grid=None, expected=None) -> list[bytes]:
+        nonlocal running, max_seen
+        import time
+
+        with lock:
+            running += 1
+            max_seen = max(max_seen, running)
+        time.sleep(0.12)  # long enough for all four tasks to pile up
+        with lock:
+            running -= 1
+        return [sticker]
+
+    monkeypatch.setattr("sticker_service.services.orchestrator.process_sheet", fake_process_sheet)
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    chars = []
+    for i in range(4):
+        path = tmp_path / f"canon{i}.png"
+        path.write_bytes(sticker)
+        chars.append(
+            await db.add_character(
+                owner_id=100 + i,
+                name=f"C{i}",
+                style_id="watercolor",
+                subject_type="adult",
+                canonical_path=str(path),
+            )
+        )
+    results = await asyncio.gather(*(orch.build_stickers(c, captions=["Привет!"]) for c in chars))
+    assert all(len(r) == 1 for r in results)
+    assert max_seen <= 2  # the gate held: never more than 2 keyings at once
+    assert max_seen >= 2  # and it actually ran in parallel, not serialized

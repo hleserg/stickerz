@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     # generation step is long, so it gets a generous cap before we apologize.
     photo_check_timeout_s: float = 60.0
     generation_timeout_s: float = 600.0
+    # How many sheets may run CPU/RAM-heavy postprocessing (chroma key + slice)
+    # at the same time. One 4K sheet peaks at ~0.6-0.9 GB RSS and ~7 s of pure
+    # CPU, so unbounded parallelism OOMs a small VDS; queued sheets just wait a
+    # few seconds. See docs/operations/CAPACITY.md.
+    postprocess_concurrency: int = 2
 
     # --- Maintenance (bound disk/db growth on the small VDS) ---
     # Unpublished draft packs (created mid-flow, then published or abandoned) and
