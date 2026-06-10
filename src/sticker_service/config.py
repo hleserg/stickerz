@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     # generation step is long, so it gets a generous cap before we apologize.
     photo_check_timeout_s: float = 60.0
     generation_timeout_s: float = 600.0
+    # How many sheets may run CPU/RAM-heavy postprocessing (chroma key + slice)
+    # at the same time. One 4K sheet peaks at ~0.6-0.9 GB RSS and ~7 s of pure
+    # CPU, so unbounded parallelism OOMs a small VDS; queued sheets just wait a
+    # few seconds. See docs/operations/CAPACITY.md.
+    postprocess_concurrency: int = 2
 
     # --- Maintenance (bound disk/db growth on the small VDS) ---
     # Unpublished draft packs (created mid-flow, then published or abandoned) and
@@ -109,6 +114,11 @@ class Settings(BaseSettings):
     # --- Watermark (virality; off-switch for B2B) ---
     watermark_enabled: bool = True
     watermark_text: str = "@yuki_stickers_bot"
+
+    # --- Showcase (the Telegraph demo page surfaced to newcomers) ---
+    # Shown as a url-button on /start and the alpha-application screen, and as
+    # a line in /help. Empty string hides it everywhere.
+    demo_page_url: str = "https://telegra.ph/Yuki--stikerpak-iz-odnogo-foto-06-10"
 
     # --- Sentry (disabled by default; empty DSN is a no-op) ---
     sentry_dsn: str = ""

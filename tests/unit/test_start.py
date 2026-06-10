@@ -139,3 +139,45 @@ async def test_apply_empty_source_reprompts(db: Database) -> None:
     await apply_handlers.on_apply_source(message, state, db)
     assert await state.get_state() == apply_handlers.Apply.source.state
     assert await db.get_application(7) is None
+
+
+# --- showcase page surfacing ----------------------------------------------------
+
+
+async def test_start_offers_demo_button_unobtrusively(db: Database) -> None:
+    # The Telegraph showcase is a url-button on /start — visible to every
+    # newcomer, zero extra text (owner's rule: visible, never pushy).
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=7)
+    from sticker_service.handlers.start import cmd_start
+
+    await cmd_start(message, db)
+    markup = message.answer.await_args.kwargs.get("reply_markup")
+    assert markup is not None
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    assert any(b.url and "telegra.ph" in b.url and "Примеры" in b.text for b in buttons)
+    # The greeting text itself did not grow a link paragraph.
+    assert "telegra.ph" not in message.answer.await_args.args[0]
+
+
+async def test_alpha_application_screen_offers_demo(db: Database) -> None:
+    # An applicant can't try the bot yet — the demo button shows what it makes.
+    from sticker_service.handlers.start import cmd_start
+
+    await modes.set_mode(db, modes.ALPHA)
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=123456)
+    await cmd_start(message, db)
+    markup = message.answer.await_args.kwargs.get("reply_markup")
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    assert any(b.callback_data == "apply:new" for b in buttons)
+    assert any(b.url and "telegra.ph" in b.url for b in buttons)
+
+
+async def test_help_links_demo_page(db: Database) -> None:
+    from sticker_service.handlers.start import cmd_help
+
+    message = AsyncMock()
+    message.from_user = SimpleNamespace(id=7)
+    await cmd_help(message, db)
+    assert "telegra.ph" in message.answer.await_args.args[0]

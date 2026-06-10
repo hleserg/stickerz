@@ -93,6 +93,10 @@ class Orchestrator:
         self._loader = loader
         self._storage = Path(storage_dir)
         self._engine = engine or CanonicalEngine(model)
+        # Global gate for CPU/RAM-heavy sheet postprocessing: each 4K key+slice
+        # holds ~0.6-0.9 GB and ~7 s of CPU, so concurrent users must queue here
+        # instead of stacking memory peaks until the box OOMs (CAPACITY.md).
+        self._postprocess_gate = asyncio.Semaphore(max(1, get_settings().postprocess_concurrency))
 
     async def build_canonical(
         self,
@@ -441,19 +445,22 @@ class Orchestrator:
             )
             await self._stage(on_stage, "clean")
             # Chroma keying + component labeling over a 4K sheet is seconds of
-            # numpy/PIL CPU — off the event loop, or every other user stalls.
-            sliced = await asyncio.to_thread(
-                process_sheet, sheet, grid=grid_for(len(page)), expected=len(page)
-            )
+            # numpy/PIL CPU — off the event loop, or every other user stalls;
+            # and through the gate, or concurrent users stack ~0.7 GB peaks.
+            async with self._postprocess_gate:
+                sliced = await asyncio.to_thread(
+                    process_sheet, sheet, grid=grid_for(len(page)), expected=len(page)
+                )
             await self._stage(on_stage, "slice")
             stickers.extend(sliced)
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
         settings = get_settings()
         if settings.watermark_enabled:
-            stickers = await asyncio.to_thread(
-                lambda: [apply_watermark(s, text=settings.watermark_text) for s in stickers]
-            )
+            async with self._postprocess_gate:
+                stickers = await asyncio.to_thread(
+                    lambda: [apply_watermark(s, text=settings.watermark_text) for s in stickers]
+                )
         logger.info("slice: produced %d stickers total", len(stickers))
         await self._stage(on_stage, "emoji")
         emojis = await assign_emojis(self._model, stickers, captions)

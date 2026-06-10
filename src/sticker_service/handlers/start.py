@@ -100,6 +100,17 @@ RULES = (
 )
 
 
+def _demo_button(kb: InlineKeyboardBuilder) -> None:
+    """Append the showcase url-button when a demo page is configured.
+
+    A button, not a text wall: every newcomer sees it on /start without the
+    greeting getting any longer (owner's rule — visible, never pushy).
+    """
+    url = get_settings().demo_page_url
+    if url:
+        kb.button(text="✨ Примеры работ", url=url)
+
+
 async def cmd_start(message: Message, db: Database) -> None:
     """Greet the user; in alpha, gate behind an application."""
     tag_component("handlers.start")
@@ -122,6 +133,9 @@ async def cmd_start(message: Message, db: Database) -> None:
             return
         kb = InlineKeyboardBuilder()
         kb.button(text="📝 Оставить заявку", callback_data="apply:new")
+        # The applicant can't try the bot yet — show what it makes meanwhile.
+        _demo_button(kb)
+        kb.adjust(1)
         await message.answer(
             "🤖 Бот сейчас в закрытом альфа-тестировании. Оставьте заявку на участие — "
             "и мы пригласим вас, как только появится место.",
@@ -131,7 +145,12 @@ async def cmd_start(message: Message, db: Database) -> None:
     text = WELCOME
     if (note := await alpha_balance_note(db, user.id)) is not None:
         text += f"\n\n{note}"
-    await message.answer(text, parse_mode="HTML")
+    markup = None
+    if get_settings().demo_page_url:
+        kb = InlineKeyboardBuilder()
+        _demo_button(kb)
+        markup = kb.as_markup()
+    await message.answer(text, parse_mode="HTML", reply_markup=markup)
 
 
 async def cmd_rules(message: Message) -> None:
@@ -144,6 +163,8 @@ async def cmd_help(message: Message, db: Database) -> None:
     """Show what the bot can do and the alpha pricing (+ live balance)."""
     tag_component("handlers.start")
     text = HELP
+    if url := get_settings().demo_page_url:
+        text += f'\n\n✨ <a href="{url}">Примеры работ</a>'
     user = message.from_user
     if user is not None and (note := await alpha_balance_note(db, user.id)) is not None:
         text += f"\n\n{note}"
