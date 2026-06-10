@@ -98,12 +98,23 @@ class Settings(BaseSettings):
 
     # --- Maintenance (bound disk/db growth on the small VDS) ---
     # Unpublished draft packs (created mid-flow, then published or abandoned) and
-    # their PNGs are garbage-collected once on startup when older than this many
-    # days. Published packs are never touched. 0 disables the sweep.
+    # their PNGs are garbage-collected by the maintenance loop when older than
+    # this many days. Published packs are never touched. 0 disables the sweep.
     draft_retention_days: int = 30
-    # Analytics events older than this are pruned on startup (generation_done is
-    # always kept — the alpha budget counts it all-time). 0 disables the sweep.
+    # Analytics events older than this are pruned by the maintenance loop
+    # (generation_done is always kept — the alpha budget counts it all-time).
+    # 0 disables the sweep.
     events_retention_days: int = 180
+    # FSM rows untouched for this many days are dropped (flows abandoned
+    # mid-wizard; resuming them weeks later is meaningless). 0 keeps them and
+    # only drops rows already cleared by state.clear().
+    fsm_retention_days: int = 14
+    # The housekeeping pass (GC + prune + FSM sweep + disk check) runs at boot
+    # and then every this many hours. <=0 restores the old run-once-at-boot mode.
+    maintenance_interval_hours: int = 24
+    # Alert admins when the data_dir filesystem is at least this % full
+    # (checked on every maintenance pass). 0 disables the alert.
+    disk_alert_threshold_pct: int = 80
 
     # --- Meme pool refresh (default-pack ideas follow Runet trends) ---
     # Every this many days the text model rewrites the meme-idea pool (a cheap

@@ -76,3 +76,62 @@ async def test_survives_reopen(tmp_path: Path) -> None:
         assert await reopened.get_data(key) == {"photo": b"img", "name": "Аня"}
     finally:
         await reopened.close()
+
+
+# --- sweep_stale: the file must not grow forever on a long-lived volume -------
+
+
+async def test_sweep_drops_cleared_rows_keeps_active(storage: SqliteStorage) -> None:
+    cleared, active = _key(1), _key(2)
+    # A finished flow: aiogram's state.clear() leaves state=None and data={}.
+    await storage.set_state(cleared, "NewPack:publish")
+    await storage.set_data(cleared, {"x": 1})
+    await storage.set_state(cleared, None)
+    await storage.set_data(cleared, {})
+    # A live flow mid-wizard.
+    await storage.set_state(active, "NewPack:review")
+    await storage.set_data(active, {"photo": b"img"})
+
+    removed = await storage.sweep_stale(older_than_days=14)
+    assert removed == 1
+    assert await storage.get_state(active) == "NewPack:review"
+    assert await storage.get_data(active) == {"photo": b"img"}
+
+
+async def test_sweep_drops_abandoned_flows_past_retention(storage: SqliteStorage) -> None:
+    import time
+
+    abandoned = _key(3)
+    await storage.set_state(abandoned, "NewPack:photo")
+    await storage.set_data(abandoned, {"photo": b"big"})
+    # Backdate the row as if the user walked away a month ago.
+    conn = storage._conn  # no public time-travel API, by design
+    await conn.execute("UPDATE fsm SET updated_at=?", (time.time() - 30 * 86400,))
+    await conn.commit()
+
+    assert await storage.sweep_stale(older_than_days=14) == 1
+    assert await storage.get_state(abandoned) is None
+    # Retention off (0): abandoned flows are kept, only cleared rows go.
+    await storage.set_state(abandoned, "NewPack:photo")
+    assert await storage.sweep_stale(older_than_days=0) == 0
+    assert await storage.get_state(abandoned) == "NewPack:photo"
+
+
+async def test_migration_stamps_existing_rows(tmp_path: Path) -> None:
+    import aiosqlite
+
+    # A pre-updated_at database, as deployed before this change.
+    path = tmp_path / "fsm.sqlite"
+    conn = await aiosqlite.connect(path)
+    await conn.execute("CREATE TABLE fsm (key TEXT PRIMARY KEY, state TEXT, data TEXT)")
+    await conn.execute("INSERT INTO fsm VALUES ('1:1:1:None:None:default', 'S', '{\"a\": 1}')")
+    await conn.commit()
+    await conn.close()
+
+    store = await SqliteStorage.create(path)
+    try:
+        # The migrated in-flight row is stamped "now", so it survives the sweep.
+        assert await store.sweep_stale(older_than_days=14) == 0
+        assert await store.get_state(_key(1)) == "S"
+    finally:
+        await store.close()

@@ -13,7 +13,9 @@ wherever they appear in the data dict.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -67,8 +69,15 @@ class SqliteStorage(BaseStorage):
         conn = await aiosqlite.connect(path)
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute(
-            "CREATE TABLE IF NOT EXISTS fsm (key TEXT PRIMARY KEY, state TEXT, data TEXT)"
+            "CREATE TABLE IF NOT EXISTS fsm "
+            "(key TEXT PRIMARY KEY, state TEXT, data TEXT, updated_at REAL)"
         )
+        # Migrate pre-updated_at files in place. Existing rows get "now", not 0:
+        # an in-flight flow on the production volume must not look ancient (and
+        # be swept) right after the deploy that introduced the column.
+        with contextlib.suppress(aiosqlite.OperationalError):  # column already exists
+            await conn.execute("ALTER TABLE fsm ADD COLUMN updated_at REAL")
+        await conn.execute("UPDATE fsm SET updated_at=? WHERE updated_at IS NULL", (time.time(),))
         await conn.commit()
         return cls(conn)
 
@@ -76,9 +85,9 @@ class SqliteStorage(BaseStorage):
         """Persist the state string (``None`` clears it) without touching data."""
         value = state.state if isinstance(state, State) else state
         await self._conn.execute(
-            "INSERT INTO fsm(key, state) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET state=excluded.state",
-            (_key(key), value),
+            "INSERT INTO fsm(key, state, updated_at) VALUES(?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at",
+            (_key(key), value, time.time()),
         )
         await self._conn.commit()
 
@@ -91,11 +100,34 @@ class SqliteStorage(BaseStorage):
     async def set_data(self, key: StorageKey, data: Mapping[str, Any]) -> None:
         """Persist the full data dict (replace) without touching the state."""
         await self._conn.execute(
-            "INSERT INTO fsm(key, data) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET data=excluded.data",
-            (_key(key), _encode(data)),
+            "INSERT INTO fsm(key, data, updated_at) VALUES(?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+            (_key(key), _encode(data), time.time()),
         )
         await self._conn.commit()
+
+    async def sweep_stale(self, *, older_than_days: int) -> int:
+        """Drop leftover rows so fsm.sqlite stays small on a long-lived volume.
+
+        Two kinds of garbage accumulate by design: rows fully cleared by
+        ``state.clear()`` (state NULL, empty data — pure leftovers, any age) and
+        flows abandoned mid-wizard (any state, untouched for the retention
+        window — resuming them weeks later is meaningless). Returns the number
+        of rows removed; the file is VACUUMed only when something was removed.
+        A non-positive window keeps abandoned flows and only drops cleared rows.
+        """
+        cutoff = time.time() - older_than_days * 86400 if older_than_days > 0 else None
+        cur = await self._conn.execute(
+            "DELETE FROM fsm WHERE (state IS NULL AND (data IS NULL OR data IN ('', '{}'))) "
+            "OR (? IS NOT NULL AND updated_at < ?)",
+            (cutoff, cutoff),
+        )
+        removed = cur.rowcount or 0
+        await self._conn.commit()
+        if removed:
+            await self._conn.execute("VACUUM")
+            await self._conn.commit()
+        return removed
 
     async def get_data(self, key: StorageKey) -> dict[str, Any]:
         """Return the stored data dict for ``key`` (empty dict if none)."""
