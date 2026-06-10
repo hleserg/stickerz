@@ -145,11 +145,13 @@ async def cmd_start(message: Message, db: Database) -> None:
     text = WELCOME
     if (note := await alpha_balance_note(db, user.id)) is not None:
         text += f"\n\n{note}"
-    markup = None
-    if get_settings().demo_page_url:
-        kb = InlineKeyboardBuilder()
-        _demo_button(kb)
-        markup = kb.as_markup()
+    kb = InlineKeyboardBuilder()
+    if mode == modes.ALPHA and (welcome_url := get_settings().alpha_welcome_url):
+        # Yuki's letter to testers: why the alpha matters + the bonus rules.
+        kb.button(text="💛 Письмо от Юки", url=welcome_url)
+    _demo_button(kb)
+    kb.adjust(1)
+    markup = kb.as_markup() if kb.as_markup().inline_keyboard else None
     await message.answer(text, parse_mode="HTML", reply_markup=markup)
 
 
