@@ -63,3 +63,44 @@ async def test_ladder_reformulates_then_gives_up_on_refusal() -> None:
     with pytest.raises(ModelRefusalError):
         await generate_via_ladder(model, "p", [b"r"], LADDER, reformulations=("", " a", " b"))
     assert model.calls == [("pro", "4K"), ("pro", "4K"), ("pro", "4K")]  # one rung, 3 nudges
+
+
+async def test_ladder_skips_unhealthy_rung() -> None:
+    # A stalled model is remembered: later ladders go straight past its rungs
+    # (live incident: every step re-discovered the stall and burned the budget).
+    from sticker_service.services.models import base
+
+    base.mark_unhealthy("pro", seconds=60)
+    try:
+        model = _ScriptedModel([b"IMG"])
+        out = await generate_via_ladder(model, "p", [b"r"], (("pro", "4K"), ("flash", "4K")))
+        assert out == b"IMG"
+        assert model.calls == [("flash", "4K")]  # pro skipped entirely
+    finally:
+        base._unhealthy_until.clear()
+
+
+async def test_ladder_still_tries_when_all_rungs_unhealthy() -> None:
+    # Degraded attempt beats none: if EVERY rung is cooling, run them anyway.
+    from sticker_service.services.models import base
+
+    base.mark_unhealthy("pro", seconds=60)
+    base.mark_unhealthy("flash", seconds=60)
+    try:
+        model = _ScriptedModel([b"IMG"])
+        out = await generate_via_ladder(model, "p", [b"r"], (("pro", "4K"), ("flash", "4K")))
+        assert out == b"IMG"
+        assert model.calls[0][0] == "pro"  # nothing skipped
+    finally:
+        base._unhealthy_until.clear()
+
+
+def test_unhealthy_mark_expires() -> None:
+    import time
+
+    from sticker_service.services.models import base
+
+    base.mark_unhealthy("m", seconds=0.02)
+    assert base.is_unhealthy("m")
+    time.sleep(0.05)
+    assert not base.is_unhealthy("m")
