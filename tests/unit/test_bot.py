@@ -59,13 +59,19 @@ async def test_set_commands_scopes_default_admin_and_owner(
     bot = AsyncMock()
     await _set_commands(bot, settings)
 
+    from aiogram.types import BotCommandScopeAllGroupChats
+
     calls = bot.set_my_commands.await_args_list
-    assert len(calls) == 3  # default + two admin chats
+    assert len(calls) == 4  # default + all-group-chats + two admin chats
     default_cmds = [c.command for c in calls[0].args[0]]
     assert "stats" not in default_cmds  # the public menu stays clean
+    group_call = next(
+        c for c in calls if isinstance(c.kwargs.get("scope"), BotCommandScopeAllGroupChats)
+    )
+    assert [c.command for c in group_call.args[0]] == ["start"]  # groups: only /start
     by_chat = {
         c.kwargs["scope"].chat_id: [cmd.command for cmd in c.args[0]]
-        for c in calls[1:]
+        for c in calls
         if isinstance(c.kwargs.get("scope"), BotCommandScopeChat)
     }
     assert "mode" in by_chat[10] and "stats" in by_chat[10]  # first admin = owner
@@ -86,7 +92,7 @@ async def test_set_commands_survives_a_403_admin_chat() -> None:
 
     bot.set_my_commands.side_effect = _flaky
     await _set_commands(bot, settings)  # must not raise
-    assert bot.set_my_commands.await_count == 3  # tried default + both admins
+    assert bot.set_my_commands.await_count == 4  # default + group scope + both admins
 
 
 async def test_cmd_start_answers() -> None:

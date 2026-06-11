@@ -58,7 +58,12 @@ class WhitelistMiddleware(BaseMiddleware):
         if user is None:  # service updates without a user — let aiogram handle
             return await handler(event, data)
 
-        answer = getattr(event, "answer", None)
+        # In groups/channels the bot is a guest: never post the private
+        # debug/ban soft-notices there (that would spam the chat). The greeting
+        # handlers run; everything else is silently ignored outside alpha.
+        chat = data.get("event_chat")
+        is_private = chat is None or chat.type == "private"
+        answer = getattr(event, "answer", None) if is_private else None
         is_admin = user.id in get_settings().admin_id_set
         mode = await self._db.get_config("mode", modes.DEFAULT)
 
@@ -67,8 +72,10 @@ class WhitelistMiddleware(BaseMiddleware):
             await self._db.allow(user.id, getattr(user, "username", None))
             return await handler(event, data)
 
-        # Debug: only admins; everyone else gets a soft notice.
+        # Debug: only admins act; in groups still let the public greeting through.
         if mode == modes.DEBUG:
+            if not is_private:
+                return await handler(event, data)
             if answer is not None:
                 await answer(
                     "🛠 Бот сейчас в разработке — скоро мы всё покажем! Загляни чуть позже."

@@ -12,7 +12,7 @@ import contextlib
 import logging
 
 from aiogram import Bot
-from aiogram.types import BotCommand, BotCommandScopeChat
+from aiogram.types import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeChat
 
 from sticker_service.config import Settings, get_settings
 from sticker_service.db import Database
@@ -171,6 +171,12 @@ async def _set_commands(bot: Bot, settings: Settings) -> None:
     logged and skipped; the menu appears on the restart after first contact.
     """
     await bot.set_my_commands(_user_commands())
+    # Groups/channels: only /start makes sense (the rest is a private workspace).
+    with contextlib.suppress(Exception):
+        await bot.set_my_commands(
+            [BotCommand(command="start", description="О боте")],
+            scope=BotCommandScopeAllGroupChats(),
+        )
     first_admin = settings.first_admin_id
     for admin_id in settings.admin_id_list:
         scoped = commands_for(admin=True, owner=admin_id == first_admin)
