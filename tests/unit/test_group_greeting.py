@@ -41,6 +41,8 @@ def _msg(
     *,
     reply_to: Any = None,
     from_user: Any = _DEFAULT_USER,
+    sender_chat: Any = None,
+    auto_forward: bool = False,
     bot: Any = None,
 ) -> AsyncMock:
     m = AsyncMock()
@@ -48,6 +50,8 @@ def _msg(
     m.caption = None
     m.reply_to_message = reply_to
     m.from_user = from_user
+    m.sender_chat = sender_chat
+    m.is_automatic_forward = auto_forward
     m.bot = bot or _bot()
     return m
 
@@ -65,9 +69,11 @@ async def test_addressed_by_mention() -> None:
     assert await _bot_addressed(_msg("эй @yuki_stickers_bot нарисуй меня")) is True
 
 
-async def test_addressed_by_name() -> None:
+async def test_addressed_by_name_vocative_only() -> None:
     assert await _bot_addressed(_msg("Юки, привет!")) is True
     assert await _bot_addressed(_msg("yuki can you draw")) is True
+    # ...but only as a vocative at the start — not when merely talked about.
+    assert await _bot_addressed(_msg("классный бот юки, рекомендую")) is False
 
 
 async def test_addressed_by_reply_to_bot() -> None:
@@ -79,9 +85,21 @@ async def test_not_addressed_plain_chatter() -> None:
     assert await _bot_addressed(_msg("просто болтаем о погоде")) is False
 
 
-async def test_ignores_channel_autoforward_without_user() -> None:
-    # Channel posts forwarded into the discussion group have no from_user.
-    assert await _bot_addressed(_msg("свежий пост про юки", from_user=None)) is False
+async def test_ignores_channel_post_sender_chat() -> None:
+    # A message posted on behalf of a chat (channel post / anonymous admin).
+    chat = SimpleNamespace(id=-100, type="channel")
+    assert await _bot_addressed(_msg("пост про @yuki_stickers_bot", sender_chat=chat)) is False
+
+
+async def test_ignores_channel_autoforward_into_discussion_group() -> None:
+    # The exact bug: the channel's own post mentioning the bot, auto-forwarded
+    # into the discussion group, must NOT trigger a self-greeting.
+    assert (
+        await _bot_addressed(
+            _msg("Свой пак у @yuki_stickers_bot", from_user=None, auto_forward=True)
+        )
+        is False
+    )
 
 
 async def test_ignores_other_bots() -> None:
