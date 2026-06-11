@@ -635,23 +635,35 @@ class Database:
         ) as cur:
             return await cur.fetchone() is not None
 
-    async def count_events(self, event: str) -> int:
-        async with self._conn.execute(
-            "SELECT COUNT(*) AS n FROM events WHERE event = ?", (event,)
-        ) as cur:
+    async def count_events(self, event: str, *, exclude_users: Sequence[int] = ()) -> int:
+        """Count ``event`` rows, optionally excluding some user_ids (e.g. admins)."""
+        sql = "SELECT COUNT(*) AS n FROM events WHERE event = ?"
+        params: list[object] = [event]
+        if exclude_users:
+            marks = ",".join("?" for _ in exclude_users)
+            sql += f" AND user_id NOT IN ({marks})"  # nosec B608 - only '?' marks
+            params.extend(exclude_users)
+        async with self._conn.execute(sql, params) as cur:
             row = await cur.fetchone()
         return int(row["n"]) if row else 0
 
-    async def count_events_with_modes(self, event: str, event_modes: Sequence[str]) -> int:
+    async def count_events_with_modes(
+        self, event: str, event_modes: Sequence[str], *, exclude_users: Sequence[int] = ()
+    ) -> int:
         """Count ``event`` rows whose JSON detail has ``mode`` in ``event_modes``."""
         if not event_modes:
             return 0
         marks = ",".join("?" for _ in event_modes)
-        async with self._conn.execute(
-            f"SELECT COUNT(*) AS n FROM events WHERE event = ? "  # nosec B608 - only '?' marks
-            f"AND json_extract(detail, '$.mode') IN ({marks})",
-            (event, *event_modes),
-        ) as cur:
+        sql = (
+            "SELECT COUNT(*) AS n FROM events WHERE event = ? "  # nosec B608 - only '?' marks
+            f"AND json_extract(detail, '$.mode') IN ({marks})"
+        )
+        params: list[object] = [event, *event_modes]
+        if exclude_users:
+            xmarks = ",".join("?" for _ in exclude_users)
+            sql += f" AND user_id NOT IN ({xmarks})"  # nosec B608 - only '?' marks
+            params.extend(exclude_users)
+        async with self._conn.execute(sql, params) as cur:
             row = await cur.fetchone()
         return int(row["n"]) if row else 0
 

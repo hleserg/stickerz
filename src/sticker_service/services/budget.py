@@ -9,6 +9,7 @@ remaining fire once each (re-armed when the budget is raised).
 
 from __future__ import annotations
 
+from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.services import analytics
 
@@ -42,14 +43,26 @@ async def cost_per_gen(db: Database) -> float:
 
 
 async def total_generations(db: Database) -> int:
-    return await db.count_events(analytics.GENERATION_DONE)
+    """Tester generations counted toward the budget (admins' own runs excluded)."""
+    return await db.count_events(
+        analytics.GENERATION_DONE, exclude_users=get_settings().admin_id_list
+    )
 
 
 async def total_cost(db: Database) -> float:
-    """All-time spend estimate: full-price gens × per + half-price gens × per/2."""
+    """Spend estimate from TESTER generations only.
+
+    Admins (the owner) bypass credit charging and generate for free while
+    developing/testing — counting those would make the alpha budget look spent
+    before a single tester arrives. The $ budget tracks tester consumption, so
+    admin-attributed generations are excluded.
+    """
     per = await cost_per_gen(db)
-    total = await db.count_events(analytics.GENERATION_DONE)
-    half = await db.count_events_with_modes(analytics.GENERATION_DONE, HALF_COST_MODES)
+    admins = get_settings().admin_id_list
+    total = await db.count_events(analytics.GENERATION_DONE, exclude_users=admins)
+    half = await db.count_events_with_modes(
+        analytics.GENERATION_DONE, HALF_COST_MODES, exclude_users=admins
+    )
     return (total - half) * per + half * per / 2
 
 

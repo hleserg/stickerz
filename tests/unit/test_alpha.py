@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+import pytest
 import pytest_asyncio
 
 from sticker_service.db import DEFAULT_CREDITS, Database
@@ -94,6 +95,25 @@ async def test_budget_remaining_and_enough(db: Database) -> None:
     assert round(await budget.remaining_budget(db), 2) == 3.5
     assert await budget.enough_for(db, 2) is True  # 2*0.65=1.3 ≤ 3.5
     assert await budget.enough_for(db, 6) is False  # 6*0.65=3.9 > 3.5
+
+
+async def test_budget_excludes_admin_generations(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Admins (the owner) generate for free while testing — their runs must not
+    # count toward the alpha tester budget.
+    from sticker_service.config import get_settings
+
+    monkeypatch.setenv("APP_ADMIN_IDS", "777")
+    get_settings.cache_clear()
+    try:
+        for _ in range(5):  # admin's own dev/test generations
+            await db.add_event(777, analytics.GENERATION_DONE, {"mode": "fresh"})
+        await db.add_event(42, analytics.GENERATION_DONE, {"mode": "fresh"})  # a real tester
+        assert round(await budget.total_cost(db), 2) == 0.65  # only the tester's one pack
+        assert await budget.total_generations(db) == 1
+    finally:
+        get_settings.cache_clear()
 
 
 async def test_budget_counts_half_price_modes_at_half_cost(db: Database) -> None:
