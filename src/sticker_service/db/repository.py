@@ -647,6 +647,54 @@ class Database:
             row = await cur.fetchone()
         return int(row["n"]) if row else 0
 
+    async def count_distinct_users(
+        self, *, since: str | None = None, exclude_users: Sequence[int] = ()
+    ) -> int:
+        """Distinct user_ids seen in events (optionally since an ISO time)."""
+        sql = "SELECT COUNT(DISTINCT user_id) AS n FROM events"
+        conds: list[str] = []
+        params: list[object] = []
+        if since:
+            conds.append("created_at >= ?")
+            params.append(since)
+        if exclude_users:
+            marks = ",".join("?" for _ in exclude_users)
+            conds.append(f"user_id NOT IN ({marks})")  # nosec B608 - only '?' marks
+            params.extend(exclude_users)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        async with self._conn.execute(sql, params) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def count_users_with_event(self, event: str, *, exclude_users: Sequence[int] = ()) -> int:
+        """Distinct user_ids that produced at least one ``event``."""
+        sql = "SELECT COUNT(DISTINCT user_id) AS n FROM events WHERE event = ?"
+        params: list[object] = [event]
+        if exclude_users:
+            marks = ",".join("?" for _ in exclude_users)
+            sql += f" AND user_id NOT IN ({marks})"  # nosec B608 - only '?' marks
+            params.extend(exclude_users)
+        async with self._conn.execute(sql, params) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def count_returning_users(self, *, exclude_users: Sequence[int] = ()) -> int:
+        """Users active on at least two distinct calendar days (a retention proxy)."""
+        inner = "SELECT user_id FROM events"
+        params: list[object] = []
+        if exclude_users:
+            marks = ",".join("?" for _ in exclude_users)
+            inner += f" WHERE user_id NOT IN ({marks})"  # nosec B608 - only '?' marks
+            params.extend(exclude_users)
+        inner += " GROUP BY user_id HAVING COUNT(DISTINCT date(created_at)) >= 2"
+        async with self._conn.execute(
+            f"SELECT COUNT(*) AS n FROM ({inner})",  # nosec B608 - only '?' marks
+            params,
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["n"]) if row else 0
+
     async def count_events_with_modes(
         self, event: str, event_modes: Sequence[str], *, exclude_users: Sequence[int] = ()
     ) -> int:
