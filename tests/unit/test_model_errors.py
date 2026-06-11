@@ -56,3 +56,18 @@ def test_user_message_per_kind() -> None:
     assert "перегружена" in errors.user_message(RuntimeError("503 high demand"))
     # Unknown errors surface their own text so admins can diagnose.
     assert "400 invalid argument" in errors.user_message(RuntimeError("400 invalid argument"))
+
+
+def test_pipeline_error_is_retryable_with_apology() -> None:
+    # A broken sheet must surface as TRANSIENT: the user gets the apology and
+    # the free retry button instead of a raw error (owner's rule: garbage
+    # never ships, retry costs nothing).
+    from sticker_service.services.models.errors import (
+        TransientPipelineError,
+        is_retryable,
+        user_message,
+    )
+
+    exc = TransientPipelineError("sheet slicing failed: scrap piece")
+    assert is_retryable(exc) is True
+    assert "бесплатно" in user_message(exc)

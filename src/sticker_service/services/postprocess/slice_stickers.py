@@ -286,30 +286,195 @@ def _clean_satellites(
 # PLAYBOOK-END
 
 
-def grid_slice(
-    image: Image.Image, rows: int, cols: int, *, tolerance: float = 70.0, min_content: int = 64
-) -> list[Image.Image]:
-    """Cut a sheet into a regular ``rows×cols`` grid; per-cell auto background removal.
+def _dominant_border_color(arr: np.ndarray, band_frac: float = 0.02) -> tuple[int, int, int]:
+    """The most common color along the sheet border (histogram peak, not mean).
 
-    Fallback for when the model didn't honor the exact chroma background or left
-    no gaps between stickers, so connected-component slicing can't separate them.
+    A mean/median washes a gradient into a color nobody painted; the histogram
+    peak is the paint the model actually used for most of the frame. Colors are
+    quantized to 16-step bins to absorb compression noise.
     """
-    rgba = image.convert("RGBA")
-    width, height = rgba.size
-    cell_w, cell_h = width / cols, height / rows
-    out: list[Image.Image] = []
-    for r in range(rows):
-        for c in range(cols):
-            box = (
-                round(c * cell_w),
-                round(r * cell_h),
-                round((c + 1) * cell_w),
-                round((r + 1) * cell_h),
-            )
-            cell = _clean_satellites(chroma_key_auto(rgba.crop(box), tolerance=tolerance))
-            if _opaque_area(cell) >= min_content:
-                out.append(cell)
-    return out
+    h, w = arr.shape[:2]
+    band = max(2, int(min(h, w) * band_frac))
+    edges = np.concatenate(
+        [
+            arr[:band, :, :3].reshape(-1, 3),
+            arr[-band:, :, :3].reshape(-1, 3),
+            arr[:, :band, :3].reshape(-1, 3),
+            arr[:, -band:, :3].reshape(-1, 3),
+        ]
+    ).astype(np.int64)
+    q = edges // 16
+    keys = q[:, 0] * 1024 + q[:, 1] * 32 + q[:, 2]
+    top = int(np.bincount(keys).argmax())
+    members = edges[keys == top]
+    med = np.median(members, axis=0)
+    return int(med[0]), int(med[1]), int(med[2])
+
+
+def outer_flood_key(
+    image: Image.Image,
+    color: tuple[int, int, int],
+    *,
+    tolerance: float = 60.0,
+    close_px: int = 3,
+) -> Image.Image:
+    """Key out ``color`` flooding ONLY from the sheet border (owner's design).
+
+    The flood cannot enter a figure: interior pixels of the same color are
+    unreachable from the frame. Hairline gaps in the outline are sealed with a
+    morphological closing of the figure mask, and any background-ish region NOT
+    connected to the border stays opaque (the "roll the flood back" rule).
+    This survives the worst case — a background matching the white die-cut
+    outline — eating the outline ring but never the figure itself.
+    """
+    arr = np.asarray(image.convert("RGBA"), dtype=np.float32)
+    r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
+    cr, cg, cb = color
+    candidate = np.sqrt((r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2) < tolerance
+    figure = ~candidate
+    if close_px:
+        seal = np.ones((close_px, close_px), bool)
+        figure = cast(Any, ndimage.binary_closing(figure, structure=seal))
+    structure = ndimage.generate_binary_structure(2, 2)
+    labeled = cast(Any, ndimage.label(~figure, structure=structure))[0]
+    border = np.unique(
+        np.concatenate([labeled[0, :], labeled[-1, :], labeled[:, 0], labeled[:, -1]])
+    )
+    border = border[border != 0]
+    background = np.isin(labeled, border)
+    out = arr.copy()
+    out[..., 3] = np.where(background, 0.0, out[..., 3])
+    return Image.fromarray(out.astype(np.uint8), mode="RGBA")
+
+
+def _border_clear_frac(rgba: Image.Image, band: int = 4) -> float:
+    """Share of border pixels made transparent — the keying honesty criterion."""
+    a = np.asarray(rgba)[..., 3]
+    edge = np.concatenate(
+        [a[:band].ravel(), a[-band:].ravel(), a[:, :band].ravel(), a[:, -band:].ravel()]
+    )
+    return float((edge == 0).mean()) if edge.size else 0.0
+
+
+def _is_whitish(color: tuple[int, int, int]) -> bool:
+    return min(color) >= 200 and (max(color) - min(color)) <= 40
+
+
+def _figure_mask(arr: np.ndarray) -> np.ndarray:
+    """Opaque AND not white-ish — the colored content of a piece."""
+    r, g, b, a = arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3]
+    mn = np.minimum(np.minimum(r, g), b)
+    mx = np.maximum(np.maximum(r, g), b)
+    return (a > 0) & ~((mn >= 200) & (mx - mn <= 40))
+
+
+def add_outline(piece: Image.Image, width: int) -> Image.Image:
+    """Draw a fresh white die-cut ring around a piece's opaque silhouette."""
+    src = np.asarray(piece.convert("RGBA"))
+    alpha = src[..., 3] > 0
+    if width <= 0 or not alpha.any():
+        return piece
+    pad = width + 2
+    h, w = src.shape[:2]
+    canvas = np.zeros((h + 2 * pad, w + 2 * pad, 4), dtype=np.uint8)
+    canvas[pad : pad + h, pad : pad + w] = src
+    padded = canvas[..., 3] > 0
+    ring = cast(Any, ndimage.binary_dilation(padded, iterations=width)) & ~padded
+    canvas[ring] = (255, 255, 255, 255)
+    return _trim_transparent(Image.fromarray(canvas, mode="RGBA"))
+
+
+def estimate_outline_width(pieces: list[Image.Image]) -> int:
+    """Median white-margin width of the pack's healthy stickers."""
+    widths: list[float] = []
+    for piece in pieces[:6]:
+        arr = np.asarray(piece.convert("RGBA"))
+        alpha = arr[..., 3] > 0
+        fig = _figure_mask(arr)
+        if not fig.any() or not alpha.any():
+            continue
+        dist = cast(Any, ndimage.distance_transform_edt)(alpha)
+        boundary = fig & ~cast(Any, ndimage.binary_erosion(fig))
+        if boundary.any():
+            widths.append(float(np.median(dist[boundary])))
+    if not widths:
+        return 8
+    return int(max(4, min(16, round(sorted(widths)[len(widths) // 2]))))
+
+
+def split_merged(
+    piece: Image.Image, *, target_area: float, outline_width: int
+) -> list[Image.Image] | None:
+    """Split one merged-outline blob into its stickers (owner's hybrid design).
+
+    Primary path («по контуру + новая обводка»): the colored cores identify the
+    figures exactly; the fused white bridge is DISCARDED and every figure gets a
+    fresh even die-cut ring — no seam at all. Detached colored satellites (a
+    heart by a hand) follow their nearest core. Fallback («рез по талии») when
+    cores are unreadable (white-clad figure): cut across the thinnest section
+    of the bridge. Returns ``None`` when neither works — the caller fails the
+    generation honestly instead of shipping garbage.
+    """
+    arr = np.asarray(piece.convert("RGBA")).copy()
+    fig = _figure_mask(arr)
+    structure = ndimage.generate_binary_structure(2, 2)
+    # Close generously first: a face and a shirt of the SAME figure may be
+    # separated by white clothing — they must read as one core.
+    closed = ndimage.binary_closing(fig, structure=np.ones((9, 9), bool))
+    labeled, count = cast(Any, ndimage.label(closed, structure=structure))
+    core_labels: list[int] = []
+    if count:
+        areas = np.bincount(labeled.ravel())
+        core_min = 0.12 * target_area
+        core_labels = [lbl for lbl in range(1, count + 1) if areas[lbl] >= core_min]
+    if len(core_labels) >= 2:
+        stack = np.stack(
+            [cast(Any, ndimage.distance_transform_edt)(labeled != lbl) for lbl in core_labels]
+        )
+        owner = np.argmin(stack, axis=0)
+        parts: list[Image.Image] = []
+        for k in range(len(core_labels)):
+            keep = fig & (owner == k)
+            if not keep.any():
+                continue
+            sub = arr.copy()
+            sub[..., 3] = np.where(keep, sub[..., 3], 0)
+            part = _trim_transparent(Image.fromarray(sub, mode="RGBA"))
+            if _opaque_area(part) < 64:
+                continue
+            parts.append(add_outline(part, outline_width))
+        return parts if len(parts) >= 2 else None
+    return _waist_cut(piece, outline_width=outline_width)
+
+
+def _waist_cut(piece: Image.Image, *, outline_width: int) -> list[Image.Image] | None:
+    """Cut a blob across the thinnest section between its two halves."""
+    arr = np.asarray(piece.convert("RGBA")).copy()
+    alpha = arr[..., 3] > 0
+    h, w = alpha.shape
+    horizontal = w >= h  # cut across the longer dimension
+    spans = alpha.sum(axis=0) if horizontal else alpha.sum(axis=1)
+    size = w if horizontal else h
+    lo, hi = int(size * 0.25), int(size * 0.75)
+    if hi <= lo + 2:
+        return None
+    pos = lo + int(np.argmin(spans[lo:hi]))
+    if spans[pos] > 0.5 * spans.max():
+        return None  # no real waist — a cut here would saw through a figure
+    first, second = arr.copy(), arr.copy()
+    if horizontal:
+        first[:, pos:, 3] = 0
+        second[:, :pos, 3] = 0
+    else:
+        first[pos:, :, 3] = 0
+        second[:pos, :, 3] = 0
+    parts: list[Image.Image] = []
+    for half in (first, second):
+        img = _trim_transparent(Image.fromarray(half, mode="RGBA"))
+        if _opaque_area(img) < 64:
+            return None
+        parts.append(add_outline(img, max(2, outline_width // 2)))
+    return parts
 
 
 def drop_text_strips(pieces: list[Image.Image]) -> list[Image.Image]:
@@ -355,7 +520,17 @@ def drop_outlier_fragments(
     if expected is not None and len(pieces) <= expected:
         return pieces  # already at/under target — nothing to drop, skip the scan
     areas = [_opaque_area(p) for p in pieces]
-    smallest_first = sorted(range(len(pieces)), key=lambda i: areas[i])
+    # Owner's rule: pieces near the pack's median are KEPT; anomalies are what
+    # to hunt — much smaller than the median AND/OR of a clearly different
+    # shape (a sticker is chunky; a stray lettering strip is long and narrow).
+    aspects = [max(p.size) / max(1, min(p.size)) for p in pieces]
+    med_area = max(1, sorted(areas)[len(areas) // 2])
+    med_aspect = sorted(aspects)[len(aspects) // 2]
+
+    def _anomaly(i: int) -> float:
+        return max(0.0, 1.0 - areas[i] / med_area) + max(0.0, aspects[i] - med_aspect) / 2.0
+
+    smallest_first = sorted(range(len(pieces)), key=_anomaly, reverse=True)
     if expected is not None:
         to_drop = set(smallest_first[: len(pieces) - expected])
     else:
@@ -368,6 +543,59 @@ def drop_outlier_fragments(
     return kept or pieces
 
 
+@dataclass(frozen=True)
+class SheetQuality:
+    """Verdict on whether sliced pieces actually look like stickers.
+
+    The slicing pipeline always lands on the expected COUNT by construction
+    (grid fallback, smallest-extras dropping) — so a broken sheet (shattered
+    figures, leaked chroma) used to ship N watermarked scraps that merely
+    counted right. ``score`` orders attempts (higher = healthier).
+    """
+
+    ok: bool
+    reason: str
+    score: float
+    path: str = "components"
+
+
+def sheet_quality(
+    pieces: list[Image.Image],
+    *,
+    sheet_size: tuple[int, int],
+    grid: tuple[int, int],
+    expected: int,
+) -> SheetQuality:
+    """Cheap shape sanity: pieces must look like stickers, not scraps.
+
+    Checks (no model calls): the count matches; every piece's footprint is
+    comparable to the others (min/median area); each piece occupies a sane
+    fraction of its grid tile; nothing is a sliver. Any failure means the
+    sheet itself is broken and regenerating beats publishing garbage.
+    """
+    if len(pieces) != expected:
+        return SheetQuality(False, f"count {len(pieces)} != {expected}", 0.0)
+    areas = [_opaque_area(p) for p in pieces]
+    median = sorted(areas)[len(areas) // 2]
+    if median <= 0:
+        return SheetQuality(False, "empty pieces", 0.0)
+    area_ratio = min(areas) / median
+    rows, cols = grid
+    tile_area = (sheet_size[0] / cols) * (sheet_size[1] / rows)
+    tile_fracs = [(p.size[0] * p.size[1]) / tile_area for p in pieces]
+    aspects = [max(p.size) / max(1, min(p.size)) for p in pieces]
+    score = area_ratio
+    if area_ratio < 0.25:
+        return SheetQuality(False, f"scrap piece (min/median area {area_ratio:.2f})", score)
+    if min(tile_fracs) < 0.20:
+        return SheetQuality(False, f"piece too small for its tile ({min(tile_fracs):.2f})", score)
+    if max(tile_fracs) > 1.6:
+        return SheetQuality(False, f"piece spans tiles ({max(tile_fracs):.2f})", score)
+    if max(aspects) > 4.0:
+        return SheetQuality(False, f"sliver piece (aspect {max(aspects):.1f})", score)
+    return SheetQuality(True, "ok", score)
+
+
 def process_sheet(
     sheet: bytes | Image.Image,
     *,
@@ -377,29 +605,86 @@ def process_sheet(
     grid: tuple[int, int] | None = None,
     expected: int | None = None,
 ) -> list[bytes]:
-    """Full pipeline: chroma-key → slice → drop junk → fit 512 → encode.
+    """Full pipeline: chroma-key → slice → drop junk → fit 512 → encode."""
+    return process_sheet_checked(
+        sheet, chroma=chroma, tolerance=tolerance, min_area=min_area, grid=grid, expected=expected
+    )[0]
 
-    Detached caption-only fragments are dropped first so no sticker is text without
-    a character. Only when connected-component slicing falls short of the expected
-    number of stickers do we fall back to cutting the regular ``grid`` (for sheets
-    where the model used an off background or left no gaps); we then keep whichever
-    result is closest to ``expected``. ``expected`` defaults to ``rows*cols-1`` so
-    callers that don't know the exact count keep the previous behaviour. Finally
-    small-area outliers (stray glyphs, scenery shards, paint splashes the chroma
-    key missed) are dropped down to ``expected`` so no junk tile is published.
+
+def process_sheet_checked(
+    sheet: bytes | Image.Image,
+    *,
+    chroma: str = CHROMA_DEFAULT,
+    tolerance: float = 80.0,
+    min_area: int = 256,
+    grid: tuple[int, int] | None = None,
+    expected: int | None = None,
+) -> tuple[list[bytes], SheetQuality]:
+    """Full pipeline + a :class:`SheetQuality` verdict (owner-designed chain).
+
+    1. Magenta family flood → components. Count matches → done.
+    2. The border isn't magenta → key the DOMINANT border color with an
+       outer-only flood (cannot enter figures; gaps sealed; non-border leaks
+       rolled back). Honesty criterion: ≥80% of the border must clear, else
+       the background is a gradient/pattern → give up (no blind cutting).
+       A whitish background ate the outline → every piece gets a fresh
+       synthetic die-cut ring.
+    3. An oversized piece (≥ ~1.7× the per-sticker share) is a merged blob →
+       :func:`split_merged` (cores → re-ring; else waist cut).
+    4. Shape/area anomalies are dropped; :func:`sheet_quality` issues the final
+       verdict. ``quality.ok == False`` means the caller must NOT ship.
     """
     image = sheet if isinstance(sheet, Image.Image) else Image.open(BytesIO(sheet))
     keyed = chroma_key(image, chroma=chroma, tolerance=tolerance)
     pieces = drop_text_strips(slice_sheet(keyed, min_area=min_area))
-    if grid is not None:
-        rows, cols = grid
-        target = expected if expected is not None else rows * cols - 1
-        if len(pieces) < target:
-            grid_pieces = drop_text_strips(grid_slice(image, rows, cols))
-            if expected is not None:
-                # Keep whichever slicing landed closest to the real caption count.
-                pieces = min((pieces, grid_pieces), key=lambda ps: abs(len(ps) - expected))
-            else:
-                pieces = grid_pieces
+    path = "components"
+
+    if grid is None or expected is None:
+        pieces = drop_outlier_fragments(pieces, expected=expected)
+        return (
+            [encode_sticker(fit_to_512(piece)) for piece in pieces],
+            SheetQuality(True, "unchecked", 1.0, path),
+        )
+
+    arr = np.asarray(image.convert("RGBA"))
+    if len(pieces) != expected:
+        # Maybe the model ignored the magenta contract: key the actual border
+        # color instead (outer flood, owner's design).
+        dominant = _dominant_border_color(arr)
+        cr, cg, cb = _hex_to_rgb(chroma)
+        off_contract = (abs(dominant[0] - cr) + abs(dominant[1] - cg) + abs(dominant[2] - cb)) > 120
+        if off_contract:
+            keyed2 = outer_flood_key(image, dominant)
+            if _border_clear_frac(keyed2) >= 0.8:
+                pieces2 = drop_text_strips(slice_sheet(keyed2, min_area=min_area))
+                if abs(len(pieces2) - expected) < abs(len(pieces) - expected):
+                    pieces, path = pieces2, "auto_key"
+                    if _is_whitish(dominant):
+                        width = estimate_outline_width(pieces)
+                        pieces = [add_outline(piece, width) for piece in pieces]
+
+    if 0 < len(pieces) < expected:
+        # Merged stickers: an oversized blob vs the per-sticker share is the
+        # outlier to cut carefully (owner's rule), never a blind grid.
+        total = sum(_opaque_area(piece) for piece in pieces)
+        target = total / expected if expected else 0
+        if target > 0:
+            width = estimate_outline_width(pieces)
+            rebuilt: list[Image.Image] = []
+            split_any = False
+            for piece in pieces:
+                if _opaque_area(piece) >= 1.7 * target:
+                    parts = split_merged(piece, target_area=target, outline_width=width)
+                    if parts:
+                        rebuilt.extend(parts)
+                        split_any = True
+                        continue
+                rebuilt.append(piece)
+            if split_any:
+                pieces = rebuilt
+                path = "split" if path == "components" else f"{path}+split"
+
     pieces = drop_outlier_fragments(pieces, expected=expected)
-    return [encode_sticker(fit_to_512(piece)) for piece in pieces]
+    quality = sheet_quality(pieces, sheet_size=image.size, grid=grid, expected=expected)
+    quality = SheetQuality(quality.ok, quality.reason, quality.score, path)
+    return [encode_sticker(fit_to_512(piece)) for piece in pieces], quality

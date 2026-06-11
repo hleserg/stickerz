@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from sticker_service.services.postprocess import (
+    add_outline,
     chroma_key,
     chroma_key_auto,
     drop_outlier_fragments,
@@ -15,9 +16,10 @@ from sticker_service.services.postprocess import (
     encode_sticker,
     fit_to_512,
     grid_for,
-    grid_slice,
+    outer_flood_key,
     process_sheet,
     slice_sheet,
+    split_merged,
 )
 from sticker_service.services.postprocess.slice_stickers import _clean_satellites, _opaque_area
 
@@ -286,21 +288,16 @@ def test_chroma_key_auto_detects_pink_bg() -> None:
     assert arr[50, 50, 3] == 255  # the circle stays
 
 
-def test_grid_slice_separates_packed_cells() -> None:
-    pieces = grid_slice(_packed_pink_grid(2, 3), 2, 3)
-    assert len(pieces) == 6
-    for piece in pieces:
-        assert np.asarray(piece.convert("RGBA"))[..., 3].max() == 255
-
-
-def test_process_sheet_grid_fallback_when_chroma_fails() -> None:
-    # Pink, gap-less sheet: chroma #FF00FF yields 1 blob; grid fallback recovers 6.
+def test_process_sheet_auto_key_when_chroma_off_contract() -> None:
+    # The model ignored magenta and painted a pink background: the dominant
+    # border color is keyed with the outer flood, components are found — no
+    # blind grid cutting anywhere.
     sheet = _packed_pink_grid(2, 3)
-    assert len(slice_sheet(chroma_key(sheet))) < 6  # chroma path under-performs
-    stickers = process_sheet(sheet, grid=(2, 3))
-    assert len(stickers) == 6
-    for data in stickers:
-        assert max(Image.open(BytesIO(data)).size) == 512
+    pieces = process_sheet(sheet, grid=(2, 3), expected=6)
+    assert len(pieces) == 6
+    for raw in pieces:
+        img = Image.open(BytesIO(raw))
+        assert img.size[0] == 512 or img.size[1] == 512
 
 
 def test_process_sheet_keeps_clean_chroma_when_expected_met() -> None:
@@ -315,3 +312,153 @@ def test_process_sheet_keeps_clean_chroma_when_expected_met() -> None:
         draw.rectangle([x, y, x + 60, y + 60], fill=(0, 120, 200, 255))
     stickers = process_sheet(sheet, grid=(4, 4), expected=14)
     assert len(stickers) == 14  # clean chroma result kept, no junky grid fallback
+
+
+# --- owner-designed slicing chain (alpha incident follow-up) ------------------
+
+
+def _figure_with_outline(size: int = 120, gap: int = 0) -> Image.Image:
+    """A colored figure wearing a white outline ring, white interior detail."""
+    img = Image.new("RGBA", (size, size), (255, 255, 255, 255))  # white bg
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([20, 20, size - 20, size - 20], fill=(255, 255, 255, 255))  # outline
+    draw.ellipse([30, 30, size - 30, size - 30], fill=(30, 90, 200, 255))  # figure
+    draw.rectangle([52, 52, size - 52, size - 52], fill=(255, 255, 255, 255))  # white shirt
+    if gap:  # poke a hairline gap in the outline so the flood could leak
+        draw.rectangle([size // 2 - gap, 20, size // 2 + gap, 30], fill=(255, 255, 255, 255))
+    return img
+
+
+def test_outer_flood_keeps_white_interior_on_white_bg() -> None:
+    # Worst case (owner): the background matches the white outline. The outer
+    # flood eats bg+outline ring from the frame but can NOT reach the white
+    # shirt INSIDE the figure.
+    img = _figure_with_outline()
+    keyed = outer_flood_key(img, (255, 255, 255))
+    arr = np.asarray(keyed)
+    assert arr[2, 2, 3] == 0  # background cleared
+    c = img.size[0] // 2
+    assert arr[c, c, 3] > 0  # white shirt interior survived
+
+
+def test_outer_flood_seals_hairline_gap() -> None:
+    # A 2px break in the outline must not let the flood pour into the figure.
+    img = _figure_with_outline(gap=2)
+    keyed = outer_flood_key(img, (255, 255, 255))
+    arr = np.asarray(keyed)
+    c = img.size[0] // 2
+    assert arr[c, c, 3] > 0  # interior intact despite the gap
+
+
+def test_add_outline_draws_white_ring() -> None:
+    img = Image.new("RGBA", (60, 60), (0, 0, 0, 0))
+    ImageDraw.Draw(img).ellipse([15, 15, 45, 45], fill=(200, 30, 30, 255))
+    ringed = add_outline(img, 5)
+    arr = np.asarray(ringed)
+    # The content grew by ~2×ring vs the bare 31px ellipse (result is trimmed).
+    assert ringed.size[0] >= 31 + 2 * 4
+    # Some pure-white opaque pixels appeared (the ring).
+    white = (arr[..., 3] > 0) & (arr[..., 0] == 255) & (arr[..., 1] == 255)
+    assert white.any()
+
+
+def _two_merged_figures() -> Image.Image:
+    """Two colored cores fused by a white outline bridge (one component)."""
+    img = Image.new("RGBA", (220, 100), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([5, 15, 95, 95], fill=(255, 255, 255, 255))  # outline A
+    draw.ellipse([125, 15, 215, 95], fill=(255, 255, 255, 255))  # outline B
+    draw.rectangle([80, 40, 140, 70], fill=(255, 255, 255, 255))  # fused bridge
+    draw.ellipse([20, 30, 80, 90], fill=(30, 90, 200, 255))  # core A (blue)
+    draw.ellipse([140, 30, 200, 90], fill=(20, 160, 60, 255))  # core B (green)
+    return img
+
+
+def test_split_merged_by_cores_yields_two_clean_stickers() -> None:
+    blob = _two_merged_figures()
+    target = _opaque_area(blob) / 2
+    parts = split_merged(blob, target_area=target, outline_width=4)
+    assert parts is not None and len(parts) == 2
+    # Each part holds exactly one core color and a fresh white ring.
+    seen_blue = seen_green = False
+    for part in parts:
+        arr = np.asarray(part)
+        opaque = arr[..., 3] > 0
+        blue = opaque & (arr[..., 2] > 150) & (arr[..., 1] < 130)
+        green = opaque & (arr[..., 1] > 120) & (arr[..., 2] < 100)
+        assert not (blue.any() and green.any())  # cores not mixed
+        seen_blue |= bool(blue.any())
+        seen_green |= bool(green.any())
+    assert seen_blue and seen_green
+
+
+def test_split_merged_waist_cut_for_unreadable_cores() -> None:
+    # Two white-only blobs (white-clad figures): no colored cores — the
+    # owner's waist cut takes over at the thinnest bridge section.
+    img = Image.new("RGBA", (220, 100), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([5, 10, 95, 90], fill=(250, 250, 250, 255))
+    draw.ellipse([125, 10, 215, 90], fill=(250, 250, 250, 255))
+    draw.rectangle([90, 45, 130, 55], fill=(250, 250, 250, 255))  # thin waist
+    target = _opaque_area(img) / 2
+    parts = split_merged(img, target_area=target, outline_width=4)
+    assert parts is not None and len(parts) == 2
+
+
+def test_split_merged_single_core_returns_none_without_waist() -> None:
+    img = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    ImageDraw.Draw(img).ellipse([10, 10, 90, 90], fill=(30, 90, 200, 255))
+    assert split_merged(img, target_area=_opaque_area(img) / 2.0, outline_width=4) is None
+
+
+def test_process_sheet_splits_merged_pair_end_to_end() -> None:
+    # A 1×3 magenta sheet where two stickers fused: the chain must come back
+    # with exactly 3 pieces via the split path, no fail.
+    sheet = Image.new("RGBA", (330, 110), MAGENTA)
+    draw = ImageDraw.Draw(sheet)
+    # tile 1: healthy sticker
+    draw.ellipse([15, 25, 85, 95], fill=(255, 255, 255, 255))
+    draw.ellipse([25, 35, 75, 85], fill=(200, 60, 30, 255))
+    # tiles 2+3: merged pair (white bridge)
+    draw.ellipse([115, 25, 205, 95], fill=(255, 255, 255, 255))
+    draw.ellipse([215, 25, 305, 95], fill=(255, 255, 255, 255))
+    draw.rectangle([200, 50, 220, 70], fill=(255, 255, 255, 255))
+    draw.ellipse([130, 40, 190, 90], fill=(30, 90, 200, 255))
+    draw.ellipse([230, 40, 290, 90], fill=(20, 160, 60, 255))
+
+    from sticker_service.services.postprocess import process_sheet_checked
+
+    pieces, quality = process_sheet_checked(sheet, grid=(1, 3), expected=3)
+    assert len(pieces) == 3
+    assert quality.ok
+    assert "split" in quality.path
+
+
+def test_gradient_background_fails_honestly() -> None:
+    # A real gradient background: the border never clears ≥80% with one color —
+    # the chain must give a not-ok verdict (no blind cutting, owner's rule).
+    sheet = Image.new("RGBA", (300, 100), (0, 0, 0, 255))
+    draw = ImageDraw.Draw(sheet)
+    for x in range(300):  # horizontal rainbow-ish gradient
+        draw.line([(x, 0), (x, 100)], fill=(x % 256, (x * 2) % 256, (255 - x) % 256, 255))
+    draw.ellipse([20, 20, 80, 80], fill=(255, 255, 255, 255))
+
+    from sticker_service.services.postprocess import process_sheet_checked
+
+    _, quality = process_sheet_checked(sheet, grid=(1, 3), expected=3)
+    assert not quality.ok
+
+
+def test_drop_outlier_prefers_shape_anomaly() -> None:
+    # Owner's rule: with one slot over, the long narrow lettering strip must be
+    # dropped before a chunky (if smaller) sticker.
+    def _blob(w: int, h: int) -> Image.Image:
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(img).rectangle([0, 0, w - 1, h - 1], fill=(50, 50, 200, 255))
+        return img
+
+    chunky = [_blob(90, 100), _blob(100, 95), _blob(95, 100), _blob(70, 75)]
+    strip = _blob(200, 18)  # lettering: long and narrow
+    kept = drop_outlier_fragments([*chunky, strip], expected=4)
+    assert len(kept) == 4
+    assert all(max(p.size) / min(p.size) < 3 for p in kept)  # strip is gone

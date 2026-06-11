@@ -54,7 +54,9 @@ def apply_watermark(
     bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     bottom = _silhouette_bottom(np.asarray(img)[..., 3])
-    y = min(h - th - 4, bottom - th)
+    # Just BELOW the figure (owner: the handle must not cover the art), with a
+    # small gap; clamped so the text always stays inside the canvas.
+    y = min(h - th - 2, bottom + max(3, th // 3))
     draw.text(
         ((w - tw) // 2, y),
         text,

@@ -44,12 +44,32 @@ _USER_MESSAGES = {
 }
 
 
+class TransientPipelineError(RuntimeError):
+    """A post-model pipeline step failed in a way a fresh attempt may fix.
+
+    Raised e.g. when a generated sheet cannot be sliced into stickers (the
+    model broke the layout contract): garbage must never ship, the user gets
+    the message below and the free retry button (credits are only charged on
+    success), and a new generation usually lands fine.
+    """
+
+    USER_TEXT = (
+        "😔 Ой! Лист стикеров не получился — такое бывает очень редко. Прости! "
+        "Попробуй ещё раз — это бесплатно, кредит не списан."
+    )
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+
+
 def classify(exc: Exception) -> str:
     """Map an exception to one of the category constants above."""
     if isinstance(exc, ModelQuotaError):
         return QUOTA
     if isinstance(exc, ModelRefusalError):
         return REFUSAL
+    if isinstance(exc, TransientPipelineError):
+        return TRANSIENT
     # A timeout (asyncio.TimeoutError is builtin TimeoutError on 3.11+) is a
     # transient stall worth retrying — its str() is empty, so type-check it.
     if isinstance(exc, TimeoutError):
@@ -70,6 +90,8 @@ def classify(exc: Exception) -> str:
 
 def user_message(exc: Exception) -> str:
     """A short, friendly RU message for the given error (raw text if unknown)."""
+    if isinstance(exc, TransientPipelineError):
+        return TransientPipelineError.USER_TEXT
     kind = classify(exc)
     return _USER_MESSAGES.get(kind, f"⚠️ Не получилось: {exc}")
 
