@@ -99,6 +99,13 @@ async def run() -> None:
 
     refresh_task.add_done_callback(_log_refresh_death)
 
+    # A hard restart (crash/OOM/SIGKILL) strands users mid-generation with a
+    # frozen status message; give every such user a resume button right away.
+    from sticker_service.handlers import flow
+
+    with contextlib.suppress(Exception):
+        await flow.revive_orphaned_generations(bot, storage)
+
     logger.info("Starting long-polling as @%s", me.username)
     try:
         # Bound concurrent update-handler tasks: without a cap, update bursts
@@ -112,8 +119,6 @@ async def run() -> None:
         # Polling has stopped, but generations run as detached tasks aiogram
         # does not wait for. Drain them BEFORE closing sessions (they still
         # edit chat messages / write the DB); 140s fits compose's 150s grace.
-        from sticker_service.handlers import flow
-
         await flow.drain_generations(timeout=140.0)
         await storage.close()
         await bot.session.close()
