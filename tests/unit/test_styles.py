@@ -174,8 +174,17 @@ def test_real_styles_load() -> None:
     assert minecraft is not None
     assert minecraft.experimental is True
     assert minecraft.pipeline[1].prompt == "А теперь нарисуй героя в стиле Minecraft."
+    exp_ids = {sid for sid, _ in loader.menu(experimental=True)}
     assert "minecraft" not in menu_ids
-    assert "minecraft" in {sid for sid, _ in loader.menu(experimental=True)}
+    assert "minecraft" in exp_ids
+
+    # Fashion-illustration is also experimental; its step 2 carries the brief.
+    fashion = loader.get("fashion_illustration")
+    assert fashion is not None
+    assert fashion.experimental is True
+    assert "Fashion-illustration" in fashion.pipeline[1].prompt
+    assert "fashion_illustration" not in menu_ids
+    assert "fashion_illustration" in exp_ids
 
 
 _EXP = """
