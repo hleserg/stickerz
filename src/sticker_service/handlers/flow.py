@@ -675,6 +675,29 @@ async def _alert_admins_quota(msg: Message, exc: Exception) -> None:  # pragma: 
             await msg.bot.send_message(admin_id, text)  # type: ignore[union-attr]
 
 
+async def _alert_owner_genfail(
+    msg: Message, user_id: int, mode: str, exc: Exception
+) -> None:  # pragma: no cover
+    """DM the owner whenever a TESTER's generation fails.
+
+    A tester hitting an error is the single most important alpha signal — it
+    must reach the owner immediately, not sit unseen in /stats (and a deploy
+    kill raises no exception at all, so Sentry alone misses such incidents).
+    """
+    owner = get_settings().first_admin_id
+    if owner is None or user_id == owner:  # the owner sees his own failures live
+        return
+    reason = str(exc)[:150] or type(exc).__name__
+    with contextlib.suppress(Exception):
+        await msg.bot.send_message(  # type: ignore[union-attr]
+            owner,
+            f"⚠️ У тестера id={user_id} упала генерация (режим: {mode}).\n"
+            f"Причина: {reason}\n"
+            f'Профиль: <a href="tg://user?id={user_id}">открыть</a>',
+            parse_mode="HTML",
+        )
+
+
 async def on_name(message: Message, state: FSMContext, db: Database) -> None:
     """Store the human name (moderated), drop the typed message, then ask adult/child."""
     tag_component("handlers.flow")
@@ -1076,6 +1099,43 @@ _RETRY_DELAY_S = 20
 _bg_tasks: set[asyncio.Task[None]] = set()
 
 
+async def revive_orphaned_generations(bot: Any, storage: Any) -> int:
+    """Find flows a hard restart orphaned mid-generation and offer a retry.
+
+    The drain keeps soft redeploys safe, but a crash/OOM/SIGKILL still leaves
+    users in the ``publish`` state with a frozen status message and no worker.
+    On boot we move them back to review and hand them the retry button — the
+    persisted canonical steps make the retry resume, not restart. Returns how
+    many users were revived; owner notification happens via the failure alert
+    path only for real exceptions, so this also DMs the owner per orphan.
+    """
+    from aiogram.fsm.storage.base import StorageKey
+
+    orphans = await storage.keys_in_state(NewPack.publish.state)
+    owner = get_settings().first_admin_id
+    for bot_id, chat_id, user_id in orphans:
+        key = StorageKey(bot_id=bot_id, chat_id=chat_id, user_id=user_id)
+        with contextlib.suppress(Exception):
+            await storage.set_state(key, NewPack.review.state)
+        with contextlib.suppress(Exception):
+            await bot.send_message(
+                chat_id,
+                "⚠️ Обновление бота прервало генерацию — прости! Нажми кнопку, "
+                "и я продолжу с того места, где остановилась.",
+                reply_markup=_retry_kb(0),
+            )
+        if owner is not None and user_id != owner:
+            with contextlib.suppress(Exception):
+                await bot.send_message(
+                    owner,
+                    f"♻️ Рестарт прервал генерацию у тестера id={user_id} — "
+                    "отправил ему кнопку «повторить».",
+                )
+    if orphans:
+        logger.warning("revived %d generation(s) orphaned by a restart", len(orphans))
+    return len(orphans)
+
+
 async def drain_generations(timeout: float) -> int:
     """Await in-flight background generations; return how many missed the deadline.
 
@@ -1217,6 +1277,7 @@ async def _generate_and_present(  # pragma: no cover
         )
         with contextlib.suppress(Exception):
             await msg.edit_text(_friendly_error(exc))
+        await _alert_owner_genfail(msg, user_id, mode, exc)
         if model_errors.is_quota(exc):
             await _alert_admins_quota(msg, exc)
         if model_errors.is_retryable(exc):  # overload/timeout → offer a retry once it cools down

@@ -135,6 +135,21 @@ class SqliteStorage(BaseStorage):
             row = await cur.fetchone()
         return _decode(row[0] if row else None)
 
+    async def keys_in_state(self, state: str) -> list[tuple[int, int, int]]:
+        """``(bot_id, chat_id, user_id)`` of every row currently in ``state``.
+
+        Lets the boot path find flows orphaned mid-generation by a hard restart
+        (the worker died, but the persistent state row still says "publish").
+        """
+        out: list[tuple[int, int, int]] = []
+        async with self._conn.execute("SELECT key FROM fsm WHERE state=?", (state,)) as cur:
+            rows = await cur.fetchall()
+        for (raw,) in rows:
+            parts = str(raw).split(":")
+            with contextlib.suppress(ValueError, IndexError):
+                out.append((int(parts[0]), int(parts[1]), int(parts[2])))
+        return out
+
     async def close(self) -> None:
         """Close the underlying SQLite connection."""
         await self._conn.close()

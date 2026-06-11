@@ -135,3 +135,35 @@ async def test_migration_stamps_existing_rows(tmp_path: Path) -> None:
         assert await store.get_state(_key(1)) == "S"
     finally:
         await store.close()
+
+
+async def test_keys_in_state_returns_parsed_ids(storage: SqliteStorage) -> None:
+    # The boot path uses this to find flows orphaned mid-generation.
+    await storage.set_state(_key(7), "NewPack:publish")
+    await storage.set_state(_key(8), "NewPack:review")
+    assert await storage.keys_in_state("NewPack:publish") == [(1, 7, 7)]
+    assert await storage.keys_in_state("NoSuch:state") == []
+
+
+async def test_revive_orphaned_generations(storage: SqliteStorage) -> None:
+    # A user stuck in `publish` after a hard restart gets a retry button and is
+    # moved back to review; the owner gets a heads-up DM.
+    from sticker_service.config import get_settings
+    from sticker_service.handlers.flow import NewPack, revive_orphaned_generations
+
+    await storage.set_state(_key(7), NewPack.publish.state)
+
+    sent: list[tuple[int, str]] = []
+
+    class _Bot:
+        async def send_message(self, chat_id: int, text: str, **kw: object) -> None:
+            sent.append((chat_id, text))
+
+    revived = await revive_orphaned_generations(_Bot(), storage)
+    assert revived == 1
+    assert await storage.get_state(_key(7)) == NewPack.review.state  # un-stuck
+    chats = [c for c, _ in sent]
+    assert 7 in chats  # the user got the resume offer
+    owner = get_settings().first_admin_id
+    if owner is not None:  # the owner is informed about the orphan
+        assert owner in chats
