@@ -504,3 +504,25 @@ def test_std_checklist_has_bulk_select_buttons() -> None:
     callbacks = {b.callback_data for row in markup.inline_keyboard for b in row}
     assert "stdall" in callbacks
     assert "stdclear" in callbacks
+
+
+async def test_only_first_admin_has_unlimited_generations(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The owner (first admin) generates for free; other admins are billed and
+    # gated like ordinary alpha testers.
+    from sticker_service.config import get_settings
+    from sticker_service.handlers.flow import _generation_gate
+    from sticker_service.services import budget
+
+    monkeypatch.setenv("APP_ADMIN_IDS", "1,2")  # first admin = 1
+    get_settings.cache_clear()
+    try:
+        await modes.set_mode(db, modes.ALPHA)
+        await budget.set_budget(db, 100)
+        await db.set_credits(1, 0)  # first admin, no packs…
+        await db.set_credits(2, 0)  # second admin, no packs
+        assert await _generation_gate(db, 1, 2) is None  # …still unlimited
+        assert await _generation_gate(db, 2, 2) is not None  # gated like a tester
+    finally:
+        get_settings.cache_clear()
