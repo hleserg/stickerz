@@ -552,3 +552,23 @@ async def test_only_first_admin_has_unlimited_generations(
         assert await _generation_gate(db, 2, 2) is not None  # gated like a tester
     finally:
         get_settings.cache_clear()
+
+
+async def test_drain_generations_waits_out_inflight_tasks() -> None:
+    # The shutdown drain must await detached generation tasks (aiogram doesn't),
+    # and report how many missed the deadline so the log shows what was cut.
+    import asyncio
+
+    from sticker_service.handlers import flow
+
+    assert await flow.drain_generations(timeout=0.1) == 0  # nothing in flight
+
+    quick = asyncio.create_task(asyncio.sleep(0.01))
+    slow = asyncio.create_task(asyncio.sleep(30))
+    flow._bg_tasks.update({quick, slow})
+    try:
+        pending = await flow.drain_generations(timeout=0.3)
+    finally:
+        slow.cancel()
+        flow._bg_tasks.clear()
+    assert pending == 1  # quick finished inside the window, slow was still running

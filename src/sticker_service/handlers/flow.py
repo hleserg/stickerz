@@ -1076,6 +1076,25 @@ _RETRY_DELAY_S = 20
 _bg_tasks: set[asyncio.Task[None]] = set()
 
 
+async def drain_generations(timeout: float) -> int:
+    """Await in-flight background generations; return how many missed the deadline.
+
+    Generation runs as detached tasks (freeing the bounded polling slots), so
+    aiogram's own shutdown does NOT wait for them — without this drain a redeploy
+    kills a user's generation mid-step. The bot calls this after polling stops
+    and BEFORE closing sessions (the tasks still need Telegram/DB to finish),
+    keeping the soft-redeploy promise within compose's ``stop_grace_period``.
+    """
+    tasks = {task for task in _bg_tasks if not task.done()}
+    if not tasks:
+        return 0
+    logger.info("drain: waiting up to %.0fs for %d in-flight task(s)", timeout, len(tasks))
+    _done, pending = await asyncio.wait(tasks, timeout=timeout)
+    if pending:
+        logger.warning("drain: %d task(s) still running at the deadline", len(pending))
+    return len(pending)
+
+
 def _spawn_generation(  # pragma: no cover
     msg: Message, state: FSMContext, orchestrator: Orchestrator, db: Database, user_id: int
 ) -> None:

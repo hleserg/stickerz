@@ -740,3 +740,70 @@ async def test_gc_sweeps_old_scratch_dirs(
 
     assert not Path(old).exists()  # abandoned extend cleaned up
     assert Path(fresh).exists()  # recent review untouched
+
+
+class _FlakyModel(_SheetModel):
+    """Generates normally until ``failing`` is set; then every call overloads."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failing = False
+
+    async def generate(self, prompt: str, refs: Sequence[bytes] = (), **kw: object) -> bytes:
+        if self.failing:
+            from sticker_service.services.models.base import ModelError
+
+            raise ModelError("overloaded")
+        return await super().generate(prompt, refs, **kw)
+
+
+async def test_canonical_resumes_from_persisted_steps(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    # A canonical run killed mid-pipeline (overload/redeploy) must RESUME from
+    # the last persisted step on the next try, not regenerate finished work.
+    from sticker_service.services.models.base import ModelError
+
+    model = _FlakyModel()
+    orch = Orchestrator(
+        model=model,
+        db=db,
+        publisher=Publisher(_FakeBot(), "yourbot"),
+        loader=loader,
+        storage_dir=tmp_path,
+    )
+    args = {
+        "photo": b"PHOTO",
+        "style_id": "watercolor",
+        "subject_type": "adult",
+        "child_age": None,
+        "owner_id": 7,
+    }
+
+    async def _fail_after_first(done: int, total: int) -> None:
+        model.failing = True  # step 1 done → every later call overloads
+
+    with pytest.raises(ModelError):
+        await orch.build_canonical(**args, on_step=_fail_after_first)  # type: ignore[arg-type]
+    pending = tmp_path / "canonical_pending" / "7"
+    assert (pending / "step1.png").exists()  # progress persisted for resume
+    step1_calls = len(model.generate_calls)
+
+    model.failing = False
+    canonical = await orch.build_canonical(**args)  # type: ignore[arg-type]
+    assert canonical.startswith(b"\x89PNG")
+    # Step 1 was loaded from disk, not regenerated: only later steps hit the model.
+    assert len(model.generate_calls) == step1_calls + 2  # steps 2 and 3 only
+    assert not pending.exists()  # cleaned up after success
+
+
+async def test_canonical_pending_dropped_for_new_job(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    # Leftover steps from a DIFFERENT photo/style must never leak into a new job.
+    from sticker_service.services.orchestrator import _load_pending_steps, _save_pending_step
+
+    pending = tmp_path / "canonical_pending" / "7"
+    _save_pending_step(pending, "old-key", 1, b"OLD")
+    assert _load_pending_steps(pending, "new-key") == {}
+    assert not pending.exists()  # stale leftovers removed on mismatch

@@ -109,6 +109,12 @@ async def run() -> None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        # Polling has stopped, but generations run as detached tasks aiogram
+        # does not wait for. Drain them BEFORE closing sessions (they still
+        # edit chat messages / write the DB); 140s fits compose's 150s grace.
+        from sticker_service.handlers import flow
+
+        await flow.drain_generations(timeout=140.0)
         await storage.close()
         await bot.session.close()
         await db.close()

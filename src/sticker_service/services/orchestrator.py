@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import shutil
@@ -77,6 +78,46 @@ def _read_json(path: Path) -> dict[str, object] | None:
         return None
 
 
+def _canonical_job_key(
+    photo: bytes, style_id: str, subject_type: SubjectType, child_age: int | None
+) -> str:
+    """Stable identity of one canonical job (resume only applies to the SAME job)."""
+    h = hashlib.sha256()
+    h.update(photo)
+    h.update(style_id.encode())
+    h.update(str(subject_type).encode())
+    h.update(str(child_age).encode())
+    return h.hexdigest()[:16]
+
+
+def _load_pending_steps(pending: Path, key: str) -> dict[int, bytes]:
+    """Load persisted canonical steps for resume; {} (and cleanup) on a key mismatch."""
+    meta = _read_json(pending / "meta.json")
+    if meta is None:
+        return {}
+    if meta.get("key") != key:  # different photo/style — stale leftovers, drop them
+        shutil.rmtree(pending, ignore_errors=True)
+        return {}
+    raw_steps = meta.get("steps")
+    steps: dict[int, bytes] = {}
+    for n in raw_steps if isinstance(raw_steps, list) else []:
+        with contextlib.suppress(OSError, ValueError):
+            steps[int(n)] = (pending / f"step{int(n)}.png").read_bytes()
+    return steps
+
+
+def _save_pending_step(pending: Path, key: str, step: int, image: bytes) -> None:
+    """Persist one finished canonical step so a killed run can resume from it."""
+    pending.mkdir(parents=True, exist_ok=True)
+    (pending / f"step{step}.png").write_bytes(image)
+    meta = _read_json(pending / "meta.json")
+    done: set[int] = set()
+    if meta is not None and meta.get("key") == key and isinstance(meta.get("steps"), list):
+        done = {int(s) for s in meta["steps"]}  # type: ignore[union-attr]
+    done.add(step)
+    (pending / "meta.json").write_text(json.dumps({"key": key, "steps": sorted(done)}))
+
+
 @dataclass(frozen=True)
 class PackResult:
     """Outcome of building a pack."""
@@ -136,12 +177,47 @@ class Orchestrator:
         subject_type: SubjectType,
         child_age: int | None,
         on_step: StepCallback | None = None,
+        owner_id: int | None = None,
     ) -> bytes:
-        """Run the canonical pipeline for a style; returns canonical bytes."""
+        """Run the canonical pipeline for a style; returns canonical bytes.
+
+        With ``owner_id`` each finished pipeline step is persisted to disk, so a
+        re-run of the SAME job (photo+style+subject) — after a redeploy kill or
+        an overload failure — RESUMES from the last completed step instead of
+        regenerating (and re-paying for) the work already done.
+        """
         style = self._require_style(style_id)
-        return await self._engine.run(
-            style, photo, subject_type=subject_type, child_age=child_age, on_step=on_step
+        pending = self._canonical_pending_dir(owner_id) if owner_id is not None else None
+        key = _canonical_job_key(photo, style_id, subject_type, child_age)
+        done_steps: dict[int, bytes] = {}
+        if pending is not None:
+            done_steps = await asyncio.to_thread(_load_pending_steps, pending, key)
+            if done_steps:
+                logger.info(
+                    "canonical resume: owner=%s has %d step(s) done, continuing",
+                    owner_id,
+                    len(done_steps),
+                )
+
+        async def _persist_step(step: int, image: bytes) -> None:
+            if pending is not None:
+                await asyncio.to_thread(_save_pending_step, pending, key, step, image)
+
+        canonical = await self._engine.run(
+            style,
+            photo,
+            subject_type=subject_type,
+            child_age=child_age,
+            on_step=on_step,
+            done_steps=done_steps or None,
+            on_step_done=_persist_step if pending is not None else None,
         )
+        if pending is not None:  # finished — the steps have served their purpose
+            await asyncio.to_thread(shutil.rmtree, pending, True)
+        return canonical
+
+    def _canonical_pending_dir(self, owner_id: int) -> Path:
+        return self._storage / "canonical_pending" / str(owner_id)
 
     async def validate_photo(self, image: bytes) -> str | None:
         """Vision foolproof check on upload; returns a problem code or None."""
@@ -201,6 +277,7 @@ class Orchestrator:
             subject_type=character.subject_type,
             child_age=character.child_age,
             on_step=on_step,
+            owner_id=character.owner_id,
         )
         path = await asyncio.to_thread(
             self._write,
@@ -285,6 +362,7 @@ class Orchestrator:
                 subject_type=subject_type,
                 child_age=child_age,
                 on_step=on_step,
+                owner_id=owner_id,
             )
             character = await self.save_character(
                 owner_id=owner_id,
