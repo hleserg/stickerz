@@ -128,7 +128,7 @@ def _demo_button(kb: InlineKeyboardBuilder) -> None:
 def _dm_keyboard() -> InlineKeyboardMarkup:
     """A single button that opens the bot's private chat."""
     kb = InlineKeyboardBuilder()
-    kb.button(text="✨ Открыть Юки в личке", url="https://t.me/yuki_stickers_bot")
+    kb.button(text="🎨 Хочу стикерпак!", url="https://t.me/yuki_stickers_bot")
     return kb.as_markup()
 
 
