@@ -572,3 +572,59 @@ async def test_drain_generations_waits_out_inflight_tasks() -> None:
         slow.cancel()
         flow._bg_tasks.clear()
     assert pending == 1  # quick finished inside the window, slow was still running
+
+
+async def test_status_line_notice_reverts_to_stage() -> None:
+    # A retry/fallback notice is a moment, not a state: it shows briefly, then
+    # the line returns to what is actually happening (the current stage).
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from sticker_service.handlers.flow import StatusLine
+
+    msg = AsyncMock()
+    status = StatusLine(msg)
+    status.NOTICE_SECONDS = 0.05
+    await status.stage("🖼️ Рисую лист стикеров…")
+    await status.notice("⚖️ Беру менее загруженную модель…")
+    assert msg.edit_text.call_args.args[0].startswith("⚖️")
+    await asyncio.sleep(0.15)  # revert fires
+    assert msg.edit_text.call_args.args[0] == "🖼️ Рисую лист стикеров…"
+
+
+async def test_status_line_newer_stage_cancels_revert() -> None:
+    # If a new stage arrives while a notice shows, the revert must not stomp it.
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from sticker_service.handlers.flow import StatusLine
+
+    msg = AsyncMock()
+    status = StatusLine(msg)
+    status.NOTICE_SECONDS = 0.05
+    await status.stage("Этап 1")
+    await status.notice("🔁 Повторяю…")
+    await status.stage("Этап 2")  # newer than the notice
+    await asyncio.sleep(0.15)
+    assert msg.edit_text.call_args.args[0] == "Этап 2"  # not reverted to "Этап 1"
+
+
+async def test_status_line_heartbeat_appends_elapsed_when_idle() -> None:
+    # Nothing changed for a while → the line gains elapsed time, so a long
+    # model call visibly ticks instead of looking frozen.
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from sticker_service.handlers.flow import StatusLine
+
+    msg = AsyncMock()
+    status = StatusLine(msg)
+    status.HEARTBEAT_SECONDS = 0.05
+    await status.stage("🎨 Превращаю фото в рисунок…")
+    status.start()
+    try:
+        await asyncio.sleep(0.2)
+    finally:
+        status.stop()
+    last = msg.edit_text.call_args.args[0]
+    assert last.startswith("🎨 Превращаю фото в рисунок… · уже")
