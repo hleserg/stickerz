@@ -35,7 +35,7 @@ def test_scoped_menus_layer_by_role() -> None:
     # Regular users never see the admin toolbox.
     assert "new" in user and "stats" not in user and "mode" not in user
     # Every admin gets the toolbox on top, plus the normal user commands.
-    assert admin[0] == "stats" and "waiting" in admin and "new" in admin
+    assert admin[0] == "users" and "stats" in admin and "waiting" in admin and "new" in admin
     assert "mode" not in admin  # mode/budget stay owner-only
     # The first admin additionally gets the owner switches.
     assert "mode" in owner and "setbudget" in owner and "stats" in owner

@@ -31,9 +31,15 @@ def welcome_text() -> str:
 
 
 async def approve_user(db: Database, user_id: int) -> None:
-    """Mark the application approved, whitelist the user, grant starting credits."""
+    """Mark the application approved, whitelist the user, grant starting credits.
+
+    The application's @username is carried onto the whitelist row so the admin
+    user list can show handles instead of bare ids.
+    """
+    app = await db.get_application(user_id)
+    username = app.username if app is not None else None
     await db.set_application_status(user_id, "approved")
-    await db.allow(user_id)
+    await db.allow(user_id, username)
     await db.set_credits(user_id, DEFAULT_CREDITS)
 
 
