@@ -148,29 +148,41 @@ async def greet_group(message: Message, db: Database) -> None:  # pragma: no cov
 
 
 async def _bot_addressed(message: Message) -> bool:
-    """True when the bot is @mentioned, replied to, or called by name in a chat.
+    """True when a real person @mentions the bot, replies to it, or calls it by name.
 
-    @mention and reply work with Telegram privacy mode ON; name-addressing
-    ("Юки, …") only reaches the bot when privacy mode is OFF in @BotFather, so
-    we match it too and it simply never fires while privacy is on.
+    The bot is an admin of the discussion group, so it receives *every* message
+    regardless of Privacy Mode — including the channel's own posts auto-forwarded
+    into the group. Those must never trigger a greeting (the bot would react to
+    its own posts), so anything posted on behalf of a chat or auto-forwarded is
+    skipped outright.
     """
     bot = message.bot
     if bot is None:  # pragma: no cover - always bound in production
         return False
-    # Only real people address the bot; skip the channel's own auto-forwards
-    # into the discussion group (sender_chat set, from_user empty).
-    if message.from_user is None or message.from_user.is_bot:
+    # Never react to channel posts / auto-forwards / anonymous-admin messages —
+    # only to messages a real user actually typed.
+    if (
+        message.sender_chat is not None
+        or message.is_automatic_forward
+        or message.from_user is None
+        or message.from_user.is_bot
+    ):
         return False
     me = await bot.me()
     # Reply to one of the bot's own messages.
     reply = message.reply_to_message
     if reply is not None and reply.from_user is not None and reply.from_user.id == me.id:
         return True
-    text = (message.text or message.caption or "").lower()
+    text = (message.text or message.caption or "").strip().lower()
     if not text:
         return False
-    handle = f"@{(me.username or '').lower()}"
-    return handle in text or "юки" in text or "yuki" in text
+    # An explicit @mention of the bot anywhere in the message.
+    if f"@{(me.username or '').lower()}" in text:
+        return True
+    # Name-address only as a vocative at the very start ("Юки, …"), so the bot
+    # doesn't butt into every message that merely talks about Юки.
+    first = text.split()[0].strip(",.:!?…")
+    return first in {"юки", "yuki"}
 
 
 async def cmd_start(message: Message, db: Database) -> None:
