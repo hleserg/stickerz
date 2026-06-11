@@ -1099,6 +1099,76 @@ _RETRY_DELAY_S = 20
 _bg_tasks: set[asyncio.Task[None]] = set()
 
 
+def _track_bg(task: asyncio.Task[None]) -> None:
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+class StatusLine:
+    """Live wizard status that always says what is happening RIGHT NOW.
+
+    Stage lines stick; a retry/fallback notice is a MOMENT, not a state — it
+    shows for a few seconds and reverts to the current stage; a heartbeat
+    appends elapsed time when nothing changed for a while, so a long model
+    call never looks frozen (a frozen line reads as "broken" to the user).
+    """
+
+    NOTICE_SECONDS = 5.0
+    HEARTBEAT_SECONDS = 20.0
+
+    def __init__(self, msg: Message) -> None:
+        self._msg = msg
+        self._stage = ""
+        self._seq = 0
+        self._started = time.monotonic()
+        self._changed = time.monotonic()
+        self._heartbeat: asyncio.Task[None] | None = None
+
+    async def _edit(self, text: str) -> None:
+        with contextlib.suppress(Exception):
+            await self._msg.edit_text(text)
+
+    async def stage(self, text: str) -> None:
+        """Show the current stage; it stays until the next stage/notice."""
+        self._seq += 1
+        self._stage = text
+        self._changed = time.monotonic()
+        await self._edit(text)
+
+    async def notice(self, text: str) -> None:
+        """Show a transient event, then fall back to the stage line."""
+        self._seq += 1
+        seq = self._seq
+        self._changed = time.monotonic()
+        await self._edit(text)
+
+        async def _revert() -> None:
+            await asyncio.sleep(self.NOTICE_SECONDS)
+            if self._seq == seq and self._stage:  # nothing newer was shown
+                self._changed = time.monotonic()
+                await self._edit(self._stage)
+
+        _track_bg(asyncio.create_task(_revert()))
+
+    def start(self) -> None:
+        """Begin the liveness heartbeat (call ``stop`` when generation ends)."""
+
+        async def _beat() -> None:
+            while True:
+                await asyncio.sleep(self.HEARTBEAT_SECONDS)
+                idle = time.monotonic() - self._changed
+                if self._stage and idle >= self.HEARTBEAT_SECONDS:
+                    elapsed = int(time.monotonic() - self._started)
+                    await self._edit(f"{self._stage} · уже {elapsed} с")
+
+        self._heartbeat = asyncio.create_task(_beat())
+        _track_bg(self._heartbeat)
+
+    def stop(self) -> None:
+        if self._heartbeat is not None:
+            self._heartbeat.cancel()
+
+
 async def revive_orphaned_generations(bot: Any, storage: Any) -> int:
     """Find flows a hard restart orphaned mid-generation and offer a retry.
 
@@ -1230,24 +1300,24 @@ async def _generate_and_present(  # pragma: no cover
     started = time.monotonic()
     await state.set_state(NewPack.publish)
 
+    status = StatusLine(msg)
+
     async def on_step(done: int, total: int) -> None:
-        with contextlib.suppress(Exception):
-            await msg.edit_text(_canonical_progress_text(done, total))
+        await status.stage(_canonical_progress_text(done, total))
 
     async def on_stage(label: str) -> None:
-        with contextlib.suppress(Exception):
-            await msg.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
+        await status.stage(_STAGE_TEXT.get(label, "Работаю…"))
 
     async def on_notice(key: str) -> None:
-        # A model retry/fallback fired deep in generation — keep the status line
-        # moving so a slow call never looks frozen (a hung step reads as negative).
-        with contextlib.suppress(Exception):
-            await msg.edit_text(_NOTICE_TEXT.get(key, "Работаю…"))
+        # A model retry/fallback is a MOMENT, not a state: StatusLine shows it
+        # briefly and reverts to the live stage, so the line always reflects
+        # what is happening right now and never looks frozen.
+        await status.notice(_NOTICE_TEXT.get(key, "Работаю…"))
 
     # Fresh starts by drawing the photo; reuse/extend jump straight to the sheet.
     start_text = _STAGE_TEXT["photo_to_art"] if mode == "fresh" else "⚙️ Готовлю генерацию…"
-    with contextlib.suppress(Exception):
-        await msg.edit_text(start_text)
+    await status.stage(start_text)
+    status.start()
     try:
         with notice_sink(on_notice):
             async with _typing(msg), _generation_timeout():
@@ -1283,6 +1353,8 @@ async def _generate_and_present(  # pragma: no cover
         if model_errors.is_retryable(exc):  # overload/timeout → offer a retry once it cools down
             _arm_retry(msg)
         return
+    finally:
+        status.stop()  # the heartbeat must never outlive the generation
 
     await analytics.log(
         db,
