@@ -23,6 +23,21 @@ STANDARD_BLOCK: tuple[str, ...] = (
     "Пока!",
 )
 
+# Which standard reactions are SPOKEN LINES (replicas) — those get their text
+# lettered on the sticker; everything else is an emotion/state shown in the
+# drawing only ("Привет!" is a line, "Задумался" is a face). The value is the
+# exact text to letter (cleaned: no emoji — the model would draw the glyph).
+STANDARD_REPLICAS: dict[str, str] = {
+    "Привет!": "Привет!",
+    "Класс!": "Класс!",
+    "Ха-ха-ха": "Ха-ха-ха",
+    "Люблю": "Люблю",
+    "Окей 😉": "Окей",
+    "Ты!": "Ты!",
+    "Я крутой": "Я крутой",
+    "Пока!": "Пока!",
+}
+
 # What each standard reaction LOOKS like — sent to the sheet prompt as an
 # unquoted scene description, so the emotion is drawn, not captioned. The
 # label itself stays a UI string (checklist button, emoji key). No quote
