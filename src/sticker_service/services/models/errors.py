@@ -93,7 +93,11 @@ def user_message(exc: Exception) -> str:
     if isinstance(exc, TransientPipelineError):
         return TransientPipelineError.USER_TEXT
     kind = classify(exc)
-    return _USER_MESSAGES.get(kind, f"⚠️ Не получилось: {exc}")
+    # UNKNOWN deliberately hides the raw text: internals (validation messages,
+    # tracebacks) must never reach a user — the full error is in logs/Sentry.
+    return _USER_MESSAGES.get(
+        kind, "⚠️ Что-то пошло не так. Попробуй ещё раз — или начни заново: /new"
+    )
 
 
 def is_retryable(exc: Exception) -> bool:

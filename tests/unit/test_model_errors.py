@@ -54,8 +54,10 @@ def test_timeout_is_retryable_transient() -> None:
 def test_user_message_per_kind() -> None:
     assert "лимит" in errors.user_message(ModelQuotaError("x"))
     assert "перегружена" in errors.user_message(RuntimeError("503 high demand"))
-    # Unknown errors surface their own text so admins can diagnose.
-    assert "400 invalid argument" in errors.user_message(RuntimeError("400 invalid argument"))
+    # Unknown errors are GENERIC for users (internals live in logs/Sentry):
+    # a live tester once saw "fresh mode needs photo, style_id and subject_type".
+    unknown = errors.user_message(RuntimeError("400 invalid argument"))
+    assert "400" not in unknown and "/new" in unknown
 
 
 def test_pipeline_error_is_retryable_with_apology() -> None:

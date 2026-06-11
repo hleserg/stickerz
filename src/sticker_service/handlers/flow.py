@@ -1006,6 +1006,42 @@ async def on_rem_pick(callback: CallbackQuery, state: FSMContext) -> None:  # pr
     await _show(callback, state, NewPack.review.state, None)
 
 
+#: Forward-wizard callback prefixes; a tap that no state-filtered handler took
+#: is a button on a DEAD message (the pack finished or was cancelled) — answer
+#: kindly instead of walking the wizard into a crash with missing data.
+_WIZARD_PREFIXES = (
+    "subject:",
+    "age:",
+    "style:",
+    "styles:",
+    "std",
+    "cust:",
+    "randidea",
+    "randtake",
+    "rev:",
+    "rem:",
+    "retry:",
+    "pub:",
+)
+
+
+def _is_wizard_callback(data: str | None) -> bool:
+    return bool(data) and data.startswith(_WIZARD_PREFIXES)
+
+
+async def on_stale_wizard(callback: CallbackQuery) -> None:  # pragma: no cover
+    """A wizard button from a finished/cancelled pack — explain, don't crash."""
+    tag_component("handlers.flow")
+    with contextlib.suppress(Exception):
+        await callback.answer(
+            "Эта кнопка уже устарела — тот пак закрыт. Начни новый: /new", show_alert=True
+        )
+    # Strip the dead keyboard so the message can't mislead twice.
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_reply_markup(reply_markup=None)
+
+
 async def on_nav_back(callback: CallbackQuery, state: FSMContext, loader: StyleLoader) -> None:
     """``⬅️ Назад`` — re-render the previous wizard step in place."""
     tag_component("handlers.flow")
@@ -1297,6 +1333,12 @@ async def _generate_and_present(  # pragma: no cover
     if not captions:
         return
     mode = data.get("mode", "fresh")
+    if mode == "fresh" and not (data.get("photo") and data.get("style_id") and data.get("subject")):
+        # A stale path slipped through (old button, swept FSM): the pack's
+        # session is gone — say so kindly, never leak the validation internals.
+        with contextlib.suppress(Exception):
+            await msg.edit_text("Этот пак уже закрыт. Начни новый: /new")
+        return
     cost = pricing.cost_for_mode(mode)
     started = time.monotonic()
     await state.set_state(NewPack.publish)
@@ -2063,30 +2105,35 @@ def build_router() -> Router:
     router.message.register(on_name, NewPack.name)
     router.callback_query.register(on_nav_back, F.data == "nav:back")
     router.callback_query.register(on_nav_cancel, F.data == "nav:cancel")
-    router.callback_query.register(on_subject, F.data.startswith("subject:"))
-    router.callback_query.register(on_age, F.data.startswith("age:"))
-    router.callback_query.register(on_styles_exp, F.data == "styles:exp")
-    router.callback_query.register(on_styles_main, F.data == "styles:main")
-    router.callback_query.register(on_style, F.data.startswith("style:"))
-    router.callback_query.register(on_std_toggle, F.data.startswith("std:"))
-    router.callback_query.register(on_random_idea, F.data == "randidea")
-    router.callback_query.register(on_random_take, F.data == "randtake")
-    router.callback_query.register(on_std_bulk, F.data.in_({"stdall", "stdclear"}))
-    router.callback_query.register(on_std_page, F.data.startswith("stdpage:"))
-    router.callback_query.register(on_std_done, F.data == "stddone")
-    router.callback_query.register(on_custom_yes, F.data == "cust:yes")
-    router.callback_query.register(on_custom_no, F.data == "cust:no")
+    # Forward wizard buttons require THEIR step's state: a tap on a button from
+    # a finished pack's old message (the flow data is gone) must not walk the
+    # wizard into a crash — it falls through to the stale-button catch-all.
+    router.callback_query.register(on_subject, NewPack.subject, F.data.startswith("subject:"))
+    router.callback_query.register(on_age, NewPack.child_age, F.data.startswith("age:"))
+    router.callback_query.register(on_styles_exp, NewPack.style, F.data == "styles:exp")
+    router.callback_query.register(on_styles_main, NewPack.style, F.data == "styles:main")
+    router.callback_query.register(on_style, NewPack.style, F.data.startswith("style:"))
+    router.callback_query.register(on_std_toggle, NewPack.select_std, F.data.startswith("std:"))
+    router.callback_query.register(on_random_idea, NewPack.enter_custom, F.data == "randidea")
+    router.callback_query.register(on_random_take, NewPack.enter_custom, F.data == "randtake")
+    router.callback_query.register(
+        on_std_bulk, NewPack.select_std, F.data.in_({"stdall", "stdclear"})
+    )
+    router.callback_query.register(on_std_page, NewPack.select_std, F.data.startswith("stdpage:"))
+    router.callback_query.register(on_std_done, NewPack.select_std, F.data == "stddone")
+    router.callback_query.register(on_custom_yes, NewPack.ask_custom, F.data == "cust:yes")
+    router.callback_query.register(on_custom_no, NewPack.ask_custom, F.data == "cust:no")
     router.message.register(on_enter_custom, NewPack.enter_custom)
-    router.callback_query.register(on_rev_create, F.data == "rev:create")
-    router.callback_query.register(on_retry, F.data == "retry:gen")
+    router.callback_query.register(on_rev_create, NewPack.review, F.data == "rev:create")
+    router.callback_query.register(on_retry, NewPack.review, F.data == "retry:gen")
     router.callback_query.register(on_retry_wait, F.data == "retry:wait")
-    router.callback_query.register(on_rev_add, F.data == "rev:add")
-    router.callback_query.register(on_rev_remove, F.data == "rev:remove")
-    router.callback_query.register(on_rev_show, F.data == "rev:show")
-    router.callback_query.register(on_rem_pick, F.data.startswith("rem:"))
-    router.callback_query.register(on_publish_yes, F.data == "pub:yes")
-    router.callback_query.register(on_pub_download, F.data == "pub:dl")
-    router.callback_query.register(on_publish_no, F.data == "pub:no")
+    router.callback_query.register(on_rev_add, NewPack.review, F.data == "rev:add")
+    router.callback_query.register(on_rev_remove, NewPack.review, F.data == "rev:remove")
+    router.callback_query.register(on_rev_show, NewPack.review, F.data == "rev:show")
+    router.callback_query.register(on_rem_pick, NewPack.review, F.data.startswith("rem:"))
+    router.callback_query.register(on_publish_yes, NewPack.publish, F.data == "pub:yes")
+    router.callback_query.register(on_pub_download, NewPack.publish, F.data == "pub:dl")
+    router.callback_query.register(on_publish_no, NewPack.publish, F.data == "pub:no")
     router.callback_query.register(on_nav_chars, F.data == "nav:chars")
     router.callback_query.register(on_nav_packs, F.data == "nav:packs")
     router.callback_query.register(on_pick_char, F.data.startswith("char:"))
@@ -2098,4 +2145,6 @@ def build_router() -> Router:
     router.callback_query.register(on_pick_saved_pack, F.data.startswith("pk:"))
     router.callback_query.register(on_saved_publish, F.data.startswith("pkpub:"))
     router.callback_query.register(on_saved_download, F.data.startswith("pkdl:"))
+    # LAST: anything wizard-shaped that no state filter accepted is stale.
+    router.callback_query.register(on_stale_wizard, F.func(lambda c: _is_wizard_callback(c.data)))
     return router

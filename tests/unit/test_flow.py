@@ -653,3 +653,58 @@ def test_std_buttons_show_exact_prompt_lines() -> None:
     assert '⬜ "Ок!" 👌😉' in texts  # владельская строка дословно
     assert '⬜ 👍"Класс!"' in texts
     assert "⬜ 😎 Я крутой!" in texts
+
+
+def test_wizard_callback_prefix_matcher() -> None:
+    # The stale-button catch-all must cover every forward-wizard prefix and
+    # nothing from other routers (admin/apply/users).
+    from sticker_service.handlers.flow import _is_wizard_callback
+
+    for live in (
+        "style:watercolor",
+        "styles:exp",
+        "subject:adult",
+        "age:5",
+        "std:3",
+        "stdall",
+        "stddone",
+        "cust:yes",
+        "randidea",
+        "rev:create",
+        "rem:1",
+        "retry:gen",
+        "pub:dl",
+    ):
+        assert _is_wizard_callback(live), live
+    for foreign in (
+        "apply:new",
+        "users:0",
+        "uc:5",
+        "uct:5",
+        "mode:alpha",
+        "nav:back",
+        "char:1",
+        "pk:2",
+        None,
+        "",
+    ):
+        assert not _is_wizard_callback(foreign), foreign
+
+
+async def test_stale_style_tap_is_answered_not_crashed() -> None:
+    # Regression (live, tester 8103588997): tapping a style button on a DEAD
+    # wizard message walked the flow into "fresh mode needs photo…". With state
+    # filters the tap lands on the catch-all: kind alert + keyboard stripped.
+    from unittest.mock import AsyncMock
+
+    from aiogram.types import Message
+
+    from sticker_service.handlers.flow import on_stale_wizard
+
+    callback = AsyncMock()
+    callback.data = "style:watercolor"
+    callback.message = AsyncMock(spec=Message)
+    await on_stale_wizard(callback)
+    callback.answer.assert_awaited_once()
+    assert "устарела" in callback.answer.call_args.args[0]
+    callback.message.edit_reply_markup.assert_called_once_with(reply_markup=None)
