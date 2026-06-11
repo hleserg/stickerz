@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from sticker_service.config import get_settings
 from sticker_service.db import Database
-from sticker_service.services import analytics
+from sticker_service.services import analytics, modes
 
 # USD per FULL generated pack. Measured June 2026 (services/cost.py prices):
 # canonical 2–3 × pro@1K ($0.27–0.40) + sheet pro@4K ($0.24) + vision/refs
@@ -45,23 +45,27 @@ async def cost_per_gen(db: Database) -> float:
 async def total_generations(db: Database) -> int:
     """Tester generations counted toward the budget (admins' own runs excluded)."""
     return await db.count_events(
-        analytics.GENERATION_DONE, exclude_users=get_settings().admin_id_list
+        analytics.GENERATION_DONE,
+        exclude_users=get_settings().admin_id_list,
+        since=await modes.alpha_started_at(db),
     )
 
 
 async def total_cost(db: Database) -> float:
-    """Spend estimate from TESTER generations only.
+    """Spend estimate from TESTER generations during the alpha only.
 
     Admins (the owner) bypass credit charging and generate for free while
     developing/testing — counting those would make the alpha budget look spent
-    before a single tester arrives. The $ budget tracks tester consumption, so
-    admin-attributed generations are excluded.
+    before a single tester arrives. Everyone's PRE-alpha runs were dev testing
+    too, so the window opens at ``modes.alpha_started_at``. The $ budget tracks
+    tester consumption within the alpha.
     """
     per = await cost_per_gen(db)
     admins = get_settings().admin_id_list
-    total = await db.count_events(analytics.GENERATION_DONE, exclude_users=admins)
+    since = await modes.alpha_started_at(db)
+    total = await db.count_events(analytics.GENERATION_DONE, exclude_users=admins, since=since)
     half = await db.count_events_with_modes(
-        analytics.GENERATION_DONE, HALF_COST_MODES, exclude_users=admins
+        analytics.GENERATION_DONE, HALF_COST_MODES, exclude_users=admins, since=since
     )
     return (total - half) * per + half * per / 2
 

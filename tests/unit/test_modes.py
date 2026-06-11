@@ -31,3 +31,15 @@ async def test_get_default_then_set(db: Database) -> None:
     assert await modes.get_mode(db) == modes.DEFAULT
     await modes.set_mode(db, modes.PROD)
     assert await modes.get_mode(db) == modes.PROD
+
+
+async def test_alpha_start_stamped_once(db: Database) -> None:
+    # Switching INTO alpha stamps when it opened; later toggles keep the stamp,
+    # so the stats/budget window survives a maintenance debug→alpha roundtrip.
+    assert await modes.alpha_started_at(db) is None
+    await modes.set_mode(db, modes.ALPHA)
+    started = await modes.alpha_started_at(db)
+    assert started is not None
+    await modes.set_mode(db, modes.DEBUG)
+    await modes.set_mode(db, modes.ALPHA)
+    assert await modes.alpha_started_at(db) == started  # unchanged

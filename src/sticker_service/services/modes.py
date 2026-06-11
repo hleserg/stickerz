@@ -13,6 +13,8 @@ active mode is stored in the DB ``config`` table.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sticker_service.db import Database
 
 DEBUG = "debug"
@@ -31,6 +33,7 @@ DISPLAY: dict[str, str] = {
 DEFAULT = DEBUG
 
 _KEY = "mode"
+_ALPHA_STARTED_KEY = "alpha_started_at"
 
 
 def is_implemented(mode: str) -> bool:
@@ -43,3 +46,13 @@ async def get_mode(db: Database) -> str:
 
 async def set_mode(db: Database, mode: str) -> None:
     await db.set_config(_KEY, mode)
+    # Stamp when the alpha first opened: stats and the budget count tester
+    # activity from this moment, so pre-alpha dev/test runs never pollute them.
+    # Set once — re-entering alpha after a maintenance toggle keeps the window.
+    if mode == ALPHA and not await db.get_config(_ALPHA_STARTED_KEY, ""):
+        await db.set_config(_ALPHA_STARTED_KEY, datetime.now(UTC).isoformat())
+
+
+async def alpha_started_at(db: Database) -> str | None:
+    """ISO time the alpha first opened, or None while it never has."""
+    return await db.get_config(_ALPHA_STARTED_KEY, "") or None

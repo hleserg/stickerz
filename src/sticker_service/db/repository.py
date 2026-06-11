@@ -635,10 +635,15 @@ class Database:
         ) as cur:
             return await cur.fetchone() is not None
 
-    async def count_events(self, event: str, *, exclude_users: Sequence[int] = ()) -> int:
-        """Count ``event`` rows, optionally excluding some user_ids (e.g. admins)."""
+    async def count_events(
+        self, event: str, *, exclude_users: Sequence[int] = (), since: str | None = None
+    ) -> int:
+        """Count ``event`` rows, optionally excluding user_ids / before an ISO time."""
         sql = "SELECT COUNT(*) AS n FROM events WHERE event = ?"
         params: list[object] = [event]
+        if since:
+            sql += " AND created_at >= ?"
+            params.append(since)
         if exclude_users:
             marks = ",".join("?" for _ in exclude_users)
             sql += f" AND user_id NOT IN ({marks})"  # nosec B608 - only '?' marks
@@ -667,10 +672,15 @@ class Database:
             row = await cur.fetchone()
         return int(row["n"]) if row else 0
 
-    async def count_users_with_event(self, event: str, *, exclude_users: Sequence[int] = ()) -> int:
+    async def count_users_with_event(
+        self, event: str, *, exclude_users: Sequence[int] = (), since: str | None = None
+    ) -> int:
         """Distinct user_ids that produced at least one ``event``."""
         sql = "SELECT COUNT(DISTINCT user_id) AS n FROM events WHERE event = ?"
         params: list[object] = [event]
+        if since:
+            sql += " AND created_at >= ?"
+            params.append(since)
         if exclude_users:
             marks = ",".join("?" for _ in exclude_users)
             sql += f" AND user_id NOT IN ({marks})"  # nosec B608 - only '?' marks
@@ -679,14 +689,22 @@ class Database:
             row = await cur.fetchone()
         return int(row["n"]) if row else 0
 
-    async def count_returning_users(self, *, exclude_users: Sequence[int] = ()) -> int:
+    async def count_returning_users(
+        self, *, exclude_users: Sequence[int] = (), since: str | None = None
+    ) -> int:
         """Users active on at least two distinct calendar days (a retention proxy)."""
         inner = "SELECT user_id FROM events"
+        conds: list[str] = []
         params: list[object] = []
+        if since:
+            conds.append("created_at >= ?")
+            params.append(since)
         if exclude_users:
             marks = ",".join("?" for _ in exclude_users)
-            inner += f" WHERE user_id NOT IN ({marks})"  # nosec B608 - only '?' marks
+            conds.append(f"user_id NOT IN ({marks})")  # nosec B608 - only '?' marks
             params.extend(exclude_users)
+        if conds:
+            inner += " WHERE " + " AND ".join(conds)
         inner += " GROUP BY user_id HAVING COUNT(DISTINCT date(created_at)) >= 2"
         async with self._conn.execute(
             f"SELECT COUNT(*) AS n FROM ({inner})",  # nosec B608 - only '?' marks
@@ -696,7 +714,12 @@ class Database:
         return int(row["n"]) if row else 0
 
     async def count_events_with_modes(
-        self, event: str, event_modes: Sequence[str], *, exclude_users: Sequence[int] = ()
+        self,
+        event: str,
+        event_modes: Sequence[str],
+        *,
+        exclude_users: Sequence[int] = (),
+        since: str | None = None,
     ) -> int:
         """Count ``event`` rows whose JSON detail has ``mode`` in ``event_modes``."""
         if not event_modes:
@@ -707,6 +730,9 @@ class Database:
             f"AND json_extract(detail, '$.mode') IN ({marks})"
         )
         params: list[object] = [event, *event_modes]
+        if since:
+            sql += " AND created_at >= ?"
+            params.append(since)
         if exclude_users:
             xmarks = ",".join("?" for _ in exclude_users)
             sql += f" AND user_id NOT IN ({xmarks})"  # nosec B608 - only '?' marks
