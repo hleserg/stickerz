@@ -66,7 +66,15 @@ jobs:
           script: |
             set -e
             cd "${{ secrets.VDS_PATH }}"
-            docker compose pull bot
+            # Pull the IMMUTABLE sha tag, not :latest — a :latest pull can race
+            # the registry CDN and silently fetch the previous image (observed
+            # live: "Pulled" + old code). The sha tag either resolves to this
+            # build or fails; retry covers propagation lag.
+            for i in 1 2 3 4 5 6; do
+              docker pull "${{ env.IMAGE }}:${{ github.event.workflow_run.head_sha }}" && break
+              sleep 10
+            done
+            docker tag "${{ env.IMAGE }}:${{ github.event.workflow_run.head_sha }}" "${{ env.IMAGE }}:latest"
             # Recreate only the bot; SIGTERM lets it drain in-flight flows within
             # the compose stop_grace_period before the new container starts.
             docker compose up -d bot
