@@ -114,6 +114,32 @@ def notice_sink(callback: NoticeCallback | None) -> Iterator[None]:
         _notice_sink.reset(token)
 
 
+# --- model health (stall circuit breaker) ------------------------------------
+# When a model STALLS (per-call timeouts, not quick 503s), burning the whole
+# generation budget rediscovering that on every step is fatal: 5 stalled
+# attempts × 120s ate a tester's full 10-minute window before the ladder ever
+# reached the healthy fallback (live incident, 11.06). A stalled model is
+# remembered as unhealthy for a few minutes so every later step, sheet and
+# user goes straight to the next rung.
+_UNHEALTHY_SECONDS = 240.0
+_unhealthy_until: dict[str, float] = {}
+
+
+def mark_unhealthy(model_id: str, seconds: float = _UNHEALTHY_SECONDS) -> None:
+    """Remember that ``model_id`` is stalling; ladders will skip it for a while."""
+    import time
+
+    _unhealthy_until[model_id] = time.monotonic() + seconds
+
+
+def is_unhealthy(model_id: str) -> bool:
+    """True while ``model_id`` is inside its unhealthy cool-off window."""
+    import time
+
+    until = _unhealthy_until.get(model_id)
+    return until is not None and time.monotonic() < until
+
+
 # A fallback ladder is an ordered list of (image_model, image_size) rungs.
 Ladder = Sequence[tuple[str, str]]
 
@@ -135,7 +161,13 @@ async def generate_via_ladder(
     refusing rung. A quota/credits error fails fast.
     """
     last: Exception | None = None
-    for rung, (image_model, image_size) in enumerate(ladder):
+    # Skip rungs whose model is currently stalling — unless that would skip
+    # everything (then try them anyway: a degraded attempt beats none).
+    rungs = list(ladder)
+    healthy = [rung for rung in rungs if not is_unhealthy(rung[0])]
+    if healthy:
+        rungs = healthy
+    for rung, (image_model, image_size) in enumerate(rungs):
         if rung > 0:  # dropped off the previous rung → a less-loaded model/res
             await emit_notice("fallback")
         refusal: ModelRefusalError | None = None

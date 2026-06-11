@@ -228,3 +228,30 @@ async def test_generate_via_ladder_notifies_on_fallback() -> None:
         out = await generate_via_ladder(model, "p", [b"r"], ladder)
     assert out == b"PNG"
     assert seen == ["fallback"]  # exactly one rung drop -> one fallback notice
+
+
+async def test_forced_rung_fails_over_after_two_stalls() -> None:
+    # Live incident: 5 stalled attempts × 120s on ONE rung ate a tester's whole
+    # 10-minute window. A forced (ladder) rung now gives up after 2 consecutive
+    # timeouts, marks the model unhealthy, and lets the ladder fall.
+    from types import SimpleNamespace
+
+    from sticker_service.services.models import base
+    from sticker_service.services.models.base import ModelError
+
+    calls = {"n": 0}
+
+    async def _stall(**_kw: object) -> object:
+        calls["n"] += 1
+        raise TimeoutError
+
+    model = GeminiImageModel(api_key="k")
+    stub = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=_stall)))
+    model._client = stub  # type: ignore[assignment]
+    try:
+        with pytest.raises(ModelError, match="stalled"):
+            await model.generate("p", [b"\x89PNG"], model="forced-pro", image_size="1K")
+        assert calls["n"] == 2  # not 6: the rung failed over after the 2nd stall
+        assert base.is_unhealthy("forced-pro")  # remembered for later steps/users
+    finally:
+        base._unhealthy_until.clear()

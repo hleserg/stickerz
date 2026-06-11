@@ -21,6 +21,7 @@ from sticker_service.services.models.base import (
     ModelQuotaError,
     ModelRefusalError,
     emit_notice,
+    mark_unhealthy,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,13 @@ SHEET_LADDER: tuple[tuple[str, str], ...] = (
 )
 
 _MAX_GEN_ATTEMPTS = 6
+#: A LADDER rung (forced model) must not burn the generation budget on a sick
+#: model: at most this many attempts per rung, and after this many CONSECUTIVE
+#: per-call timeouts the rung fails over immediately — a stall is a hang, not a
+#: hiccup (live incident: 5 stalled attempts × 120s ate a tester's whole
+#: 10-minute window before the ladder ever reached the healthy fallback).
+_FORCED_ATTEMPTS = 3
+_FORCED_STALLS = 2
 #: Per-call deadline (seconds). When Gemini is overloaded a socket can stall
 #: mid-request with no response and no error; without a ceiling the SDK call
 #: blocks the user's whole flow indefinitely (observed: a 5-minute "frozen"
@@ -162,7 +170,9 @@ class GeminiImageModel(ImageModel):
         )
 
         last: Exception | None = None
-        for attempt in range(_MAX_GEN_ATTEMPTS):
+        stalls = 0
+        max_attempts = _FORCED_ATTEMPTS if model is not None else _MAX_GEN_ATTEMPTS
+        for attempt in range(max_attempts):
             # Forced model stays fixed across retries; otherwise walk the fallback chain.
             model_id = model or image_model_for_attempt(attempt)
             logger.info(
@@ -190,17 +200,29 @@ class GeminiImageModel(ImageModel):
                         f"resume generation: {str(exc)[:120]}"
                     ) from exc
                 last = exc
+                stalled = isinstance(exc, TimeoutError)
+                stalls = stalls + 1 if stalled else 0
+                desc = str(exc)[:100] or type(exc).__name__
+                if model is not None and stalls >= _FORCED_STALLS:
+                    # The rung's model is HANGING, not hiccuping: remember it as
+                    # unhealthy (later steps/users skip it) and fail the rung
+                    # over to the next model instead of burning the budget.
+                    mark_unhealthy(model_id)
+                    logger.warning("gemini %s stalled %d×; failing rung over", model_id, stalls)
+                    raise ModelError(f"{model_id} stalled ({stalls} timeouts)") from exc
                 kind = "transient" if _is_retryable(exc) else "error"
-                if attempt < _MAX_GEN_ATTEMPTS - 1:
+                if attempt < max_attempts - 1:
                     # Tell the user we're still working: a model swap reads as
                     # "less-loaded model", a same-model retry as "retrying".
                     next_model = model or image_model_for_attempt(attempt + 1)
                     await emit_notice("fallback" if next_model != model_id else "retry")
-                    logger.warning("gemini %s %s (%s); retrying", model_id, kind, str(exc)[:100])
+                    logger.warning("gemini %s %s (%s); retrying", model_id, kind, desc)
                     await asyncio.sleep(2 * (attempt + 1))
                     continue
+                if model is not None and stalled:
+                    mark_unhealthy(model_id)
                 raise ModelError(
-                    f"Gemini generation failed after {_MAX_GEN_ATTEMPTS} attempts: {exc}"
+                    f"Gemini generation failed after {max_attempts} attempts: {desc}"
                 ) from exc
         raise ModelError(f"Gemini image generation failed after retries: {last}")
 
