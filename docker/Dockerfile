@@ -23,6 +23,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM python:3.13-slim AS runtime
 
+# fonts-dejavu-core: a Cyrillic-capable TrueType face for the /stats chart
+# (PIL's built-in bitmap font renders Cyrillic labels as boxes).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --create-home --uid 10001 appuser
 WORKDIR /app
 
