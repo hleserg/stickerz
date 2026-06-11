@@ -1,0 +1,35 @@
+schema_version: 1
+style_id: fashion_illustration
+display_name: "Fashion-illustration"
+enabled: true
+# Glossy fashion-illustration look (ink + watercolor); experimental shelf.
+experimental: true
+distance: far
+
+# Same 3-step ladder; step 2 (the style step) carries the fashion-illustration
+# brief: 1) photo → realistic drawing; 2) restyle into fashion illustration;
+# 3) turn the gaze to camera (skipped if already facing it).
+pipeline:
+  - step: 1
+    prompt: "Сделай из фото фотореалистичный цветной рисунок. {clean_bg}"
+    refs: [photo]
+    gate: vision_judge
+  - step: 2
+    prompt: >-
+      Придай рисунку черты Fashion-illustration — это стиль модной иллюстрации,
+      как рисуют для глянца и брендов: вытянутые элегантные пропорции,
+      выразительные линии, акцент на одежде, позе и общем «шике». Представь
+      скетчи с показов Vogue или арты, которые иллюстраторы делают для Dior —
+      акварельно-чернильная техника, небрежно-дорогой вид.
+    refs: [prev]
+    gate: vision_judge
+  - step: 3
+    skip_if_yes: "Ответь да или нет, одним словом: человек на изображении смотрит прямо в камеру?"
+    prompt: >-
+      Сделай так чтобы герой смотрел в камеру, если голова повернута в другую
+      сторону постарайся развернуть ее в камеру на сколько сможешь не теряя
+      реалистичности
+    refs: [prev]
+    gate: none
+
+sticker_style_suffix: "Подписи только на русском языке. {age_clause}"
