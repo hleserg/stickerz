@@ -65,7 +65,10 @@ def init_sentry(*, dsn: str | None = None, release: str | None = None) -> bool:
     if not resolved_dsn:
         return False
 
+    import logging
+
     import sentry_sdk
+    from sentry_sdk.integrations.logging import LoggingIntegration
 
     sentry_sdk.init(
         dsn=resolved_dsn,
@@ -74,6 +77,11 @@ def init_sentry(*, dsn: str | None = None, release: str | None = None) -> bool:
         traces_sample_rate=settings.sentry_traces_sample_rate,
         send_default_pii=False,
         event_scrubber=_build_scrubber(),
+        # Forward WARNING+ log records to Sentry Logs (errors/warnings show up
+        # there too, not just as issues). INFO is deliberately excluded: the
+        # bot logs a lot of routine INFO that would flood Sentry and burn quota.
+        _experiments={"enable_logs": True},
+        integrations=[LoggingIntegration(sentry_logs_level=logging.WARNING)],
     )
     return True
 
