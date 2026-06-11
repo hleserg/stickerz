@@ -25,6 +25,12 @@ def test_init_with_dsn_sets_privacy_defaults(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["send_default_pii"] is False
     assert captured["release"] == "1.2.3"
     assert captured["event_scrubber"] is not None
+    # Sentry Logs on; WARNING+ Python logs forwarded (INFO excluded to save quota).
+    assert captured["_experiments"]["enable_logs"] is True
+    from sentry_sdk.integrations.logging import LoggingIntegration
+
+    log_ints = [i for i in captured["integrations"] if isinstance(i, LoggingIntegration)]
+    assert log_ints, "a LoggingIntegration must be configured for Sentry Logs"
 
 
 def test_init_uses_settings_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
