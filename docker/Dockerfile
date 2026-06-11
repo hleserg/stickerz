@@ -32,6 +32,12 @@ RUN mkdir -p /app/data && chown appuser:appuser /app/data
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Stamp the build's git commit so Sentry ties every error to a release
+# (errors show "first seen in <sha>"; "resolve in next release" works). Empty
+# when built without the arg — init then sends no release (the prior behavior).
+ARG GIT_SHA=""
+ENV APP_SENTRY_RELEASE=${GIT_SHA}
+
 USER appuser
 # Default entrypoint runs the Telegram bot (long-polling). Override with
 # `sticker_service` for the thin CLI.
