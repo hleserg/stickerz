@@ -44,3 +44,4 @@ htmlcov/
 
 # Local experiments / private fixtures (never commit real user photos)
 /.experiments/
+.download/
