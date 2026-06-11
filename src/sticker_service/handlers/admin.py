@@ -88,17 +88,19 @@ async def cmd_deny(message: Message, command: CommandObject, db: Database) -> No
 async def cmd_stats(message: Message, db: Database) -> None:
     """Funnel infographic for the alpha (admin only).
 
-    Admins' own events are excluded: in alpha only testers act, and before
-    launch only admins did — so dropping admin-attributed events yields the
-    real tester funnel since launch, not the owner's dev/test activity.
+    Admins' own events are excluded and the window opens when the alpha did
+    (``modes.alpha_started_at``): friends who helped test before launch count
+    as ordinary testers, but only for what they do DURING the alpha — so the
+    funnel shows real tester activity, not anyone's dev/test runs.
     """
     tag_component("handlers.admin")
     if message.from_user is None or not _is_admin(message.from_user.id):
         return
     admins = get_settings().admin_id_list
+    started = await modes.alpha_started_at(db)
 
     async def n(event: str) -> int:
-        return await db.count_events(event, exclude_users=admins)
+        return await db.count_events(event, exclude_users=admins, since=started)
 
     items = [
         ("Запуски (/start)", await n(analytics.START)),
