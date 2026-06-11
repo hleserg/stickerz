@@ -21,7 +21,15 @@ from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.db.repository import CREDITS_PER_PACK
 from sticker_service.observability import tag_component
-from sticker_service.services import analytics, approvals, budget, charts, modes, pricing
+from sticker_service.services import (
+    analytics,
+    approvals,
+    budget,
+    charts,
+    metrics,
+    modes,
+    pricing,
+)
 from sticker_service.services.approvals import BUG_BONUS_PACKS
 
 
@@ -102,9 +110,8 @@ async def cmd_stats(message: Message, db: Database) -> None:
         ("Скачано", await n(analytics.DOWNLOADED)),
     ]
     png = await asyncio.to_thread(charts.render_bar_chart, "Воронка альфы", items)
-    await message.answer_photo(
-        BufferedInputFile(png, filename="stats.png"), caption=await budget.summary_line(db)
-    )
+    caption = f"{await metrics.alpha_metrics_text(db)}\n\n{await budget.summary_line(db)}"
+    await message.answer_photo(BufferedInputFile(png, filename="stats.png"), caption=caption)
 
 
 async def cmd_bans(message: Message, db: Database) -> None:
