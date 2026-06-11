@@ -650,4 +650,6 @@ def test_std_buttons_show_exact_prompt_lines() -> None:
     assert [t.removeprefix("⬜ ") for t in texts] == [prompt_idea(c) for c in STANDARD_BLOCK]
     assert "⬜ «Привет!»" in texts  # реплика — в кавычках
     assert "⬜ Грустно" in texts  # эмоция — словом
-    assert "⬜ «Окей»" in texts  # без эмодзи, как в промпте
+    assert '⬜ "Ок!" 👌😉' in texts  # владельская строка дословно
+    assert '⬜ 👍"Класс!"' in texts
+    assert "⬜ 😎 Я крутой!" in texts

@@ -95,14 +95,6 @@ def test_sheet_prompt_turns_standard_reactions_into_drawn_ideas() -> None:
     assert "белой обводкой" in prompt
 
 
-def test_every_standard_reaction_has_a_quote_free_drawn_idea() -> None:
-    from sticker_service.services.stickers.sets import STANDARD_BLOCK, STANDARD_IDEAS
-
-    assert set(STANDARD_IDEAS) == set(STANDARD_BLOCK)
-    # No quote characters inside ideas — quotes would order the model to letter text.
-    assert all('"' not in v and "«" not in v for v in STANDARD_IDEAS.values())
-
-
 def test_sheet_prompt_stays_lean() -> None:
     # The brief must not creep back into a micromanaging wall of text: the
     # scaffold around the ideas list stays under a hard budget.
