@@ -88,9 +88,21 @@ class StyleLoader:
         """Return a cached style by id, or ``None`` if absent/invalid."""
         return self.styles.get(style_id)
 
-    def menu(self) -> list[tuple[str, str]]:
-        """``(style_id, display_name)`` for enabled styles, for the bot menu."""
-        return [(s.style_id, s.display_name) for s in self.styles.values() if s.enabled]
+    def menu(self, *, experimental: bool = False) -> list[tuple[str, str]]:
+        """``(style_id, display_name)`` for enabled styles of one tier.
+
+        The picker shows polished styles by default and the experimental ones
+        only behind the dedicated shelf — pass ``experimental=True`` for that.
+        """
+        return [
+            (s.style_id, s.display_name)
+            for s in self.styles.values()
+            if s.enabled and s.experimental == experimental
+        ]
+
+    def has_experimental(self) -> bool:
+        """Whether any enabled experimental style exists (to show the shelf)."""
+        return any(s.enabled and s.experimental for s in self.styles.values())
 
     def reload(self) -> dict[str, Style]:
         """Re-scan the folder (admin ``/reload_styles``)."""

@@ -88,6 +88,9 @@ class Style(BaseModel):
     style_id: str
     display_name: str
     enabled: bool = True
+    # Tier: experimental styles are hidden behind the "🧪 Экспериментальные"
+    # shelf in the picker (may misbehave); the default is a polished style.
+    experimental: bool = False
     distance: Distance
     pipeline: list[PipelineStep]
     sticker_style_suffix: str = ""

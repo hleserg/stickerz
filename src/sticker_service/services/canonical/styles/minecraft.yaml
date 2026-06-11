@@ -1,0 +1,31 @@
+schema_version: 1
+style_id: minecraft
+display_name: "Minecraft"
+enabled: true
+# Hidden behind the experimental shelf — blocky/voxel look is far from a photo
+# and the result can be unpredictable (that is the whole point of the shelf).
+experimental: true
+distance: far
+
+# Same 3-step ladder as the polished styles; only step 2 (the style step)
+# differs: 1) photo → realistic drawing; 2) restyle into Minecraft;
+# 3) turn the gaze to camera (skipped if already facing it).
+pipeline:
+  - step: 1
+    prompt: "Сделай из фото фотореалистичный цветной рисунок. {clean_bg}"
+    refs: [photo]
+    gate: vision_judge
+  - step: 2
+    prompt: "А теперь нарисуй героя в стиле Minecraft."
+    refs: [prev]
+    gate: vision_judge
+  - step: 3
+    skip_if_yes: "Ответь да или нет, одним словом: человек на изображении смотрит прямо в камеру?"
+    prompt: >-
+      Сделай так чтобы герой смотрел в камеру, если голова повернута в другую
+      сторону постарайся развернуть ее в камеру на сколько сможешь не теряя
+      реалистичности
+    refs: [prev]
+    gate: none
+
+sticker_style_suffix: "Подписи только на русском языке. {age_clause}"

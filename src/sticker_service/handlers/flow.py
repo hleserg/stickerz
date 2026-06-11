@@ -83,6 +83,11 @@ _TXT_NAME = "Как назвать пак/персонажа? (можно кир
 _TXT_SUBJECT = "Это взрослый или ребёнок?"
 _TXT_AGE = "Сколько лет ребёнку?"
 _TXT_STYLE = "Выбери стиль:"
+_TXT_STYLE_EXP = (
+    "Тут лежат экспериментальные стили, пока ещё не отлаженные, но уже могут быть "
+    "интересными. Но помните: выбирая такой стиль, вы соглашаетесь на то, что "
+    "последствия могут быть непредсказуемыми."
+)
 _TXT_CAPTIONS = (
     "Выберите стандартные стикеры для набора. Дальше можно добавить свои "
     "или взять 🎲 случайную идею — всего не больше 15 (один лист)."
@@ -253,11 +258,25 @@ def age_kb() -> Any:
 
 
 def style_kb(loader: StyleLoader) -> Any:
+    """Polished styles + a shelf button when experimental ones exist."""
     kb = InlineKeyboardBuilder()
     for style_id, display in loader.menu():
         kb.button(text=display, callback_data=f"style:{style_id}")
+    if loader.has_experimental():
+        kb.button(text="🧪 Экспериментальные", callback_data="styles:exp")
     kb.adjust(1)
     _attach_nav(kb, back=True)
+    return kb.as_markup()
+
+
+def style_experimental_kb(loader: StyleLoader) -> Any:
+    """The experimental shelf: experimental styles + a way back to the main ones."""
+    kb = InlineKeyboardBuilder()
+    for style_id, display in loader.menu(experimental=True):
+        kb.button(text=display, callback_data=f"style:{style_id}")
+    kb.button(text="⬅️ К основным стилям", callback_data="styles:main")
+    kb.adjust(1)
+    _attach_nav(kb, back=False)  # "back" here is the shelf button above; keep only Cancel
     return kb.as_markup()
 
 
@@ -738,6 +757,30 @@ async def on_style(
     if callback.from_user is not None:
         await analytics.log(db, callback.from_user.id, analytics.STYLE_CHOSEN, style_id=style_id)
     await _enter_captions(callback, state, db, orchestrator, mode="fresh", style_id=style_id)
+
+
+async def on_styles_exp(callback: CallbackQuery, loader: StyleLoader) -> None:  # pragma: no cover
+    """Open the experimental shelf in place — still the ``style`` step, just a sub-view.
+
+    Selecting a style there fires the same ``style:`` callback and walks the
+    normal workflow; ``styles:main`` returns to the polished list.
+    """
+    tag_component("handlers.flow")
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(
+                _TXT_STYLE_EXP, reply_markup=style_experimental_kb(loader)
+            )
+
+
+async def on_styles_main(callback: CallbackQuery, loader: StyleLoader) -> None:  # pragma: no cover
+    """Return from the experimental shelf to the polished styles, in place."""
+    tag_component("handlers.flow")
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(_TXT_STYLE, reply_markup=style_kb(loader))
 
 
 _TXT_CAP_FULL = f"Больше {MAX_CAPTIONS} нельзя — сначала снимите какую-нибудь галочку."
@@ -1853,6 +1896,8 @@ def build_router() -> Router:
     router.callback_query.register(on_nav_cancel, F.data == "nav:cancel")
     router.callback_query.register(on_subject, F.data.startswith("subject:"))
     router.callback_query.register(on_age, F.data.startswith("age:"))
+    router.callback_query.register(on_styles_exp, F.data == "styles:exp")
+    router.callback_query.register(on_styles_main, F.data == "styles:main")
     router.callback_query.register(on_style, F.data.startswith("style:"))
     router.callback_query.register(on_std_toggle, F.data.startswith("std:"))
     router.callback_query.register(on_random_idea, F.data == "randidea")
