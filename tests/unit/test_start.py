@@ -227,9 +227,15 @@ async def test_help_links_demo_page(db: Database, demo_url: str) -> None:
     assert demo_url in message.answer.await_args.args[0]
 
 
-async def test_showcase_hidden_when_url_empty(db: Database) -> None:
-    # Default while the promo is reworked: no button on /start, no /help line.
+async def test_showcase_hidden_when_url_empty(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty APP_DEMO_PAGE_URL hides the button on /start and the /help line.
+    from sticker_service.config import get_settings
     from sticker_service.handlers.start import cmd_help, cmd_start
+
+    monkeypatch.setenv("APP_DEMO_PAGE_URL", "")
+    get_settings.cache_clear()
 
     message = AsyncMock()
     message.from_user = SimpleNamespace(id=7)
@@ -242,3 +248,4 @@ async def test_showcase_hidden_when_url_empty(db: Database) -> None:
     help_message.from_user = SimpleNamespace(id=7)
     await cmd_help(help_message, db)
     assert "Примеры работ" not in help_message.answer.await_args.args[0]
+    get_settings.cache_clear()
