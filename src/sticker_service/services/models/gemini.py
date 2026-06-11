@@ -20,6 +20,7 @@ from sticker_service.services.models.base import (
     ModelError,
     ModelQuotaError,
     ModelRefusalError,
+    emit_notice,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,6 +189,10 @@ class GeminiImageModel(ImageModel):
                 last = exc
                 kind = "transient" if _is_retryable(exc) else "error"
                 if attempt < _MAX_GEN_ATTEMPTS - 1:
+                    # Tell the user we're still working: a model swap reads as
+                    # "less-loaded model", a same-model retry as "retrying".
+                    next_model = model or image_model_for_attempt(attempt + 1)
+                    await emit_notice("fallback" if next_model != model_id else "retry")
                     logger.warning("gemini %s %s (%s); retrying", model_id, kind, str(exc)[:100])
                     await asyncio.sleep(2 * (attempt + 1))
                     continue

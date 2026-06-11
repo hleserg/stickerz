@@ -11,8 +11,10 @@ are raw image bytes.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 
 
 class ModelError(RuntimeError):
@@ -79,6 +81,39 @@ class ImageModel(ABC):
         raise ModelError(f"model '{self.name}' does not support text generation")
 
 
+# --- live retry/fallback notices ---------------------------------------------
+# A long model call (overloaded model, stalled socket) must never look frozen to
+# the user. Whenever a call is re-issued or fails over to another model we push a
+# short notice key ("retry"/"fallback") so the flow can swap the status line.
+NoticeCallback = Callable[[str], Awaitable[None]]
+
+# The sink lives in a ContextVar rather than a parameter so the deep retry logic
+# stays out of every ``generate()`` signature: the flow installs a sink around
+# its generation call, and the model reads it back in the SAME task. Concurrent
+# users stay isolated because ContextVars are per-task.
+_notice_sink: contextvars.ContextVar[NoticeCallback | None] = contextvars.ContextVar(
+    "model_notice_sink", default=None
+)
+
+
+async def emit_notice(key: str) -> None:
+    """Push a retry/fallback notice to the active flow's sink, if one is installed."""
+    sink = _notice_sink.get()
+    if sink is not None:
+        with contextlib.suppress(Exception):  # a UI hiccup must never fail generation
+            await sink(key)
+
+
+@contextlib.contextmanager
+def notice_sink(callback: NoticeCallback | None) -> Iterator[None]:
+    """Install ``callback`` as the retry/fallback notice sink for the wrapped call."""
+    token = _notice_sink.set(callback)
+    try:
+        yield
+    finally:
+        _notice_sink.reset(token)
+
+
 # A fallback ladder is an ordered list of (image_model, image_size) rungs.
 Ladder = Sequence[tuple[str, str]]
 
@@ -100,7 +135,9 @@ async def generate_via_ladder(
     refusing rung. A quota/credits error fails fast.
     """
     last: Exception | None = None
-    for image_model, image_size in ladder:
+    for rung, (image_model, image_size) in enumerate(ladder):
+        if rung > 0:  # dropped off the previous rung → a less-loaded model/res
+            await emit_notice("fallback")
         refusal: ModelRefusalError | None = None
         for nudge in reformulations:
             try:

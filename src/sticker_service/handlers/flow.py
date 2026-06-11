@@ -46,6 +46,7 @@ from sticker_service.observability import tag_component
 from sticker_service.services import analytics, budget, modes, photo_check, pricing
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.models import errors as model_errors
+from sticker_service.services.models.base import notice_sink
 from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import Orchestrator
 from sticker_service.services.postprocess import bundle_zip, compose_preview
@@ -70,6 +71,14 @@ _STAGE_TEXT = {
     "emoji": "🎭 Подбираю каждому стикеру эмодзи…",
     "preview": "🧩 Собираю превью…",
     "publish": "📦 Публикую пак в Telegram…",
+}
+
+# Live notices when a model call is re-issued or fails over (overload/timeout),
+# so a long wait surfaces as a moving status line instead of a frozen message.
+# Keys match the model layer's NoticeCallback ("retry"/"fallback").
+_NOTICE_TEXT = {
+    "retry": "🔁 ИИ-художник занят — повторяю запрос…",
+    "fallback": "⚖️ Беру менее загруженную модель…",
 }
 
 # --- screen copy (single source of truth for step text) ----------------------
@@ -1150,26 +1159,33 @@ async def _generate_and_present(  # pragma: no cover
         with contextlib.suppress(Exception):
             await msg.edit_text(_STAGE_TEXT.get(label, "Работаю…"))
 
+    async def on_notice(key: str) -> None:
+        # A model retry/fallback fired deep in generation — keep the status line
+        # moving so a slow call never looks frozen (a hung step reads as negative).
+        with contextlib.suppress(Exception):
+            await msg.edit_text(_NOTICE_TEXT.get(key, "Работаю…"))
+
     # Fresh starts by drawing the photo; reuse/extend jump straight to the sheet.
     start_text = _STAGE_TEXT["photo_to_art"] if mode == "fresh" else "⚙️ Готовлю генерацию…"
     with contextlib.suppress(Exception):
         await msg.edit_text(start_text)
     try:
-        async with _typing(msg), _generation_timeout():
-            bundle = await orchestrator.build_for_review(
-                mode=mode,
-                owner_id=user_id,
-                captions=captions,
-                on_step=on_step,
-                on_stage=on_stage,
-                photo=data.get("photo"),
-                style_id=data.get("style_id"),
-                subject_type=data.get("subject"),
-                child_age=data.get("child_age"),
-                name=data.get("name"),
-                character_id=data.get("character_id"),
-                pack_id=data.get("pack_id"),
-            )
+        with notice_sink(on_notice):
+            async with _typing(msg), _generation_timeout():
+                bundle = await orchestrator.build_for_review(
+                    mode=mode,
+                    owner_id=user_id,
+                    captions=captions,
+                    on_step=on_step,
+                    on_stage=on_stage,
+                    photo=data.get("photo"),
+                    style_id=data.get("style_id"),
+                    subject_type=data.get("subject"),
+                    child_age=data.get("child_age"),
+                    name=data.get("name"),
+                    character_id=data.get("character_id"),
+                    pack_id=data.get("pack_id"),
+                )
     except Exception as exc:
         logger.exception("generation failed")
         # Revert out of the publish state (set before generation) so a failure is
