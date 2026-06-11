@@ -77,9 +77,13 @@ class WhitelistMiddleware(BaseMiddleware):
             if not is_private:
                 return await handler(event, data)
             if answer is not None:
-                await answer(
-                    "🛠 Бот сейчас в разработке — скоро мы всё покажем! Загляни чуть позже."
+                # The notice is overridable via config, so planned-maintenance
+                # downtime can show its own banner without a deploy.
+                notice = await self._db.get_config(
+                    "maintenance_notice",
+                    "🛠 Бот сейчас в разработке — скоро мы всё покажем! Загляни чуть позже.",
                 )
+                await answer(notice)
             return None
 
         # Temporary ban (auto-moderation) applies in any non-debug mode.

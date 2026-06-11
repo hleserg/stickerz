@@ -158,3 +158,15 @@ async def test_build_dispatcher_with_db_registers_admin(db: Database) -> None:
     dp = build_dispatcher(db)
     assert "admin" in [r.name for r in dp.sub_routers]
     assert dp["db"] is db
+
+
+async def test_debug_notice_overridable_via_config(db: Database) -> None:
+    # A planned-maintenance banner replaces the default dev notice without a
+    # deploy: set the config key, every blocked user sees it; unset → default.
+    await db.set_config("maintenance_notice", "⚙️ Технические работы до 14:00")
+    mw = WhitelistMiddleware(db)
+    handler = AsyncMock()
+    event = AsyncMock()
+    await mw(handler, event, {"event_from_user": _user(5)})
+    handler.assert_not_called()
+    event.answer.assert_awaited_once_with("⚙️ Технические работы до 14:00")
