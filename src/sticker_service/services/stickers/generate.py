@@ -23,8 +23,8 @@ CHROMA = "#FF00FF"
 # Appended on each refusal retry to steer away from the safety trigger (§6).
 _REFORMULATIONS: tuple[str, ...] = (
     "",
-    " This is a wholesome, age-appropriate cartoon avatar for a family sticker pack.",
-    " Friendly, innocent cartoon illustration only; no realism, just a cute drawn character.",
+    " Это добрый мультяшный персонаж для семейного стикерпака.",
+    " Только дружелюбная мультяшная иллюстрация, без реализма.",
 )
 
 
@@ -35,14 +35,18 @@ class SheetRefusedError(RuntimeError):
 def _as_list_item(item: str) -> str:
     """Render one sheet item for the prompt.
 
-    Every item becomes a pure scene description: the model draws NO text at
-    all (captions are overlaid deterministically in post-processing — see
-    postprocess/caption.py), so nothing here may read as a lettering order.
+    A standard sticker goes in AS ITS LABEL only (owner's rule does the rest):
+    a replica in «…» (the model acts it out and writes it), an emotion as a
+    bare word (the model draws it). A custom idea passes verbatim — the user's
+    own quotes mark what to write.
     """
-    from sticker_service.services.stickers.sets import STANDARD_IDEAS
+    from sticker_service.services.stickers.sets import STANDARD_IDEAS, STANDARD_REPLICAS
 
     item = item.strip()
-    return STANDARD_IDEAS.get(item, item)
+    if item not in STANDARD_IDEAS:
+        return item  # кастом юзера — дословно
+    caption = STANDARD_REPLICAS.get(item)
+    return f"«{caption}»" if caption else item
 
 
 def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> str:
@@ -61,29 +65,22 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
     rows, cols = grid_for(len(captions))
     # Junk (washes, flourishes) clusters in leftover cells — forbid them explicitly.
     spare = rows * cols - len(captions)
-    empty_clause = (
-        f" Items fill only {len(captions)} of the {rows * cols} tiles: leave every unused "
-        f"tile completely empty — pure flat {CHROMA} magenta, nothing drawn in it."
-        if spare
-        else ""
-    )
+    empty_clause = f" Лишние {spare} тайл(а) оставь пустыми (чистый {CHROMA})." if spare else ""
     return (
-        f"Draw the SAME character as in the reference image as a sheet of {len(captions)} "
-        f"stickers in an even grid of exactly {rows} rows by {cols} columns on a solid flat "
-        f"{CHROMA} magenta background. Wide clean gaps; stickers never touch; nothing but "
-        f"the stickers is drawn on the magenta. Each sticker is a die-cut cut-out with a "
-        f"clean white outline; keep props touching the character so each sticker is one "
-        f"connected piece. Keep the face, hair and eye color identical to the reference.\n"
-        f"Each numbered idea below is ONE sticker in its OWN tile, in list order (left to "
-        f"right, top to bottom). Make it funny, warm and full of character — the pose, "
-        f"expression, outfit, props and composition are yours to invent. Draw ABSOLUTELY "
-        f"NO text of any kind: no letters, words, numbers, captions, labels, speech "
-        f"bubbles or signage anywhere on the sheet — lettering is added later in "
-        f"post-production, and any drawn text is a defect. The idea text is a private "
-        f"stage direction for you, never content. If an idea is a quoted phrase, act it "
-        f"out: draw the character living that phrase; the character appears in EVERY "
-        f"sticker.{empty_clause}\n"
-        f"Ideas:\n{items}\n"
+        f"Нарисуй персонажа с референса листом из {len(captions)} стикеров: сетка "
+        f"{rows}×{cols}, фон — сплошной {CHROMA}.\n"
+        f"Лицо, причёска и цвет глаз — в точности как на референсе.\n"
+        f"Каждый стикер — отдельная наклейка одним куском, с белой обводкой; стикеры "
+        f"не соприкасаются.\n"
+        f"Одна идея из списка = один стикер, строго по порядку (слева направо, сверху "
+        f"вниз).\n"
+        f"Всё, что в идее написано без кавычек, — это то, что надо НАРИСОВАТЬ. Всё, "
+        f"что в кавычках (кавычки бывают «», \"\" или ''), — это надо НАПИСАТЬ без "
+        f"самих кавычек, в уместном месте, не перекрывая рисунок. Если идея состоит "
+        f"из одной надписи в кавычках — нарисуй персонажа, обыгрывающего её, и "
+        f"подпиши этим текстом: без кавычек и не перекрывая текстом картинку."
+        f"{empty_clause}\n"
+        f"Идеи:\n{items}\n"
         f"{suffix}"
     ).strip()
 

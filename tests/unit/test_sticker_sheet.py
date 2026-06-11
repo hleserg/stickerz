@@ -88,17 +88,11 @@ def test_sheet_prompt_turns_standard_reactions_into_drawn_ideas() -> None:
     captions = ["Привет!", "Задумался"]
     prompt = build_sheet_prompt(_style(), captions, age_clause="")
     assert CHROMA in prompt
-    # Every reaction becomes a pure scene description — the model draws no
-    # text at all; captions are overlaid in post (deterministic lettering).
-    assert "машет рукой в знак приветствия" in prompt
-    assert "Подпись" not in prompt  # no lettering orders in items
+    assert "«Привет!»" in prompt  # реплика — в кавычках (пишется)
+    assert "Задумался" in prompt and "«Задумался»" not in prompt  # эмоция — без кавычек
     assert "watercolor style" in prompt
     assert "{age_clause}" not in prompt  # placeholder resolved
-    assert "ABSOLUTELY NO text" in prompt
-    assert "yours to invent" in prompt
-    assert "die-cut" in prompt
-    # The old hard "caption ON the figure" rule is gone.
-    assert "directly ON the character" not in prompt
+    assert "белой обводкой" in prompt
 
 
 def test_every_standard_reaction_has_a_quote_free_drawn_idea() -> None:
@@ -122,13 +116,10 @@ def test_sheet_prompt_pins_ideas_to_tiles_and_text_to_its_tile() -> None:
     # caption-only idea came out as a bare speech bubble with no character.
     prompt = build_sheet_prompt(_style(), ["«Как там Ванька?»"], age_clause="")
     # 1) idea → tile mapping is explicit and ordered;
-    assert "in its OWN tile, in list order" in prompt
-    # 2) the model draws NO text at all (captions are overlaid in post);
-    assert "ABSOLUTELY NO text" in prompt
-    assert "post-production" in prompt
-    # 3) quoted ideas are acted out and the character is in every sticker.
-    assert "act it out" in prompt
-    assert "the character appears in EVERY sticker" in prompt
+    assert "один стикер, строго по порядку" in prompt
+    # 2) the owner's rule: unquoted = draw, quoted = write without the marks.
+    assert "НАРИСОВАТЬ" in prompt
+    assert "НАПИСАТЬ" in prompt and "без самих кавычек" in prompt
 
 
 def test_sheet_prompt_keeps_custom_descriptions_unquoted() -> None:
@@ -146,11 +137,10 @@ def test_sheet_prompt_bans_decor_and_keeps_unused_tiles_empty() -> None:
     # 13 items on a 5×3 grid leave 2 spare tiles that must stay pure magenta.
     thirteen = [f"идея {i}" for i in range(13)]
     prompt = build_sheet_prompt(_style(), thirteen, age_clause="")
-    assert "nothing but the stickers is drawn on the magenta" in prompt
-    assert "unused tile" in prompt and "15 tiles" in prompt
+    assert "оставь пустыми" in prompt  # 2 свободных тайла на сетке 5×3
     # A full grid (15 of 15) has no spare tiles → no confusing clause.
     fifteen = [f"идея {i}" for i in range(15)]
-    assert "unused tile" not in build_sheet_prompt(_style(), fifteen, age_clause="")
+    assert "оставь пустыми" not in build_sheet_prompt(_style(), fifteen, age_clause="")
 
 
 def test_sheet_prompt_child_age_clause() -> None:
@@ -189,19 +179,18 @@ async def test_generate_sheet_gives_up_after_reformulations() -> None:
     assert len(model.calls) == 3
 
 
-def test_prompt_bans_all_model_lettering() -> None:
-    # Prompt-level lettering rules failed under fallback models (live alpha:
-    # parenthesized stage directions on a whole pack) — the model now draws no
-    # text at all; captions are overlaid deterministically in post-processing.
+def test_prompt_carries_draw_vs_write_rule() -> None:
+    # Owner's rule verbatim: unquoted = DRAW, quoted = WRITE without the marks,
+    # placed appropriately and not covering the art.
     from sticker_service.config import get_settings
     from sticker_service.services.canonical import StyleLoader
 
     style = StyleLoader(get_settings().styles_dir).get("watercolor")
     assert style is not None
-    prompt = build_sheet_prompt(style, ["«Привет!»"], "")
-    assert "ABSOLUTELY NO text" in prompt
-    assert "any drawn text is a defect" in prompt
-    assert "Подпись" not in prompt  # no lettering orders sneak into items
+    prompt = build_sheet_prompt(style, ["Привет!", "Задумался"], "")
+    assert "не перекрывая рисунок" in prompt
+    assert "«Привет!»" in prompt  # реплика — подпись в кавычках
+    assert "«Задумался»" not in prompt  # эмоция — без подписи
 
 
 def test_canonical_fallbacks_capped_below_4k() -> None:
@@ -210,39 +199,3 @@ def test_canonical_fallbacks_capped_below_4k() -> None:
     from sticker_service.services.models.gemini import CANONICAL_LADDER
 
     assert all(size != "4K" for _, size in CANONICAL_LADDER)
-
-
-def test_caption_overlay_targets_replicas_and_quotes_only() -> None:
-    # Owner's rule, now deterministic: text only where the item is a spoken
-    # line or the user explicitly quoted a caption; emotions stay clean.
-    from sticker_service.services.postprocess.caption import caption_text_for
-
-    assert caption_text_for("Привет!") == "Привет!"  # replica
-    assert caption_text_for("Окей 😉") == "Окей"  # emoji stripped
-    assert caption_text_for("Люблю") is None  # emotion, NOT a phrase (owner)
-    assert caption_text_for("Задумался") is None  # emotion
-    assert caption_text_for("Грустно") is None  # emotion
-    assert caption_text_for('Тревожное лицо, подпись "Творожность!"') == "Творожность!"
-    assert caption_text_for("Смотрит в меню. Подпись: «Стратегический выбор.»") == (
-        "Стратегический выбор."
-    )
-    assert caption_text_for("Укротительница кошек") is None  # plain description
-
-
-def test_draw_caption_changes_pixels_and_stays_png() -> None:
-    from io import BytesIO
-
-    from PIL import Image
-
-    from sticker_service.services.postprocess.caption import draw_caption
-
-    buf = BytesIO()
-    Image.new("RGBA", (512, 512), (0, 0, 0, 0)).save(buf, format="PNG")
-    blank = buf.getvalue()
-    out = draw_caption(blank, "Привет!")
-    assert out != blank and out.startswith(b"\x89PNG")
-    img = Image.open(BytesIO(out))
-    assert img.size == (512, 512)
-    # Long captions wrap instead of overflowing the edge.
-    out2 = draw_caption(blank, "Я люблю порядок и убираю всё одновременно")
-    assert out2 != blank
