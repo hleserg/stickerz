@@ -192,3 +192,23 @@ async def test_generate_sheet_gives_up_after_reformulations() -> None:
         await generate_sheet(model, b"CANON", _style(), ["Привет!"], subject_type="adult")
     # refusal doesn't fail over to other models (flash won't un-flag) → one rung of nudges
     assert len(model.calls) == 3
+
+
+def test_prompt_orders_lettering_without_quote_marks() -> None:
+    # A quoted custom caption must be lettered as bare text: the «…» marks are
+    # an instruction boundary, not part of the sticker (live alpha feedback).
+    from sticker_service.config import get_settings
+    from sticker_service.services.canonical import StyleLoader
+
+    style = StyleLoader(get_settings().styles_dir).get("watercolor")
+    assert style is not None
+    prompt = build_sheet_prompt(style, ["«Привет!»"], "")
+    assert "WITHOUT" in prompt and "quote marks" in prompt
+
+
+def test_canonical_fallbacks_capped_below_4k() -> None:
+    # A 4K fallback canonical balloons every later step's memory and OOMed the
+    # 1 GB VDS — reference images stay at 2K or below.
+    from sticker_service.services.models.gemini import CANONICAL_LADDER
+
+    assert all(size != "4K" for _, size in CANONICAL_LADDER)

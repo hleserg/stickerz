@@ -80,7 +80,8 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
         f"right, top to bottom). Make it funny, warm and full of character — the pose, "
         f"expression, outfit, props and composition are yours to invent. Show the emotion "
         f"in the drawing itself and add NO text unless the idea explicitly asks for it. "
-        f'When an idea has text in quotes («…» or "…"), letter exactly that text in clean '
+        f'When an idea has text in quotes («…» or "…"), letter exactly that text — WITHOUT '
+        f"the quote marks themselves — in clean "
         f"Russian Cyrillic, placed where it sits naturally in the composition — not as a "
         f"banner pinned to the bottom. Lettering belongs only to its own sticker: keep it "
         f"inside that sticker's tile, never spilling into or repeated in another tile. If "

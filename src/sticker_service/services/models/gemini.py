@@ -47,8 +47,11 @@ FLASH_MODEL = _IMAGE_FALLBACKS[0]  # gemini-3.1-flash-image
 # fallback when pro is overloaded; resolution steps down to survive demand spikes.
 CANONICAL_LADDER: tuple[tuple[str, str], ...] = (
     (IMAGE_MODEL, "1K"),  # canonical reference — small is enough
-    (FLASH_MODEL, "4K"),
+    # Flash fallbacks capped at 2K: a 4K canonical balloons every later step
+    # (refs, gates, persistence) and was the RAM spike that OOMed the 1 GB VDS
+    # during an overload storm; as a reference image 2K loses nothing.
     (FLASH_MODEL, "2K"),
+    (FLASH_MODEL, "1K"),
 )
 SHEET_LADDER: tuple[tuple[str, str], ...] = (
     (IMAGE_MODEL, "4K"),  # sheet carries Cyrillic captions — keep it sharp
