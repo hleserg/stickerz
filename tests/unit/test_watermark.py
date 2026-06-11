@@ -57,3 +57,24 @@ def test_watermark_text_is_configurable() -> None:
     a = apply_watermark(_sticker_png(), text="@yuki_stickers_bot")
     b = apply_watermark(_sticker_png(), text="@other_bot")
     assert a != b
+
+
+def test_watermark_sits_below_the_figure() -> None:
+    # Owner's rule: the handle must not cover the art — it goes BELOW the
+    # silhouette bottom (clamped to the canvas).
+    from io import BytesIO
+
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+    ImageDraw.Draw(img).ellipse([100, 50, 400, 300], fill=(40, 90, 200, 255))  # figure top half
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    out = Image.open(BytesIO(apply_watermark(buf.getvalue())))
+    arr = np.asarray(out)
+    figure_bottom = 300
+    added = (arr[..., 3] > 0) & ~(np.asarray(img.convert("RGBA"))[..., 3] > 0)
+    rows = np.where(added.any(axis=1))[0]
+    assert rows.size  # watermark drawn
+    assert rows.min() > figure_bottom  # strictly below the figure

@@ -26,11 +26,13 @@ from pathlib import Path
 from sticker_service.config import get_settings
 from sticker_service.db import Character, Database, Pack, Sticker
 from sticker_service.db.models import SubjectType
+from sticker_service.services import analytics
 from sticker_service.services.canonical.engine import CanonicalEngine
 from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.canonical.schema import Style
 from sticker_service.services.models.base import ImageModel
-from sticker_service.services.postprocess import apply_watermark, grid_for, process_sheet
+from sticker_service.services.models.errors import TransientPipelineError
+from sticker_service.services.postprocess import apply_watermark, grid_for, process_sheet_checked
 from sticker_service.services.publish import (
     MAX_STICKERS_PER_SET,
     Publisher,
@@ -680,9 +682,33 @@ class Orchestrator:
             # Chroma keying + component labeling over a 4K sheet is seconds of
             # numpy/PIL CPU — off the event loop, or every other user stalls;
             # and through the gate, or concurrent users stack ~0.7 GB peaks.
-            sliced = await self._gated_to_thread(
-                lambda s=sheet, p=page: process_sheet(s, grid=grid_for(len(p)), expected=len(p))
+            sliced, quality = await self._gated_to_thread(
+                lambda s=sheet, p=page: process_sheet_checked(
+                    s, grid=grid_for(len(p)), expected=len(p)
+                )
             )
+            if quality.path != "components":
+                # The main slicing path didn't cut it — record which fallback
+                # saved (or failed) the sheet, to learn the real-world rates.
+                await analytics.log(
+                    self._db,
+                    character.owner_id,
+                    analytics.SLICING_FALLBACK,
+                    path=quality.path,
+                    ok=quality.ok,
+                    reason=quality.reason,
+                )
+            if not quality.ok:
+                # Garbage must never ship (owner's rule): fail honestly — the
+                # user gets an apology + a free retry button (credits are only
+                # charged on success), the owner gets the genfail DM.
+                logger.warning(
+                    "sheet unusable for owner=%s: %s (path=%s)",
+                    character.owner_id,
+                    quality.reason,
+                    quality.path,
+                )
+                raise TransientPipelineError(f"sheet slicing failed: {quality.reason}")
             await self._stage(on_stage, "slice")
             stickers.extend(sliced)
         if not stickers:  # pragma: no cover - defensive

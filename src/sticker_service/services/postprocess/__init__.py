@@ -9,6 +9,8 @@ from sticker_service.services.postprocess.cover import make_cover
 from sticker_service.services.postprocess.preview import compose_preview
 from sticker_service.services.postprocess.slice_stickers import (
     CHROMA_DEFAULT,
+    SheetQuality,
+    add_outline,
     chroma_key,
     chroma_key_auto,
     drop_outlier_fragments,
@@ -16,9 +18,12 @@ from sticker_service.services.postprocess.slice_stickers import (
     encode_sticker,
     fit_to_512,
     grid_for,
-    grid_slice,
+    outer_flood_key,
     process_sheet,
+    process_sheet_checked,
+    sheet_quality,
     slice_sheet,
+    split_merged,
 )
 from sticker_service.services.postprocess.watermark import DEFAULT_TEXT, apply_watermark
 from sticker_service.services.postprocess.whatsapp import to_whatsapp, to_whatsapp_pack
@@ -31,6 +36,8 @@ Image.MAX_IMAGE_PIXELS = 64_000_000
 __all__ = [
     "CHROMA_DEFAULT",
     "DEFAULT_TEXT",
+    "SheetQuality",
+    "add_outline",
     "apply_watermark",
     "bundle_zip",
     "chroma_key",
@@ -41,10 +48,13 @@ __all__ = [
     "encode_sticker",
     "fit_to_512",
     "grid_for",
-    "grid_slice",
     "make_cover",
+    "outer_flood_key",
     "process_sheet",
+    "process_sheet_checked",
+    "sheet_quality",
     "slice_sheet",
+    "split_merged",
     "to_whatsapp",
     "to_whatsapp_pack",
 ]

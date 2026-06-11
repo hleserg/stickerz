@@ -531,7 +531,7 @@ async def test_postprocess_gate_bounds_concurrent_sheet_keying(
 
     sticker = tiny_png()
 
-    def fake_process_sheet(_sheet: bytes, *, grid=None, expected=None) -> list[bytes]:
+    def fake_process_sheet(_sheet: bytes, *, grid=None, expected=None):
         nonlocal running, max_seen
         import time
 
@@ -541,9 +541,13 @@ async def test_postprocess_gate_bounds_concurrent_sheet_keying(
         time.sleep(0.12)  # long enough for all four tasks to pile up
         with lock:
             running -= 1
-        return [sticker]
+        from sticker_service.services.postprocess import SheetQuality
 
-    monkeypatch.setattr("sticker_service.services.orchestrator.process_sheet", fake_process_sheet)
+        return [sticker], SheetQuality(True, "ok", 1.0, "components")
+
+    monkeypatch.setattr(
+        "sticker_service.services.orchestrator.process_sheet_checked", fake_process_sheet
+    )
     orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
     chars = []
     for i in range(4):
@@ -807,3 +811,33 @@ async def test_canonical_pending_dropped_for_new_job(
     _save_pending_step(pending, "old-key", 1, b"OLD")
     assert _load_pending_steps(pending, "new-key") == {}
     assert not pending.exists()  # stale leftovers removed on mismatch
+
+
+async def test_unusable_sheet_fails_generation_with_retryable_error(
+    db: Database, loader: StyleLoader, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Garbage never ships (owner's rule): an un-sliceable sheet raises a
+    # retryable error and logs the fallback analytics event.
+    import sticker_service.services.orchestrator as orch_mod
+    from sticker_service.services import analytics
+    from sticker_service.services.models.errors import TransientPipelineError, is_retryable
+    from sticker_service.services.postprocess import SheetQuality
+
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    char = await orch.save_character(
+        owner_id=5,
+        name="Тест",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(1),
+    )
+
+    def _bad(*a: object, **k: object) -> tuple[list[bytes], SheetQuality]:
+        return [b"x"], SheetQuality(False, "scrap piece", 0.1, "split")
+
+    monkeypatch.setattr(orch_mod, "process_sheet_checked", _bad)
+    with pytest.raises(TransientPipelineError) as err:
+        await orch.build_stickers(char, captions=["Привет!"])
+    assert is_retryable(err.value)
+    assert await db.count_events(analytics.SLICING_FALLBACK) == 1

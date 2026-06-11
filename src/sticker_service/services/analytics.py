@@ -21,6 +21,7 @@ GENERATION_ERROR = "generation_error"
 DOWNLOADED = "downloaded"
 PUBLISHED = "published"
 EXTENDED = "extended"
+SLICING_FALLBACK = "slicing_fallback"
 
 
 async def log(db: Database, user_id: int, event: str, **detail: object) -> None:
