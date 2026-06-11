@@ -14,7 +14,7 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sticker_service.config import get_settings
@@ -78,20 +78,30 @@ async def cmd_deny(message: Message, command: CommandObject, db: Database) -> No
 
 
 async def cmd_stats(message: Message, db: Database) -> None:
-    """Funnel infographic (admin only)."""
+    """Funnel infographic for the alpha (admin only).
+
+    Admins' own events are excluded: in alpha only testers act, and before
+    launch only admins did — so dropping admin-attributed events yields the
+    real tester funnel since launch, not the owner's dev/test activity.
+    """
     tag_component("handlers.admin")
     if message.from_user is None or not _is_admin(message.from_user.id):
         return
+    admins = get_settings().admin_id_list
+
+    async def n(event: str) -> int:
+        return await db.count_events(event, exclude_users=admins)
+
     items = [
-        ("Запуски (/start)", await db.count_events(analytics.START)),
-        ("Выбран стиль", await db.count_events(analytics.STYLE_CHOSEN)),
-        ("Сгенерировано", await db.count_events(analytics.GENERATION_DONE)),
-        ("Ошибки генерации", await db.count_events(analytics.GENERATION_ERROR)),
-        ("Опубликовано", await db.count_events(analytics.PUBLISHED)),
-        ("Дополнено", await db.count_events(analytics.EXTENDED)),
-        ("Скачано", await db.count_events(analytics.DOWNLOADED)),
+        ("Запуски (/start)", await n(analytics.START)),
+        ("Выбран стиль", await n(analytics.STYLE_CHOSEN)),
+        ("Сгенерировано", await n(analytics.GENERATION_DONE)),
+        ("Ошибки генерации", await n(analytics.GENERATION_ERROR)),
+        ("Опубликовано", await n(analytics.PUBLISHED)),
+        ("Дополнено", await n(analytics.EXTENDED)),
+        ("Скачано", await n(analytics.DOWNLOADED)),
     ]
-    png = await asyncio.to_thread(charts.render_bar_chart, "Воронка Stickerz", items)
+    png = await asyncio.to_thread(charts.render_bar_chart, "Воронка альфы", items)
     await message.answer_photo(
         BufferedInputFile(png, filename="stats.png"), caption=await budget.summary_line(db)
     )
@@ -366,9 +376,155 @@ async def on_mode_cancel(callback: CallbackQuery) -> None:
     await callback.answer("Отменено")
 
 
+# --- user management by buttons (no typing ids) ------------------------------
+
+_USERS_PER_PAGE = 8
+
+
+def _pack_balance_text(credits: int) -> str:
+    return f"💎 {pricing.format_packs(credits)} пак."
+
+
+async def _users_keyboard(db: Database, page: int) -> tuple[str, InlineKeyboardMarkup] | None:
+    """Build the paginated whitelist list; each user is a button to their card."""
+    entries = await db.list_whitelist()
+    if not entries:
+        return None
+    pages = (len(entries) + _USERS_PER_PAGE - 1) // _USERS_PER_PAGE
+    page = max(0, min(page, pages - 1))
+    chunk = entries[page * _USERS_PER_PAGE : (page + 1) * _USERS_PER_PAGE]
+    kb = InlineKeyboardBuilder()
+    for e in chunk:
+        handle = f"@{e.username}" if e.username else f"id {e.user_id}"
+        credits = await db.credits_left(e.user_id)
+        kb.button(
+            text=f"{handle} · {pricing.format_packs(credits)} пак.",
+            callback_data=f"uc:{e.user_id}",
+        )
+    nav: list[tuple[str, str]] = []
+    if page > 0:
+        nav.append(("◀ Назад", f"users:{page - 1}"))
+    if page < pages - 1:
+        nav.append(("Вперёд ▶", f"users:{page + 1}"))
+    for text, data in nav:
+        kb.button(text=text, callback_data=data)
+    # one user per row, the nav buttons share the last row
+    rows = [1] * len(chunk) + ([len(nav)] if nav else [])
+    kb.adjust(*rows)
+    return (
+        f"👥 Пользователи (стр. {page + 1}/{pages}). Выбери — откроется карточка:",
+        kb.as_markup(),
+    )
+
+
+async def _user_card(db: Database, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Render one user's card: status + action buttons."""
+    allowed = await db.is_allowed(user_id)
+    credits = await db.credits_left(user_id)
+    until = await db.banned_until(user_id)
+    entry = next((e for e in await db.list_whitelist() if e.user_id == user_id), None)
+    handle = f"@{entry.username}" if entry and entry.username else "—"
+    lines = [
+        f"👤 {handle} (id {user_id})",
+        _pack_balance_text(credits),
+        f"Доступ: {'✅ есть' if allowed else '🚫 нет'}",
+    ]
+    if until is not None:
+        lines.append(f"🚫 Бан до {until.astimezone():%d.%m %H:%M}")
+    kb = InlineKeyboardBuilder()
+    if allowed:
+        kb.button(text="🚫 Убрать доступ", callback_data=f"uct:{user_id}")
+    else:
+        kb.button(text="✅ Дать доступ", callback_data=f"uct:{user_id}")
+    kb.button(text="➕ +1 пак", callback_data=f"ucg:{user_id}:{CREDITS_PER_PACK}")
+    kb.button(text="➖ −1 пак", callback_data=f"ucg:{user_id}:{-CREDITS_PER_PACK}")
+    kb.button(text="💬 Открыть чат", url=f"tg://user?id={user_id}")
+    kb.button(text="⬅️ К списку", callback_data="users:0")
+    kb.adjust(1, 2, 1, 1)
+    return ("\n".join(lines), kb.as_markup())
+
+
+async def cmd_users(message: Message, db: Database) -> None:
+    """List whitelisted users as buttons — tap to manage (no id typing)."""
+    tag_component("handlers.admin")
+    if message.from_user is None or not _is_admin(message.from_user.id):
+        return
+    view = await _users_keyboard(db, 0)
+    if view is None:
+        await message.answer("В whitelist пока никого. Одобри заявки: /waiting")
+        return
+    text, markup = view
+    await message.answer(text, reply_markup=markup)
+
+
+async def on_users_page(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
+    """Paginate the user list in place."""
+    tag_component("handlers.admin")
+    if callback.from_user is None or not _is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    page = int((callback.data or "users:0").split(":", 1)[-1])
+    await callback.answer()
+    view = await _users_keyboard(db, page)
+    if view is not None and isinstance(callback.message, Message):
+        text, markup = view
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(text, reply_markup=markup)
+
+
+async def on_user_card(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
+    """Open a user's card from the list."""
+    tag_component("handlers.admin")
+    if callback.from_user is None or not _is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    user_id = int((callback.data or "uc:0").split(":", 1)[-1])
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        text, markup = await _user_card(db, user_id)
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(text, reply_markup=markup)
+
+
+async def on_user_toggle(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
+    """Toggle a user's whitelist access from the card, then refresh it."""
+    tag_component("handlers.admin")
+    if callback.from_user is None or not _is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    user_id = int((callback.data or "uct:0").split(":", 1)[-1])
+    if await db.is_allowed(user_id):
+        await db.deny(user_id)
+        await callback.answer("Доступ убран")
+    else:
+        await db.allow(user_id)
+        await callback.answer("Доступ выдан")
+    if isinstance(callback.message, Message):
+        text, markup = await _user_card(db, user_id)
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(text, reply_markup=markup)
+
+
+async def on_user_gen(callback: CallbackQuery, db: Database) -> None:  # pragma: no cover
+    """Adjust a user's pack balance by ±1 pack from the card, then refresh it."""
+    tag_component("handlers.admin")
+    if callback.from_user is None or not _is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    _, raw_id, raw_delta = (callback.data or "ucg:0:0").split(":")
+    user_id, delta = int(raw_id), int(raw_delta)
+    left = await db.add_credits(user_id, delta)
+    await callback.answer(f"Баланс: {pricing.format_packs(left)} пак.")
+    if isinstance(callback.message, Message):
+        text, markup = await _user_card(db, user_id)
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(text, reply_markup=markup)
+
+
 def build_router() -> Router:
     """Build a fresh admin router (factory: safe to call per dispatcher)."""
     router = Router(name="admin")
+    router.message.register(cmd_users, Command("users"))
     router.message.register(cmd_allow, Command("allow"))
     router.message.register(cmd_deny, Command("deny"))
     router.message.register(cmd_stats, Command("stats"))
@@ -389,4 +545,8 @@ def build_router() -> Router:
     router.callback_query.register(on_app_approve, F.data.startswith("appok:"))
     router.callback_query.register(on_app_reject, F.data.startswith("appno:"))
     router.callback_query.register(on_bug_confirm, F.data.startswith("bug:"))
+    router.callback_query.register(on_users_page, F.data.startswith("users:"))
+    router.callback_query.register(on_user_card, F.data.startswith("uc:"))
+    router.callback_query.register(on_user_toggle, F.data.startswith("uct:"))
+    router.callback_query.register(on_user_gen, F.data.startswith("ucg:"))
     return router

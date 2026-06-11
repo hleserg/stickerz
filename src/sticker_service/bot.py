@@ -132,15 +132,12 @@ def _user_commands() -> list[BotCommand]:
 def _admin_commands() -> list[BotCommand]:
     """Extra menu entries every admin gets (their toolbox sits on top)."""
     return [
+        BotCommand(command="users", description="👥 Пользователи (кнопки: доступ, паки, чат)"),
         BotCommand(command="stats", description="📊 Статистика и воронка"),
         BotCommand(command="waiting", description="⏳ Заявки на рассмотрении"),
         BotCommand(command="approved", description="✅ Одобренные заявки"),
         BotCommand(command="rejected", description="🚫 Отклонённые заявки"),
-        BotCommand(command="user", description="Карточка пользователя: /user <id>"),
-        BotCommand(command="allow", description="Добавить в whitelist: /allow <id>"),
-        BotCommand(command="deny", description="Убрать из whitelist: /deny <id>"),
-        BotCommand(command="gen", description="Паки пользователю: /gen <id> <±N>"),
-        BotCommand(command="bans", description="Активные баны (снять)"),
+        BotCommand(command="bans", description="🔨 Активные баны (снять)"),
     ]
 
 
