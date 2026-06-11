@@ -6,15 +6,29 @@ component.
 
 from __future__ import annotations
 
-from aiogram import Router
+import contextlib
+
+from aiogram import F, Router
+from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.observability import tag_component
 from sticker_service.services import analytics, modes, pricing
+
+# Chat types where the bot is a guest, not a personal workspace.
+_GROUPISH = {ChatType.GROUP, ChatType.SUPERGROUP}
+
+# Public greeting for groups/channels: never the private wizard — just wave and
+# point everyone to the DM where packs are actually made.
+GROUP_WELCOME = (
+    "Привет! Я Юки — рисую персональные стикерпаки из одного фото 🎨\n"
+    "Здесь, в чате, я просто машу ручкой 👋 Чтобы сделать свой пак — "
+    "загляни ко мне в личку."
+)
 
 WELCOME = (
     "Привет! Я делаю персональные стикерпаки из фото: твой человек "
@@ -111,6 +125,54 @@ def _demo_button(kb: InlineKeyboardBuilder) -> None:
         kb.button(text="✨ Примеры работ", url=url)
 
 
+def _dm_keyboard() -> InlineKeyboardMarkup:
+    """A single button that opens the bot's private chat."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✨ Открыть Юки в личке", url="https://t.me/yuki_stickers_bot")
+    return kb.as_markup()
+
+
+async def greet_group(message: Message, db: Database) -> None:  # pragma: no cover
+    """Public greeting for a group/channel: wave + invite to the DM.
+
+    Shared by ``/start`` in a group and by any mention/reply/name-address of the
+    bot. Never runs the private application/wizard flow — that belongs in DMs.
+    """
+    tag_component("handlers.start")
+    user = message.from_user
+    if user is not None:
+        with contextlib.suppress(Exception):
+            await analytics.track_start(db, user.id)
+    with contextlib.suppress(Exception):
+        await message.answer(GROUP_WELCOME, reply_markup=_dm_keyboard())
+
+
+async def _bot_addressed(message: Message) -> bool:
+    """True when the bot is @mentioned, replied to, or called by name in a chat.
+
+    @mention and reply work with Telegram privacy mode ON; name-addressing
+    ("Юки, …") only reaches the bot when privacy mode is OFF in @BotFather, so
+    we match it too and it simply never fires while privacy is on.
+    """
+    bot = message.bot
+    if bot is None:  # pragma: no cover - always bound in production
+        return False
+    # Only real people address the bot; skip the channel's own auto-forwards
+    # into the discussion group (sender_chat set, from_user empty).
+    if message.from_user is None or message.from_user.is_bot:
+        return False
+    me = await bot.me()
+    # Reply to one of the bot's own messages.
+    reply = message.reply_to_message
+    if reply is not None and reply.from_user is not None and reply.from_user.id == me.id:
+        return True
+    text = (message.text or message.caption or "").lower()
+    if not text:
+        return False
+    handle = f"@{(me.username or '').lower()}"
+    return handle in text or "юки" in text or "yuki" in text
+
+
 async def cmd_start(message: Message, db: Database) -> None:
     """Greet the user; in alpha, gate behind an application."""
     tag_component("handlers.start")
@@ -176,7 +238,14 @@ async def cmd_help(message: Message, db: Database) -> None:
 def build_router() -> Router:
     """Build a fresh start router (factory: safe to call per dispatcher)."""
     router = Router(name="start")
-    router.message.register(cmd_start, CommandStart())
+    # Groups/channels: /start and any mention/reply/name-address → public
+    # greeting + DM invite. These are registered BEFORE the private handlers
+    # and scoped to group chats, so the private wizard never leaks into a chat.
+    router.message.register(greet_group, CommandStart(), F.chat.type.in_(_GROUPISH))
+    router.message.register(greet_group, _bot_addressed, F.chat.type.in_(_GROUPISH))
+    router.channel_post.register(greet_group, CommandStart())
+    # Private chat: the personal flow.
+    router.message.register(cmd_start, CommandStart(), F.chat.type == ChatType.PRIVATE)
     router.message.register(cmd_rules, Command("rules"))
     router.message.register(cmd_help, Command("help"))
     router.message.register(cmd_balance, Command("balance"))
