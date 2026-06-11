@@ -1388,7 +1388,7 @@ async def _present_for_publish(  # pragma: no cover
     for i, sheet in enumerate(sheets, start=1):
         await msg.answer_document(BufferedInputFile(sheet, filename=f"preview_{i}.png"))
     sent = await msg.answer(
-        f"Готово: {len(stickers)} стикеров (прозрачный фон). Что дальше?",
+        f"Готово: {len(stickers)} стикеров. Что дальше?",
         reply_markup=publish_kb(),
     )
     await _store_wizard(state, sent)
