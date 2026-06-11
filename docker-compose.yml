@@ -13,8 +13,9 @@ services:
     # --- soft redeploy ---
     # init: a tiny PID-1 (tini) that forwards SIGTERM to Python and reaps zombies.
     # stop_grace_period: on redeploy, SIGTERM makes aiogram stop fetching new
-    # updates and finish the handler already running (e.g. a generation) before
-    # the container exits — so a deploy doesn't cut off a user mid-flow. Telegram
+    # updates; the bot then explicitly drains in-flight generation tasks (they
+    # are detached from update handlers — see flow.drain_generations) before the
+    # container exits, so a deploy doesn't cut off a user mid-flow. Telegram
     # queues incoming updates during the brief swap; the new container picks them
     # up. Anything that still couldn't finish resumes via the persistent FSM.
     init: true
