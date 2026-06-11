@@ -85,22 +85,22 @@ def test_build_caption_set_with_personal_and_limit() -> None:
 
 
 def test_sheet_prompt_turns_standard_reactions_into_drawn_ideas() -> None:
-    captions = ["Привет!", "Класс!"]
+    captions = ["Привет!", "Задумался"]
     prompt = build_sheet_prompt(_style(), captions, age_clause="")
     assert CHROMA in prompt
-    # Standard reactions become unquoted scene descriptions: the emotion is
-    # drawn, never captioned (a quoted label would order the model to letter it).
-    assert '"Привет!"' not in prompt and '"Класс!"' not in prompt
+    # Standard reactions become scene descriptions; a REPLICA also carries its
+    # caption in «…» (lettered), an emotion stays caption-less (drawn only).
     assert "машет рукой в знак приветствия" in prompt
-    assert "большой палец вверх" in prompt
+    assert "Подпись: «Привет!»" in prompt  # spoken line → lettered
+    assert "Подпись: «Задумался»" not in prompt  # state → face only
     assert "watercolor style" in prompt
     assert "{age_clause}" not in prompt  # placeholder resolved
-    # Freedom-first brief: no text unless asked, emotion in the drawing, free
-    # composition, caption placed naturally; caption-only ideas get acted out.
-    assert "NO text unless the idea explicitly asks" in prompt
-    assert "Show the emotion in the drawing" in prompt
+    # Freedom-first brief, hardened: descriptions are stage directions and are
+    # never lettered; only quoted text is, once, without the quote marks.
+    assert "NEVER letter it" in prompt
+    assert "without the quote marks" in prompt
     assert "yours to invent" in prompt
-    assert "not as a banner pinned to the bottom" in prompt
+    assert "not a banner pinned to the bottom" in prompt
     assert "act it out" in prompt
     assert "die-cut" in prompt
     # The old hard "caption ON the figure" rule is gone.
@@ -192,3 +192,36 @@ async def test_generate_sheet_gives_up_after_reformulations() -> None:
         await generate_sheet(model, b"CANON", _style(), ["Привет!"], subject_type="adult")
     # refusal doesn't fail over to other models (flash won't un-flag) → one rung of nudges
     assert len(model.calls) == 3
+
+
+def test_prompt_orders_lettering_without_quote_marks() -> None:
+    # A quoted custom caption must be lettered as bare text: the «…» marks are
+    # an instruction boundary, not part of the sticker (live alpha feedback).
+    from sticker_service.config import get_settings
+    from sticker_service.services.canonical import StyleLoader
+
+    style = StyleLoader(get_settings().styles_dir).get("watercolor")
+    assert style is not None
+    prompt = build_sheet_prompt(style, ["«Привет!»"], "")
+    assert "without the quote marks" in prompt
+    assert "NEVER letter it" in prompt  # stage directions are not sticker text
+
+
+def test_canonical_fallbacks_capped_below_4k() -> None:
+    # A 4K fallback canonical balloons every later step's memory and OOMed the
+    # 1 GB VDS — reference images stay at 2K or below.
+    from sticker_service.services.models.gemini import CANONICAL_LADDER
+
+    assert all(size != "4K" for _, size in CANONICAL_LADDER)
+
+
+def test_standard_replicas_lettered_emotions_not() -> None:
+    # Product rule: a spoken line gets its caption lettered («Привет!»), an
+    # emotion/state is drawn only ("Задумался" → face, no text). The emoji is
+    # stripped from the lettered text ("Окей 😉" → «Окей»).
+    from sticker_service.services.stickers.generate import _as_list_item
+
+    assert "Подпись: «Привет!»" in _as_list_item("Привет!")
+    assert "Подпись: «Окей»" in _as_list_item("Окей 😉")
+    thinking = _as_list_item("Задумался")
+    assert "«" not in thinking and "Подпись" not in thinking

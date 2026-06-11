@@ -35,16 +35,20 @@ class SheetRefusedError(RuntimeError):
 def _as_list_item(item: str) -> str:
     """Render one sheet item for the prompt.
 
-    A standard-block reaction becomes its unquoted scene description — the
-    emotion is drawn, never captioned (quoting it would order the model to
-    letter the label). A custom item is passed through as the user wrote it:
-    their own quotes mark an exact caption, otherwise it reads as a free
-    description of the sticker idea.
+    A standard-block reaction becomes its scene description; if the reaction is
+    a SPOKEN LINE (replica — "Привет!", not an emotion like "Задумался"), the
+    exact caption is appended in «…» so the model letters it. A custom item is
+    passed through as the user wrote it: their own quotes mark an exact
+    caption, otherwise it reads as a free description of the sticker idea.
     """
-    from sticker_service.services.stickers.sets import STANDARD_IDEAS
+    from sticker_service.services.stickers.sets import STANDARD_IDEAS, STANDARD_REPLICAS
 
     item = item.strip()
-    return STANDARD_IDEAS.get(item, item)
+    desc = STANDARD_IDEAS.get(item)
+    if desc is None:
+        return item
+    caption = STANDARD_REPLICAS.get(item)
+    return f"{desc} Подпись: «{caption}»" if caption else desc
 
 
 def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> str:
@@ -78,15 +82,15 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
         f"connected piece. Keep the face, hair and eye color identical to the reference.\n"
         f"Each numbered idea below is ONE sticker in its OWN tile, in list order (left to "
         f"right, top to bottom). Make it funny, warm and full of character — the pose, "
-        f"expression, outfit, props and composition are yours to invent. Show the emotion "
-        f"in the drawing itself and add NO text unless the idea explicitly asks for it. "
-        f'When an idea has text in quotes («…» or "…"), letter exactly that text in clean '
-        f"Russian Cyrillic, placed where it sits naturally in the composition — not as a "
-        f"banner pinned to the bottom. Lettering belongs only to its own sticker: keep it "
-        f"inside that sticker's tile, never spilling into or repeated in another tile. If "
-        f"an idea is ONLY a quoted caption, act it out: draw the character living that "
-        f"phrase, caption worked in — never a tile of just text or a bare speech bubble; "
-        f"the character appears in EVERY sticker.{empty_clause}\n"
+        f"expression, outfit, props and composition are yours to invent. The idea text is "
+        f"a private stage direction — NEVER letter it on the sticker (a parenthesized "
+        f"note is a defect). The ONLY letterable text is what an idea gives in quotes "
+        f'(«…» or "…"): letter exactly that text ONCE, without the quote marks, in clean '
+        f"Russian Cyrillic, placed naturally in the composition — not a banner pinned to "
+        f"the bottom, never spilling into or repeated in another tile. If an idea is ONLY "
+        f"a quoted caption, act it out: draw the character living that phrase with the "
+        f"caption worked in — never a tile of just text or a bare speech bubble; the "
+        f"character appears in EVERY sticker.{empty_clause}\n"
         f"Ideas:\n{items}\n"
         f"{suffix}"
     ).strip()
