@@ -48,6 +48,8 @@ jobs:
           context: .
           file: docker/Dockerfile
           push: true
+          build-args: |
+            GIT_SHA=${{ github.event.workflow_run.head_sha }}
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.event.workflow_run.head_sha }}
