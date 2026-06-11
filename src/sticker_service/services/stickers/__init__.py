@@ -15,6 +15,7 @@ from sticker_service.services.stickers.generate import (
     SheetRefusedError,
     build_sheet_prompt,
     generate_sheet,
+    prompt_idea,
 )
 from sticker_service.services.stickers.meme_pool import (
     MemeIdea,
@@ -50,6 +51,7 @@ __all__ = [
     "generate_sheet",
     "is_single_emoji",
     "parse_pool",
+    "prompt_idea",
     "sample_default_mix",
     "selected_captions",
 ]

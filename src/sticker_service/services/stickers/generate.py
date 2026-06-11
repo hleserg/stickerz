@@ -32,21 +32,17 @@ class SheetRefusedError(RuntimeError):
     """The model refused to generate the sheet after all retries (§6)."""
 
 
-def _as_list_item(item: str) -> str:
-    """Render one sheet item for the prompt.
+def prompt_idea(item: str) -> str:
+    """Exact prompt line for one idea — and the checklist button text.
 
-    A standard sticker goes in AS ITS LABEL only (owner's rule does the rest):
-    a replica in «…» (the model acts it out and writes it), an emotion as a
-    bare word (the model draws it). A custom idea passes verbatim — the user's
-    own quotes mark what to write.
+    Full transparency (owner's rule): the button shows precisely what the
+    model will receive. Standard buttons map through STANDARD_PROMPTS;
+    anything else (user customs) passes verbatim.
     """
-    from sticker_service.services.stickers.sets import STANDARD_IDEAS, STANDARD_REPLICAS
+    from sticker_service.services.stickers.sets import STANDARD_PROMPTS
 
     item = item.strip()
-    if item not in STANDARD_IDEAS:
-        return item  # кастом юзера — дословно
-    caption = STANDARD_REPLICAS.get(item)
-    return f"«{caption}»" if caption else item
+    return STANDARD_PROMPTS.get(item, item)
 
 
 def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> str:
@@ -60,7 +56,7 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
     """
     from sticker_service.services.postprocess import grid_for
 
-    items = "\n".join(f"{i}. {_as_list_item(c)}" for i, c in enumerate(captions, 1))
+    items = "\n".join(f"{i}. {prompt_idea(c)}" for i, c in enumerate(captions, 1))
     suffix = style.sticker_style_suffix.replace("{age_clause}", age_clause)
     rows, cols = grid_for(len(captions))
     # Junk (washes, flourishes) clusters in leftover cells — forbid them explicitly.

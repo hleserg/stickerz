@@ -301,7 +301,7 @@ def publish_kb(*, can_publish: bool = True) -> Any:
 
 def std_checklist_kb(selected: list[int], page: int) -> Any:
     """Checklist of standard captions: toggles + page nav + done + back/cancel."""
-    from sticker_service.services.stickers import PER_PAGE, STANDARD_BLOCK
+    from sticker_service.services.stickers import PER_PAGE, STANDARD_BLOCK, prompt_idea
 
     kb = InlineKeyboardBuilder()
     pages = max(1, (len(STANDARD_BLOCK) + PER_PAGE - 1) // PER_PAGE)
@@ -309,7 +309,8 @@ def std_checklist_kb(selected: list[int], page: int) -> Any:
     page_items = list(enumerate(STANDARD_BLOCK))[start : start + PER_PAGE]
     for i, caption in page_items:
         mark = "✅" if i in selected else "⬜"
-        kb.button(text=f"{mark} {caption}", callback_data=f"std:{i}")
+        # Полная прозрачность: на кнопке ровно та строка, что уйдёт в промпт.
+        kb.button(text=f"{mark} {prompt_idea(caption)}", callback_data=f"std:{i}")
     kb.adjust(3)  # 3 columns → up to 3×4 per page
     # Bulk toggles: flip every standard caption at once (handy to clear, then
     # pick a few, or re-select all). Capped at the per-sheet limit.
