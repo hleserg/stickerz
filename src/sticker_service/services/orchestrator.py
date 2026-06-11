@@ -687,6 +687,21 @@ class Orchestrator:
             stickers.extend(sliced)
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
+        # Captions are drawn HERE, deterministically (model text is banned):
+        # replicas and user-quoted phrases get pixel-perfect lettering, emotions
+        # stay clean. Sliced stickers are in caption order (tile order per page).
+        from sticker_service.services.postprocess.caption import caption_text_for, draw_caption
+
+        overlay = [caption_text_for(c) for c in captions]
+
+        def _letter(sticker: bytes, text: str | None) -> bytes:
+            return draw_caption(sticker, text) if text else sticker
+
+        stickers = await self._gated_to_thread(
+            lambda ss=stickers: [
+                _letter(s, overlay[i] if i < len(overlay) else None) for i, s in enumerate(ss)
+            ]
+        )
         settings = get_settings()
         if settings.watermark_enabled:
             stickers = await self._gated_to_thread(
