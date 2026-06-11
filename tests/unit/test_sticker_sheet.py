@@ -88,23 +88,11 @@ def test_sheet_prompt_turns_standard_reactions_into_drawn_ideas() -> None:
     captions = ["Привет!", "Задумался"]
     prompt = build_sheet_prompt(_style(), captions, age_clause="")
     assert CHROMA in prompt
-    # Standard reactions become scene descriptions; a REPLICA also carries its
-    # caption in «…» (lettered), an emotion stays caption-less (drawn only).
-    assert "машет рукой в знак приветствия" in prompt
-    assert "Подпись: «Привет!»" in prompt  # spoken line → lettered
-    assert "Подпись: «Задумался»" not in prompt  # state → face only
+    assert "«Привет!»" in prompt  # реплика — в кавычках (пишется)
+    assert "Задумался" in prompt and "«Задумался»" not in prompt  # эмоция — без кавычек
     assert "watercolor style" in prompt
     assert "{age_clause}" not in prompt  # placeholder resolved
-    # Freedom-first brief, hardened: descriptions are stage directions and are
-    # never lettered; only quoted text is, once, without the quote marks.
-    assert "NEVER letter it" in prompt
-    assert "without the quote marks" in prompt
-    assert "yours to invent" in prompt
-    assert "not a banner pinned to the bottom" in prompt
-    assert "act it out" in prompt
-    assert "die-cut" in prompt
-    # The old hard "caption ON the figure" rule is gone.
-    assert "directly ON the character" not in prompt
+    assert "белой обводкой" in prompt
 
 
 def test_every_standard_reaction_has_a_quote_free_drawn_idea() -> None:
@@ -128,12 +116,10 @@ def test_sheet_prompt_pins_ideas_to_tiles_and_text_to_its_tile() -> None:
     # caption-only idea came out as a bare speech bubble with no character.
     prompt = build_sheet_prompt(_style(), ["«Как там Ванька?»"], age_clause="")
     # 1) idea → tile mapping is explicit and ordered;
-    assert "in its OWN tile, in list order" in prompt
-    # 2) lettering may not cross into (or repeat in) another tile;
-    assert "never spilling into or repeated in another tile" in prompt
-    # 3) caption-only ideas still contain the character — no text-only tiles.
-    assert "never a tile of just text or a bare speech bubble" in prompt
-    assert "the character appears in EVERY sticker" in prompt
+    assert "один стикер, строго по порядку" in prompt
+    # 2) the owner's rule: unquoted = draw, quoted = write without the marks.
+    assert "НАРИСОВАТЬ" in prompt
+    assert "НАПИСАТЬ" in prompt and "без самих кавычек" in prompt
 
 
 def test_sheet_prompt_keeps_custom_descriptions_unquoted() -> None:
@@ -151,11 +137,10 @@ def test_sheet_prompt_bans_decor_and_keeps_unused_tiles_empty() -> None:
     # 13 items on a 5×3 grid leave 2 spare tiles that must stay pure magenta.
     thirteen = [f"идея {i}" for i in range(13)]
     prompt = build_sheet_prompt(_style(), thirteen, age_clause="")
-    assert "nothing but the stickers is drawn on the magenta" in prompt
-    assert "unused tile" in prompt and "15 tiles" in prompt
+    assert "оставь пустыми" in prompt  # 2 свободных тайла на сетке 5×3
     # A full grid (15 of 15) has no spare tiles → no confusing clause.
     fifteen = [f"идея {i}" for i in range(15)]
-    assert "unused tile" not in build_sheet_prompt(_style(), fifteen, age_clause="")
+    assert "оставь пустыми" not in build_sheet_prompt(_style(), fifteen, age_clause="")
 
 
 def test_sheet_prompt_child_age_clause() -> None:
@@ -194,17 +179,18 @@ async def test_generate_sheet_gives_up_after_reformulations() -> None:
     assert len(model.calls) == 3
 
 
-def test_prompt_orders_lettering_without_quote_marks() -> None:
-    # A quoted custom caption must be lettered as bare text: the «…» marks are
-    # an instruction boundary, not part of the sticker (live alpha feedback).
+def test_prompt_carries_draw_vs_write_rule() -> None:
+    # Owner's rule verbatim: unquoted = DRAW, quoted = WRITE without the marks,
+    # placed appropriately and not covering the art.
     from sticker_service.config import get_settings
     from sticker_service.services.canonical import StyleLoader
 
     style = StyleLoader(get_settings().styles_dir).get("watercolor")
     assert style is not None
-    prompt = build_sheet_prompt(style, ["«Привет!»"], "")
-    assert "without the quote marks" in prompt
-    assert "NEVER letter it" in prompt  # stage directions are not sticker text
+    prompt = build_sheet_prompt(style, ["Привет!", "Задумался"], "")
+    assert "не перекрывая рисунок" in prompt
+    assert "«Привет!»" in prompt  # реплика — подпись в кавычках
+    assert "«Задумался»" not in prompt  # эмоция — без подписи
 
 
 def test_canonical_fallbacks_capped_below_4k() -> None:
@@ -213,15 +199,3 @@ def test_canonical_fallbacks_capped_below_4k() -> None:
     from sticker_service.services.models.gemini import CANONICAL_LADDER
 
     assert all(size != "4K" for _, size in CANONICAL_LADDER)
-
-
-def test_standard_replicas_lettered_emotions_not() -> None:
-    # Product rule: a spoken line gets its caption lettered («Привет!»), an
-    # emotion/state is drawn only ("Задумался" → face, no text). The emoji is
-    # stripped from the lettered text ("Окей 😉" → «Окей»).
-    from sticker_service.services.stickers.generate import _as_list_item
-
-    assert "Подпись: «Привет!»" in _as_list_item("Привет!")
-    assert "Подпись: «Окей»" in _as_list_item("Окей 😉")
-    thinking = _as_list_item("Задумался")
-    assert "«" not in thinking and "Подпись" not in thinking

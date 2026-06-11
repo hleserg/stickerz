@@ -28,4 +28,4 @@ pipeline:
     refs: [prev]
     gate: none
 
-sticker_style_suffix: "Подписи только на русском языке. {age_clause}"
+sticker_style_suffix: "{age_clause}"

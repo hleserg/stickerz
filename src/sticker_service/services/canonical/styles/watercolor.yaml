@@ -29,4 +29,4 @@ pipeline:
 
 # Appended to the sticker-sheet prompt. The final canonical (attached as the
 # reference) carries the art style, so here we only fix language + age.
-sticker_style_suffix: "Подписи только на русском языке. {age_clause}"
+sticker_style_suffix: "{age_clause}"
