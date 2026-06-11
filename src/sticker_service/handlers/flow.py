@@ -138,7 +138,7 @@ async def _alpha_wallet(db: Database, user_id: int) -> dict[str, Any]:
     flow entry and refreshed after every charge — packs change only through
     those moments, so staleness is bounded to an admin /gen mid-flow.
     """
-    if _is_admin(user_id) or await modes.get_mode(db) != modes.ALPHA:
+    if _is_first_admin(user_id) or await modes.get_mode(db) != modes.ALPHA:
         return {}
     return {"alpha": True, "bal": await db.credits_left(user_id)}
 
@@ -504,6 +504,15 @@ def _is_admin(user_id: int) -> bool:
     return user_id in get_settings().admin_id_set
 
 
+def _is_first_admin(user_id: int) -> bool:
+    """The owner — the only account with unlimited, unbilled generations.
+
+    Other admins keep admin powers but generate like ordinary alpha testers
+    (budget-gated, charged the standard pack credits).
+    """
+    return user_id == get_settings().first_admin_id
+
+
 async def _alpha_gate(db: Database, user_id: int) -> str | None:  # pragma: no cover
     """In alpha, non-approved users must apply first."""
     if _is_admin(user_id) or await modes.get_mode(db) != modes.ALPHA:
@@ -515,7 +524,7 @@ async def _alpha_gate(db: Database, user_id: int) -> str | None:  # pragma: no c
 
 async def _generation_gate(db: Database, user_id: int, cost: int) -> str | None:  # pragma: no cover
     """Budget + per-user credit check for an action costing ``cost`` credits."""
-    if _is_admin(user_id) or await modes.get_mode(db) != modes.ALPHA:
+    if _is_first_admin(user_id) or await modes.get_mode(db) != modes.ALPHA:
         return None
     if not await budget.enough_for(db, 2):
         return (
@@ -1157,7 +1166,7 @@ async def _generate_and_present(  # pragma: no cover
     # Alpha-only: charge the action's credits and watch the USD budget. In debug
     # mode there is no budget, so neither charge nor alert (avoids "-$0.70" noise).
     if await modes.get_mode(db) == modes.ALPHA:
-        if not _is_admin(user_id):
+        if not _is_first_admin(user_id):
             left = await db.consume_credits(user_id, cost)
             await state.update_data(bal=left)
             await msg.answer(
@@ -1616,7 +1625,7 @@ async def on_redraw_photo(  # pragma: no cover
         BufferedInputFile(canonical, filename=f"{char.name}.png"),
         caption=f"✅ Готово, новый каноникл «{char.name}».",
     )
-    if not _is_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
+    if not _is_first_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
         left = await db.consume_credits(user_id, pricing.COST_REDRAW)
         await message.answer(
             f"Списано {pricing.format_packs(pricing.COST_REDRAW)} пак. "
