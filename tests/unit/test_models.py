@@ -137,3 +137,35 @@ def test_gemini_vision_ladder_has_distinct_fallbacks() -> None:
     assert VISION_LADDER[0] == VISION_MODEL  # cheap primary first
     assert len(VISION_LADDER) >= 2  # at least one fallback so a 503 can fail over
     assert len(set(VISION_LADDER)) == len(VISION_LADDER)  # no duplicate rungs
+
+
+async def test_capped_raises_timeout_on_stall() -> None:
+    # A stalled network call must fail fast (TimeoutError) instead of hanging,
+    # so the generate loop can back off and fail over down the model ladder.
+    import asyncio
+
+    from sticker_service.services.models.gemini import _capped
+
+    async def _stall() -> str:
+        await asyncio.sleep(10)
+        return "never"
+
+    with pytest.raises(TimeoutError):
+        await _capped(_stall(), 0.01)
+
+
+async def test_capped_returns_value_within_deadline() -> None:
+    from sticker_service.services.models.gemini import _capped
+
+    async def _quick() -> str:
+        return "ok"
+
+    assert await _capped(_quick(), 5.0) == "ok"
+
+
+def test_timeout_is_classified_retryable() -> None:
+    # The wait_for deadline raises TimeoutError; the model loop must treat it as
+    # transient so a stalled attempt retries/fails over rather than aborting.
+    from sticker_service.services.models import errors as model_errors
+
+    assert model_errors.is_retryable(TimeoutError("stalled")) is True
