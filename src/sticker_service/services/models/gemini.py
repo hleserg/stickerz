@@ -56,6 +56,15 @@ SHEET_LADDER: tuple[tuple[str, str], ...] = (
 )
 
 _MAX_GEN_ATTEMPTS = 6
+#: Per-call deadline (seconds). When Gemini is overloaded a socket can stall
+#: mid-request with no response and no error; without a ceiling the SDK call
+#: blocks the user's whole flow indefinitely (observed: a 5-minute "frozen"
+#: step). A timeout turns that stall into a plain ``TimeoutError`` — already
+#: classified retryable — so the loop backs off and fails over down the model
+#: ladder instead of hanging. Image gen (esp. 4K sheets) is legitimately slow,
+#: so its ceiling is generous; vision calls are quick.
+_IMAGE_TIMEOUT_S = 120.0
+_VISION_TIMEOUT_S = 60.0
 _REFUSAL_REASONS = ("SAFETY", "PROHIBITED", "BLOCK", "RECITATION")
 _FLOAT_RE = re.compile(r"\d+(?:\.\d+)?|\.\d+")
 # Emoji-ish codepoint ranges, mirrors stickers.emoji validation.
@@ -64,6 +73,15 @@ _EMOJI_RE = re.compile("[\U0001f300-\U0001faff\U00002600-\U000027bf\U0001f1e6-\U
 
 def _mime(data: bytes) -> str:
     return "image/jpeg" if data[:3] == b"\xff\xd8\xff" else "image/png"
+
+
+async def _capped(awaitable: Any, timeout: float) -> Any:
+    """Await ``awaitable`` with a hard deadline; a stalled call raises ``TimeoutError``.
+
+    Wraps every network call so an overloaded-model socket stall fails fast into
+    the retry/fallback ladder instead of freezing the user's flow forever.
+    """
+    return await asyncio.wait_for(awaitable, timeout)
 
 
 # Thin wrappers over the shared taxonomy (single source of retry/billing policy).
@@ -151,8 +169,11 @@ class GeminiImageModel(ImageModel):
                 attempt + 1,
             )
             try:
-                response = await client.aio.models.generate_content(
-                    model=model_id, contents=contents, config=config
+                response = await _capped(
+                    client.aio.models.generate_content(
+                        model=model_id, contents=contents, config=config
+                    ),
+                    _IMAGE_TIMEOUT_S,
                 )
                 return self._extract_image(response)
             except ModelRefusalError:
@@ -206,8 +227,11 @@ class GeminiImageModel(ImageModel):
         for model_id in VISION_LADDER:
             for attempt in range(_VISION_ATTEMPTS_PER_MODEL):
                 try:
-                    response = await client.aio.models.generate_content(
-                        model=model_id, contents=contents, config=config
+                    response = await _capped(
+                        client.aio.models.generate_content(
+                            model=model_id, contents=contents, config=config
+                        ),
+                        _VISION_TIMEOUT_S,
                     )
                     return response.text or ""
                 except Exception as exc:  # retry, then fail over to the next model
