@@ -628,3 +628,26 @@ async def test_status_line_heartbeat_appends_elapsed_when_idle() -> None:
         status.stop()
     last = msg.edit_text.call_args.args[0]
     assert last.startswith("🎨 Превращаю фото в рисунок… · уже")
+
+
+def test_std_buttons_show_exact_prompt_lines() -> None:
+    # Full transparency (owner's rule): a standard-sticker button shows exactly
+    # the line that will go into the sheet prompt — «…» for replicas, a bare
+    # word for emotions.
+    from sticker_service.handlers.flow import std_checklist_kb
+    from sticker_service.services.stickers import PER_PAGE, STANDARD_BLOCK, prompt_idea
+
+    texts: list[str] = []
+    pages = (len(STANDARD_BLOCK) + PER_PAGE - 1) // PER_PAGE
+    for page in range(pages):
+        markup = std_checklist_kb(selected=[], page=page)
+        texts += [
+            b.text
+            for row in markup.inline_keyboard
+            for b in row
+            if b.callback_data and b.callback_data.startswith("std:")
+        ]
+    assert [t.removeprefix("⬜ ") for t in texts] == [prompt_idea(c) for c in STANDARD_BLOCK]
+    assert "⬜ «Привет!»" in texts  # реплика — в кавычках
+    assert "⬜ Грустно" in texts  # эмоция — словом
+    assert "⬜ «Окей»" in texts  # без эмодзи, как в промпте

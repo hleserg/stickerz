@@ -32,7 +32,7 @@ class SheetRefusedError(RuntimeError):
     """The model refused to generate the sheet after all retries (§6)."""
 
 
-def _as_list_item(item: str) -> str:
+def prompt_idea(item: str) -> str:
     """Render one sheet item for the prompt.
 
     A standard sticker goes in AS ITS LABEL only (owner's rule does the rest):
@@ -60,7 +60,7 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
     """
     from sticker_service.services.postprocess import grid_for
 
-    items = "\n".join(f"{i}. {_as_list_item(c)}" for i, c in enumerate(captions, 1))
+    items = "\n".join(f"{i}. {prompt_idea(c)}" for i, c in enumerate(captions, 1))
     suffix = style.sticker_style_suffix.replace("{age_clause}", age_clause)
     rows, cols = grid_for(len(captions))
     # Junk (washes, flourishes) clusters in leftover cells — forbid them explicitly.
