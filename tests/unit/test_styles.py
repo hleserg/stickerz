@@ -167,3 +167,53 @@ def test_real_styles_load() -> None:
 
     menu_ids = {sid for sid, _ in loader.menu()}
     assert {"watercolor", "soft_anime"} <= menu_ids
+
+    # Minecraft ships as an experimental style: hidden from the default menu,
+    # visible only on the experimental shelf; step 2 is the Minecraft style step.
+    minecraft = loader.get("minecraft")
+    assert minecraft is not None
+    assert minecraft.experimental is True
+    assert minecraft.pipeline[1].prompt == "А теперь нарисуй героя в стиле Minecraft."
+    assert "minecraft" not in menu_ids
+    assert "minecraft" in {sid for sid, _ in loader.menu(experimental=True)}
+
+
+_EXP = """
+schema_version: 1
+style_id: {sid}
+display_name: "Exp"
+enabled: true
+experimental: true
+distance: far
+pipeline:
+  - step: 1
+    prompt: "photo {{clean_bg}}"
+    refs: [photo]
+  - step: 2
+    prompt: "to final"
+    refs: [prev]
+sticker_style_suffix: ""
+"""
+
+
+def test_experimental_defaults_false_and_menu_splits_tiers(tmp_path: Path) -> None:
+    _write(tmp_path, "polished")  # no experimental key → polished tier
+    (tmp_path / "exp.yaml").write_text(_EXP.format(sid="exp"), encoding="utf-8")
+    loader = StyleLoader(tmp_path)
+    loader.load()
+
+    polished = loader.get("polished")
+    experimental = loader.get("exp")
+    assert polished is not None and polished.experimental is False
+    assert experimental is not None and experimental.experimental is True
+    assert loader.menu() == [("polished", "Demo")]  # default tier only
+    assert loader.menu(experimental=True) == [("exp", "Exp")]
+    assert loader.has_experimental() is True
+
+
+def test_has_experimental_false_without_any(tmp_path: Path) -> None:
+    _write(tmp_path, "polished")
+    loader = StyleLoader(tmp_path)
+    loader.load()
+    assert loader.has_experimental() is False
+    assert loader.menu(experimental=True) == []

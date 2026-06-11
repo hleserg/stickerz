@@ -506,6 +506,32 @@ def test_std_checklist_has_bulk_select_buttons() -> None:
     assert "stdclear" in callbacks
 
 
+def test_style_kb_hides_experimental_behind_shelf() -> None:
+    # The main picker lists polished styles + a shelf entry, and never the
+    # experimental styles themselves (they live behind the shelf).
+    from sticker_service.config import get_settings
+    from sticker_service.handlers.flow import style_kb
+    from sticker_service.services.canonical import StyleLoader
+
+    markup = style_kb(StyleLoader(get_settings().styles_dir))
+    callbacks = {b.callback_data for row in markup.inline_keyboard for b in row}
+    assert "styles:exp" in callbacks  # shelf entry
+    assert "style:watercolor" in callbacks  # polished style listed
+    assert "style:minecraft" not in callbacks  # experimental hidden here
+
+
+def test_experimental_shelf_lists_exp_styles_with_way_back() -> None:
+    from sticker_service.config import get_settings
+    from sticker_service.handlers.flow import style_experimental_kb
+    from sticker_service.services.canonical import StyleLoader
+
+    markup = style_experimental_kb(StyleLoader(get_settings().styles_dir))
+    callbacks = {b.callback_data for row in markup.inline_keyboard for b in row}
+    assert "style:minecraft" in callbacks  # experimental style is selectable
+    assert "styles:main" in callbacks  # and can return to polished styles
+    assert "style:watercolor" not in callbacks  # polished not duplicated here
+
+
 async def test_only_first_admin_has_unlimited_generations(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
