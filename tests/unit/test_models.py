@@ -169,3 +169,62 @@ def test_timeout_is_classified_retryable() -> None:
     from sticker_service.services.models import errors as model_errors
 
     assert model_errors.is_retryable(TimeoutError("stalled")) is True
+
+
+async def test_notice_sink_routes_only_while_installed() -> None:
+    # emit_notice is a no-op without a sink, routes to the installed sink, and
+    # stops once the sink context exits — so concurrent flows stay isolated.
+    from sticker_service.services.models.base import emit_notice, notice_sink
+
+    seen: list[str] = []
+
+    async def sink(key: str) -> None:
+        seen.append(key)
+
+    await emit_notice("retry")  # no sink -> ignored
+    with notice_sink(sink):
+        await emit_notice("retry")
+        await emit_notice("fallback")
+    await emit_notice("retry")  # sink removed -> ignored
+    assert seen == ["retry", "fallback"]
+
+
+async def test_generate_via_ladder_notifies_on_fallback() -> None:
+    # First rung fails transiently -> the ladder drops to the next rung and the
+    # user gets one "fallback" notice; the second rung then succeeds.
+    from sticker_service.services.models.base import (
+        ImageModel,
+        ModelError,
+        generate_via_ladder,
+        notice_sink,
+    )
+
+    seen: list[str] = []
+
+    async def sink(key: str) -> None:
+        seen.append(key)
+
+    class FlakyModel(ImageModel):
+        name = "flaky"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(self, prompt, refs=(), *, model=None, image_size=None):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                raise ModelError("rung 1 overloaded")
+            return b"PNG"
+
+        async def judge_geometry(self, frame_a: bytes, frame_b: bytes) -> float:
+            return 1.0
+
+        async def pick_emoji(self, image: bytes) -> str:
+            return "🙂"
+
+    model = FlakyModel()
+    ladder = (("pro", "1K"), ("flash", "4K"))
+    with notice_sink(sink):
+        out = await generate_via_ladder(model, "p", [b"r"], ladder)
+    assert out == b"PNG"
+    assert seen == ["fallback"]  # exactly one rung drop -> one fallback notice
