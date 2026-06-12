@@ -71,6 +71,26 @@ def test_judge_reports_extras_without_failing() -> None:
     assert "лишние" in verdict.reason
 
 
+def test_judge_short_lookalike_is_not_a_duplicate() -> None:
+    # The live 2026-06-12 false rejection: the model lettered a stray «Шок!»
+    # and «Устал» on textless emotions; «шок»≈«ок» hits difflib ratio 0.8, so
+    # the stray consumed the expected «Ок!» and the real one read as a dup.
+    expected = ["Ха-ха-ха", "Ок!", "Кидай кубы!", "Какой у тебя интеллект?"]
+    drawn = ["Ха-ха-ха", "Шок!", "Устал", "Ок!", "Кидай кубы!", "Какой у тебя интеллект?"]
+    verdict = judge_captions(drawn, expected)
+    assert verdict.ok, verdict.reason
+    assert verdict.duplicated == ()
+    assert "Устал" in verdict.extra  # stray texts still reach the owner's alert
+
+
+def test_judge_short_caption_still_required_exactly() -> None:
+    # Tightened fuzzy matching must not soften the gate: a sheet that drew
+    # «Шок!» instead of the ordered «Ок!» is still missing its caption.
+    verdict = judge_captions(["Шок!"], ["Ок!"])
+    assert not verdict.ok
+    assert verdict.missing == ("Ок!",)
+
+
 async def test_read_sheet_texts_parses_lines_and_sentinel() -> None:
     model = MockImageModel(ask_answer="- Привет!\n• Пока!\n")
     assert await read_sheet_texts(model, b"PNG") == ["Привет!", "Пока!"]
