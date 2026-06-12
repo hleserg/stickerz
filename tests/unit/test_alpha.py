@@ -47,10 +47,10 @@ async def test_reapply_resets_to_pending(db: Database) -> None:
 
 async def test_credits_default_and_ops(db: Database) -> None:
     assert await db.credits_left(5) == DEFAULT_CREDITS  # 6 half-packs = 3 packs
-    assert await db.consume_credits(5, 2) == DEFAULT_CREDITS - 2  # spend 1 pack
-    assert await db.consume_credits(5, 1) == DEFAULT_CREDITS - 3  # spend 0.5 pack
+    assert await db.consume_credits(5, 2) == (DEFAULT_CREDITS - 2, True)  # spend 1 pack
+    assert await db.consume_credits(5, 1) == (DEFAULT_CREDITS - 3, True)  # spend 0.5 pack
     await db.set_credits(5, 0)
-    assert await db.consume_credits(5, 2) == 0  # never negative
+    assert await db.consume_credits(5, 2) == (0, False)  # never negative, nothing spent
     assert await db.add_credits(5, 2) == 2
 
 
@@ -73,9 +73,10 @@ async def test_consume_credits_atomic_under_concurrency(db: Database) -> None:
 
 
 async def test_consume_credits_all_or_nothing_when_insufficient(db: Database) -> None:
-    # Spending more than the balance leaves it untouched (no partial debit).
+    # Spending more than the balance leaves it untouched (no partial debit),
+    # and the caller is told the spend never happened (no phantom charge).
     await db.set_credits(11, 1)
-    assert await db.consume_credits(11, 2) == 1  # insufficient → nothing spent
+    assert await db.consume_credits(11, 2) == (1, False)  # insufficient → nothing spent
 
 
 # --- budget -----------------------------------------------------------------

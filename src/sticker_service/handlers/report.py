@@ -76,6 +76,13 @@ async def on_report_text(message: Message, state: FSMContext, db: Database, bot:
             text="✅ Баг подтверждён (+генерации)",
             callback_data=f"bug:{message.from_user.id}",
         )
+        # Separate from the bug bonus: a delivered defective pack deserves its
+        # charge back even when the bug itself is already known (owner's rule).
+        kb.button(
+            text="💝 Вернуть списанный пак",
+            callback_data=f"refund:{message.from_user.id}",
+        )
+        kb.adjust(1)
         with contextlib.suppress(Exception):
             await bot.send_message(admin, report, parse_mode="HTML", reply_markup=kb.as_markup())
     await message.answer(REPORT_THANKS)

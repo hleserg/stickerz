@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import datetime
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
@@ -380,6 +381,126 @@ async def on_bug_confirm(callback: CallbackQuery, db: Database, bot: Bot) -> Non
         )
 
 
+# Owner-approved apology (2026-06-12) sent with the refunded charge.
+REFUND_USER_TEXT = (
+    "😔 Прости за бракованный пак — такое не должно доходить до тебя. "
+    "Вернули {amount} пак. на баланс: можешь перерисовать бесплатно — "
+    "/new или /addto. Спасибо, что рассказал!"
+)
+
+
+_REFUND_NOTHING = "Возвращать нечего: списаний нет или последнее уже возвращено."
+
+# user_ids with a refund mid-flight: a double-tap on a laggy connection must
+# not run two concurrent refunds for the same user.
+_refunds_in_flight: set[int] = set()
+
+
+async def _unrefunded_charge(db: Database, user_id: int) -> tuple[datetime, int, str] | None:
+    """The user's latest real charge as (when, credits, mode), or None.
+
+    None when the user was never charged, the event is malformed, or the
+    charge is older than the latest refund (= already settled). This is the
+    single gate that keeps a refund from gifting credits on top.
+    """
+    charges = await db.events_for(user_id, analytics.CREDITS_CHARGED, limit=1)
+    if not charges:
+        return None
+    when, detail = charges[0]
+    raw = detail.get("credits")
+    credits = raw if isinstance(raw, int) else 0
+    if credits <= 0:
+        return None
+    refunds = await db.events_for(user_id, analytics.CREDITS_REFUNDED, limit=1)
+    if refunds and refunds[0][0] >= when:
+        return None
+    mode = detail.get("mode")
+    return when, credits, mode if isinstance(mode, str) else "?"
+
+
+async def _strip_card_keyboard(callback: CallbackQuery) -> None:
+    """Best-effort disarm of the pressed card so a stale button can't re-fire."""
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_reply_markup(reply_markup=None)
+
+
+async def on_refund_request(callback: CallbackQuery, db: Database) -> None:
+    """Show the user's latest unrefunded charge before refunding.
+
+    The 🐞 card arrives for any report (hangs, strikes…), so the refund must
+    verify a charge actually happened — never gift credits on top — and let
+    the admin see what exactly is being returned before confirming.
+    """
+    tag_component("handlers.admin")
+    if callback.from_user is None or not _is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    user_id = int((callback.data or "refund:0").split(":", 1)[-1])
+    charge = await _unrefunded_charge(db, user_id)
+    if charge is None:
+        await callback.answer(_REFUND_NOTHING, show_alert=True)
+        return
+    when, credits, mode = charge
+    kb = InlineKeyboardBuilder()
+    # The payload carries only the user: the amount is re-verified against the
+    # latest unrefunded charge at confirm time, so a stale card can't replay.
+    kb.button(text="✅ Вернуть", callback_data=f"refundok:{user_id}")
+    kb.button(text="✖️ Отмена", callback_data="refundno")
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            f"💝 Последнее списание {user_id}: {pricing.format_packs(credits)} пак., "
+            f"{when:%d.%m %H:%M} UTC, режим {mode}. Вернуть?",
+            reply_markup=kb.as_markup(),
+        )
+
+
+async def on_refund_confirm(callback: CallbackQuery, db: Database, bot: Bot) -> None:
+    """Re-verify the charge, mark it refunded, return it and apologize.
+
+    The refund marker is written BEFORE the credits (and not via the
+    error-swallowing analytics helper): if the marker fails the user merely
+    gets the refund a press later, while the reverse order could double-pay.
+    """
+    tag_component("handlers.admin")
+    if callback.from_user is None or not _is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    user_id = int((callback.data or "refundok:0").split(":", 1)[-1])
+    if user_id in _refunds_in_flight:
+        await callback.answer("Уже выполняю…")
+        return
+    _refunds_in_flight.add(user_id)
+    try:
+        charge = await _unrefunded_charge(db, user_id)
+        if charge is None:  # double-tap, stale card or a repeat 🐞 report
+            await callback.answer(_REFUND_NOTHING, show_alert=True)
+            await _strip_card_keyboard(callback)
+            return
+        _, credits, _ = charge
+        await db.add_event(user_id, analytics.CREDITS_REFUNDED, {"credits": credits})
+        left = await db.add_credits(user_id, credits)
+    finally:
+        _refunds_in_flight.discard(user_id)
+    await callback.answer("Возвращено")
+    await _strip_card_keyboard(callback)
+    with contextlib.suppress(Exception):
+        await bot.send_message(
+            user_id, REFUND_USER_TEXT.format(amount=pricing.format_packs(credits))
+        )
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            f"💝 Вернули {pricing.format_packs(credits)} пак. юзеру {user_id} "
+            f"(итого {pricing.format_packs(left)})."
+        )
+
+
+async def on_refund_cancel(callback: CallbackQuery) -> None:
+    tag_component("handlers.admin")
+    await callback.answer("Отменено")
+
+
 async def on_mode_cancel(callback: CallbackQuery) -> None:
     tag_component("handlers.admin")
     await callback.answer("Отменено")
@@ -554,6 +675,9 @@ def build_router() -> Router:
     router.callback_query.register(on_app_approve, F.data.startswith("appok:"))
     router.callback_query.register(on_app_reject, F.data.startswith("appno:"))
     router.callback_query.register(on_bug_confirm, F.data.startswith("bug:"))
+    router.callback_query.register(on_refund_request, F.data.startswith("refund:"))
+    router.callback_query.register(on_refund_confirm, F.data.startswith("refundok:"))
+    router.callback_query.register(on_refund_cancel, F.data == "refundno")
     router.callback_query.register(on_users_page, F.data.startswith("users:"))
     router.callback_query.register(on_user_card, F.data.startswith("uc:"))
     router.callback_query.register(on_user_toggle, F.data.startswith("uct:"))
