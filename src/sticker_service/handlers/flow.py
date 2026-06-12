@@ -1663,7 +1663,12 @@ async def on_publish_yes(  # pragma: no cover
                 )
                 if data.get("mode") == "extend":
                     result = await orchestrator.publish_extend(
-                        owner_id=user_id, pack=pack, stickers=stickers
+                        owner_id=user_id,
+                        pack=pack,
+                        stickers=stickers,
+                        # Extend has no draft rows, so captions ride from the FSM
+                        # straight to the per-add persistence (history feature).
+                        captions=selected_captions(data.get("std_sel", []), data.get("custom", [])),
                     )
                 else:
                     result = await orchestrator.publish_draft(
@@ -2068,11 +2073,56 @@ async def on_pick_saved_pack(callback: CallbackQuery, db: Database) -> None:  # 
     else:
         kb.button(text="✅ Опубликовать", callback_data=f"pkpub:{pack.id}")
     kb.button(text="⬇️ Скачать (zip)", callback_data=f"pkdl:{pack.id}")
+    kb.button(text="📝 Описания", callback_data=f"pkcap:{pack.id}")
     kb.button(text="⬅️ К списку", callback_data="nav:packs")
     kb.adjust(1)
     status = "опубликован" if pack.published else "черновик"
     with contextlib.suppress(TelegramBadRequest):
         await msg.edit_text(f"«{pack.title}» — {status}.", reply_markup=kb.as_markup())
+
+
+async def on_saved_captions(callback: CallbackQuery, db: Database) -> None:
+    """📝 Numbered idea/caption list for one saved pack (stored per sticker)."""
+    tag_component("handlers.flow")
+    pack_id = int((callback.data or "pkcap:0").split(":", 1)[-1])
+    user_id = callback.from_user.id if callback.from_user else 0
+    pack = await db.get_pack(pack_id)
+    await callback.answer()
+    msg = callback.message if isinstance(callback.message, Message) else None
+    if msg is None or pack is None or pack.owner_id != user_id:
+        return
+    rows = await db.list_stickers(pack_id)
+    if not rows:
+        await msg.answer("В этом паке нет сохранённых стикеров.")
+        return
+    lines = [
+        # NULL caption = the pack predates the history feature (12.06).
+        f"{i}. {s.emoji} {s.caption or '— (пак создан до появления истории)'}"
+        for i, s in enumerate(rows, 1)
+    ]
+    await msg.answer((f"📝 «{pack.title}» — идеи стикеров:\n" + "\n".join(lines))[:4000])
+
+
+async def cmd_history(message: Message, db: Database) -> None:
+    """Show the user's recent caption orders — the generation history."""
+    tag_component("handlers.flow")
+    user_id = message.from_user.id if message.from_user else 0
+    if (hint := await _alpha_gate(db, user_id)) is not None:
+        await message.answer(hint)
+        return
+    entries = await db.events_for(user_id, analytics.CAPTIONS_SELECTED, limit=5)
+    if not entries:
+        await message.answer("История пуста — закажи первый пак: /new")
+        return
+    blocks: list[str] = []
+    for created, detail in entries:
+        standard = detail.get("standard") or []
+        custom = detail.get("custom") or []
+        texts = [str(t) for t in [*standard, *custom][:MAX_CAPTIONS]]  # type: ignore[union-attr]
+        listing = "\n".join(f"  {i}. {t}" for i, t in enumerate(texts, 1))
+        blocks.append(f"🗓 {created.strftime('%d.%m %H:%M')} UTC — {len(texts)} шт.\n{listing}")
+    text = "📝 Последние заказы стикеров (до 5):\n\n" + "\n\n".join(blocks)
+    await message.answer(text[:4000])
 
 
 async def on_saved_download(  # pragma: no cover
@@ -2187,6 +2237,7 @@ def build_router() -> Router:
     router.message.register(cmd_cancel, Command("cancel"))
     router.message.register(cmd_mychars, Command("mychars"))
     router.message.register(cmd_mypacks, Command("mypacks"))
+    router.message.register(cmd_history, Command("history"))
     router.message.register(cmd_addto, Command("addto"))
     router.message.register(on_photo, NewPack.photo)
     router.message.register(on_name, NewPack.name)
@@ -2232,6 +2283,7 @@ def build_router() -> Router:
     router.callback_query.register(on_pick_saved_pack, F.data.startswith("pk:"))
     router.callback_query.register(on_saved_publish, F.data.startswith("pkpub:"))
     router.callback_query.register(on_saved_download, F.data.startswith("pkdl:"))
+    router.callback_query.register(on_saved_captions, F.data.startswith("pkcap:"))
     # LAST: anything wizard-shaped that no state filter accepted is stale.
     router.callback_query.register(on_stale_wizard, F.func(lambda c: _is_wizard_callback(c.data)))
     return router

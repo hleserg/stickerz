@@ -66,6 +66,9 @@ class Sticker(BaseModel):
     emoji: str
     position: int
     created_at: datetime
+    # The ordered idea/caption this sticker was generated for. None for packs
+    # created before 2026-06-12 (the column arrived with the history feature).
+    caption: str | None = None
 
 
 class Order(BaseModel):

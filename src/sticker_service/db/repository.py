@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS stickers (
     file_path  TEXT NOT NULL,
     emoji      TEXT NOT NULL,
     position   INTEGER NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    caption    TEXT
 );
 CREATE TABLE IF NOT EXISTS orders (
     owner_id   INTEGER PRIMARY KEY,
@@ -172,6 +173,12 @@ class Database:
         if "photo_path" not in char_cols:
             # Source photo kept (alpha) so a canonical can be inspected/redrawn.
             await self._conn.execute("ALTER TABLE characters ADD COLUMN photo_path TEXT")
+        async with self._conn.execute("PRAGMA table_info(stickers)") as cur:
+            sticker_cols = {row["name"] for row in await cur.fetchall()}
+        if "caption" not in sticker_cols:
+            # The user-visible history feature (12.06): each sticker remembers
+            # the idea it was generated for; old rows stay NULL.
+            await self._conn.execute("ALTER TABLE stickers ADD COLUMN caption TEXT")
         # Quotas moved from whole packs to half-packs (1 pack = 2 credits): double
         # existing balances once so old testers keep the same number of packs.
         async with self._conn.execute(
@@ -374,13 +381,19 @@ class Database:
     # --- stickers ------------------------------------------------------------
 
     async def add_sticker(
-        self, *, pack_id: int, file_path: str, emoji: str, position: int
+        self,
+        *,
+        pack_id: int,
+        file_path: str,
+        emoji: str,
+        position: int,
+        caption: str | None = None,
     ) -> Sticker:
         created = _now()
         cur = await self._conn.execute(
-            "INSERT INTO stickers (pack_id, file_path, emoji, position, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (pack_id, file_path, emoji, position, created.isoformat()),
+            "INSERT INTO stickers (pack_id, file_path, emoji, position, created_at, caption) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (pack_id, file_path, emoji, position, created.isoformat(), caption),
         )
         await self._conn.commit()
         return Sticker(
@@ -390,6 +403,7 @@ class Database:
             emoji=emoji,
             position=position,
             created_at=created,
+            caption=caption,
         )
 
     async def list_stickers(self, pack_id: int) -> list[Sticker]:
@@ -398,6 +412,25 @@ class Database:
         ) as cur:
             rows = await cur.fetchall()
         return [Sticker(**dict(r)) for r in rows]
+
+    async def events_for(
+        self, user_id: int, event: str, limit: int = 5
+    ) -> list[tuple[datetime, dict[str, object]]]:
+        """Recent events of one type for a user, newest first, detail parsed."""
+        async with self._conn.execute(
+            "SELECT created_at, detail FROM events WHERE user_id = ? AND event = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, event, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        out: list[tuple[datetime, dict[str, object]]] = []
+        for row in rows:
+            try:
+                detail = json.loads(row["detail"])
+            except ValueError:  # pragma: no cover - defensive against hand-edits
+                detail = {}
+            out.append((datetime.fromisoformat(row["created_at"]), detail))
+        return out
 
     async def count_stickers(self, pack_id: int) -> int:
         async with self._conn.execute(

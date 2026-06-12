@@ -816,6 +816,74 @@ def test_quality_disclaimer_is_pinned() -> None:
     assert "/report" in review
 
 
+async def test_cmd_history_renders_recent_orders(monkeypatch: object) -> None:
+    from unittest.mock import AsyncMock
+
+    from sticker_service.db import Database
+    from sticker_service.handlers import flow
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        flow, "_alpha_gate", AsyncMock(return_value=None)
+    )
+    db = await Database.connect(":memory:")
+    try:
+        await db.add_event(
+            5, "captions_selected", {"standard": ["Привет!"], "custom": ['"Огонь!"'], "total": 2}
+        )
+        message = AsyncMock()
+        message.from_user.id = 5
+        await flow.cmd_history(message, db)
+        text = message.answer.call_args.args[0]
+        assert "Привет!" in text
+        assert "Огонь!" in text
+        assert "2 шт." in text
+    finally:
+        await db.close()
+
+
+async def test_saved_pack_captions_button() -> None:
+    from unittest.mock import AsyncMock
+
+    from aiogram.types import Message
+
+    from sticker_service.db import Database
+    from sticker_service.handlers.flow import on_saved_captions
+
+    db = await Database.connect(":memory:")
+    try:
+        char = await db.add_character(
+            owner_id=7, name="A", style_id="watercolor", subject_type="adult", canonical_path="/x"
+        )
+        pack = await db.add_pack(
+            character_id=char.id, owner_id=7, set_name="cap_by_bot", title="Кот"
+        )
+        await db.add_sticker(
+            pack_id=pack.id, file_path="/a.png", emoji="🙂", position=0, caption="Привет!"
+        )
+        await db.add_sticker(pack_id=pack.id, file_path="/b.png", emoji="👍", position=1)
+        callback = AsyncMock()
+        callback.data = f"pkcap:{pack.id}"
+        callback.from_user.id = 7
+        callback.message = AsyncMock(spec=Message)
+        # aiogram's Message.answer is a sync def returning an awaitable, so the
+        # spec makes it a MagicMock — force an awaitable mock for the handler.
+        callback.message.answer = AsyncMock()
+        await on_saved_captions(callback, db)
+        text = callback.message.answer.call_args.args[0]
+        assert "Привет!" in text
+        assert "до появления истории" in text  # NULL caption renders kindly
+
+        stranger = AsyncMock()
+        stranger.data = f"pkcap:{pack.id}"
+        stranger.from_user.id = 999  # not the owner — silence, no leak
+        stranger.message = AsyncMock(spec=Message)
+        stranger.message.answer = AsyncMock()
+        await on_saved_captions(stranger, db)
+        stranger.message.answer.assert_not_awaited()
+    finally:
+        await db.close()
+
+
 def test_duplicate_caption_detector() -> None:
     # Standard buttons are toggle-safe; the custom paths (typed text, 🎲) used
     # to accept duplicates, making the model honestly draw the sticker twice.
