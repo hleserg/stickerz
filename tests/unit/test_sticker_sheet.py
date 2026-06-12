@@ -75,6 +75,57 @@ def test_selected_captions_merges_sorted_and_caps() -> None:
     assert len(big) == MAX_CAPTIONS
 
 
+# --- numbered-list caption input (owner's rule, 13.06) ------------------------
+
+
+def test_parse_caption_items_one_per_line() -> None:
+    from sticker_service.services.stickers import parse_caption_items
+
+    text = "1. Привет!\n2) Огонь 🔥\n3. А это ты у него спроси!"
+    assert parse_caption_items(text) == ["Привет!", "Огонь 🔥", "А это ты у него спроси!"]
+
+
+def test_parse_caption_items_inline() -> None:
+    from sticker_service.services.stickers import parse_caption_items
+
+    assert parse_caption_items("1. Привет 2. Пока 3. Кидай кубы!") == [
+        "Привет",
+        "Пока",
+        "Кидай кубы!",
+    ]
+    assert parse_caption_items("1) Раз 2) Два") == ["Раз", "Два"]
+
+
+def test_parse_caption_items_ignores_preamble_lines() -> None:
+    from sticker_service.services.stickers import parse_caption_items
+
+    text = "вот идеи:\n1. Доброе утро\n2. Спокойной ночи"
+    assert parse_caption_items(text) == ["Доброе утро", "Спокойной ночи"]
+
+
+@pytest.mark.parametrize(
+    "single",
+    [
+        "Гол 1:0!",  # digits inside a caption are not a list
+        "С 1 сентября",
+        "1. Единственный пункт",  # one marker is not a list
+        "Счёт 2. Потом 5. Потом 9.",  # numbers not sequential from 1 → one caption
+        "обычная подпись",
+    ],
+)
+def test_parse_caption_items_keeps_single_captions_whole(single: str) -> None:
+    from sticker_service.services.stickers import parse_caption_items
+
+    assert parse_caption_items(single) == [single]
+
+
+def test_parse_caption_items_empty() -> None:
+    from sticker_service.services.stickers import parse_caption_items
+
+    assert parse_caption_items("") == []
+    assert parse_caption_items("   ") == []
+
+
 def test_build_caption_set_with_personal_and_limit() -> None:
     captions = build_caption_set(personal=["Не в садик!", "Какао!", "Хм...", "Класс!"], limit=15)
     assert len(captions) == 15

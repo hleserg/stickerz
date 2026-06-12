@@ -52,7 +52,12 @@ from sticker_service.services.orchestrator import Orchestrator
 from sticker_service.services.postprocess import bundle_zip, compose_preview
 from sticker_service.services.publish import PackFullError, remaining_capacity
 from sticker_service.services.publish.publisher import StickerInput
-from sticker_service.services.stickers import MAX_CAPTIONS, STANDARD_BLOCK, selected_captions
+from sticker_service.services.stickers import (
+    MAX_CAPTIONS,
+    STANDARD_BLOCK,
+    parse_caption_items,
+    selected_captions,
+)
 from sticker_service.services.strikes import register_strike
 
 logger = logging.getLogger(__name__)
@@ -999,23 +1004,51 @@ async def on_custom_no(callback: CallbackQuery, state: FSMContext) -> None:  # p
 async def on_enter_custom(
     message: Message, state: FSMContext, db: Database
 ) -> None:  # pragma: no cover
-    """Append a typed custom caption (capped at MAX_CAPTIONS), then show the review list."""
+    """Append typed custom caption(s); a numbered list adds several at once.
+
+    «1. идея  2. идея …» is split by ``parse_caption_items`` (owner's rule,
+    13.06): every item passes the same moderation as a single caption,
+    duplicates are skipped, and only what fits under MAX_CAPTIONS is added —
+    the user is told what was dropped and why.
+    """
     tag_component("handlers.flow")
     text = (message.text or "").strip()
-    reason = caption_rejection_reason(text)
-    if reason:
-        await _strike(
-            db, message.from_user.id if message.from_user else 0, message, f"Так нельзя ({reason})"
-        )
-        return
+    items = parse_caption_items(text)
+    for item in items:  # one bad item rejects the message, like the single path
+        reason = caption_rejection_reason(item)
+        if reason:
+            await _strike(
+                db,
+                message.from_user.id if message.from_user else 0,
+                message,
+                f"Так нельзя ({reason})",
+            )
+            return
     data = await state.get_data()
-    if text and _is_duplicate_caption(data, text):
+    if len(items) == 1 and _is_duplicate_caption(data, items[0]):
         await message.answer("Такая подпись уже есть в наборе — придумай другую 😉")
         return
     custom = list(data.get("custom", []))
-    if text and _picked_count(data) < MAX_CAPTIONS:
-        custom.append(text)
+    added = dups = 0
+    for item in items:
+        probe = {**data, "custom": custom}
+        if _is_duplicate_caption(probe, item):
+            dups += 1
+            continue
+        if _picked_count(probe) >= MAX_CAPTIONS:
+            break
+        custom.append(item)
+        added += 1
+    if added:
         await state.update_data(custom=custom)
+    overflow = len(items) - added - dups
+    if len(items) > 1 and (overflow or dups):
+        parts = [f"Добавил {added} из {len(items)}"]
+        if overflow:
+            parts.append(f"{overflow} не влезло — лимит {MAX_CAPTIONS} за один проход")
+        if dups:
+            parts.append(f"{dups} уже в наборе")
+        await message.answer(": ".join([parts[0], "; ".join(parts[1:])]) + ".")
     with contextlib.suppress(TelegramBadRequest):
         await message.delete()
     await _show_msg(message, state, NewPack.review.state, None)
