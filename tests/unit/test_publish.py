@@ -127,6 +127,67 @@ async def test_add_to_pack_appends() -> None:
     assert all(call["user_id"] == 7 for call in bot.added)
 
 
+# --- emoji rejection (Telegram is the only authority on its emoji set) -------
+
+
+class _EmojiPickyBot(_FakeBot):
+    """Rejects any sticker whose emoji is not the safe default 🙂.
+
+    Mimics the live 2026-06-13 failure: an emoji that passed every upstream
+    gate still bounced off Bot API with «expected a Unicode emoji».
+    """
+
+    async def add_sticker_to_set(self, **kwargs: object) -> None:
+        if kwargs["sticker"].emoji_list != ["🙂"]:  # type: ignore[attr-defined]
+            raise RuntimeError("Bad Request: can't parse sticker: expected a Unicode emoji")
+        await super().add_sticker_to_set(**kwargs)
+
+    async def create_new_sticker_set(self, **kwargs: object) -> None:
+        stickers = kwargs["stickers"]
+        if any(s.emoji_list != ["🙂"] for s in stickers):  # type: ignore[union-attr]
+            raise RuntimeError("Bad Request: can't parse sticker: expected a Unicode emoji")
+        await super().create_new_sticker_set(**kwargs)
+
+
+async def test_add_to_pack_falls_back_to_default_on_rejected_emoji() -> None:
+    bot = _EmojiPickyBot()
+    pub = Publisher(bot, "yourbot")
+    landed: list[str] = []
+
+    async def on_added(_pos: int, sticker: tuple[bytes, str]) -> None:
+        landed.append(sticker[1])
+
+    await pub.add_to_pack(
+        user_id=7,
+        set_name="s_by_yourbot",
+        stickers=[(b"a", "🇷"), (b"b", "🙂")],
+        current_count=0,
+        on_added=on_added,
+    )
+    assert len(bot.added) == 2  # both landed despite the rejection
+    assert landed == ["🙂", "🙂"]  # the DB is told the emoji Telegram really has
+
+
+async def test_create_pack_falls_back_to_default_emojis_on_rejection() -> None:
+    bot = _EmojiPickyBot()
+    pub = Publisher(bot, "yourbot")
+    name = await pub.create_pack(user_id=1, title="T", stickers=[(b"x", "🇷"), (b"y", "👍")])
+    assert bot.created[-1]["name"] == name  # published on the retry
+    assert len(bot.created) == 1  # the failed atomic call recorded nothing
+
+
+async def test_add_to_pack_reraises_non_emoji_bad_requests() -> None:
+    class _Boom(_FakeBot):
+        async def add_sticker_to_set(self, **kwargs: object) -> None:
+            raise RuntimeError("Bad Request: STICKERSET_INVALID")
+
+    pub = Publisher(_Boom(), "yourbot")
+    with pytest.raises(RuntimeError, match="STICKERSET_INVALID"):
+        await pub.add_to_pack(
+            user_id=1, set_name="s_by_yourbot", stickers=[(b"a", "🙂")], current_count=0
+        )
+
+
 # --- flood waits (Telegram 429 must neither crash publish nor hang forever) ---
 
 

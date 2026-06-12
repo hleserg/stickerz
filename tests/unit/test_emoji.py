@@ -18,12 +18,14 @@ from sticker_service.services.stickers import (
 )
 
 
-@pytest.mark.parametrize("good", ["🙂", "🔥", "👍", "❤️", "👍🏽", "🤦‍♂️"])
+@pytest.mark.parametrize("good", ["🙂", "🔥", "👍", "❤️", "👍🏽", "🤦‍♂️", "🇷🇺"])
 def test_is_single_emoji_accepts(good: str) -> None:
     assert is_single_emoji(good)
 
 
-@pytest.mark.parametrize("bad", ["", "  ", "smile", "lol", ":)", "abc", "🙂🔥🎉🥳"])
+# «🇷» — a lone regional indicator (half a flag) passes the codepoint range but
+# Telegram rejects it: «expected a Unicode emoji» (live 2026-06-13).
+@pytest.mark.parametrize("bad", ["", "  ", "smile", "lol", ":)", "abc", "🙂🔥🎉🥳", "🇷", "🇷🇺🇩🇪"])
 def test_is_single_emoji_rejects(bad: str) -> None:
     assert not is_single_emoji(bad)
 
@@ -66,6 +68,13 @@ def test_emoji_for_caption_standard_and_inline() -> None:
     assert emoji_for_caption("Огонь 🔥") == "🔥"  # emoji typed into a custom caption
     assert emoji_for_caption("Бежим") is None  # plain custom → needs the model
     assert extract_emoji("просто текст") is None
+
+
+def test_extract_emoji_keeps_flags_whole() -> None:
+    # A flag is a PAIR of regional indicators: clipping it to «🇷» produced the
+    # live «expected a Unicode emoji» publish failure (2026-06-13).
+    assert extract_emoji("Едем в отпуск 🇷🇺 ура") == "🇷🇺"
+    assert extract_emoji("Пол-флага 🇷 не эмодзи") is None
 
 
 class _CountingEmojiModel(MockImageModel):
