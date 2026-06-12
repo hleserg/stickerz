@@ -82,6 +82,21 @@ _SHEET_FRAMES = (
     "🖼️ Рисую лист стикеров: подписи…",
 )
 
+
+def _dot_frames(text: str) -> tuple[str, ...]:
+    """Expand a trailing «…» into rotating ``.`` / ``..`` / ``…`` frames.
+
+    The owner's rhythm (13.06): every status that can hang ends with «…», so
+    it must visibly tick (one frame per FRAME_SECONDS) instead of freezing.
+    Text without the trailing ellipsis is a single static frame; «…» anywhere
+    else (e.g. followed by a progress bar) stays static on purpose.
+    """
+    if not text.endswith("…"):
+        return (text,)
+    base = text.removesuffix("…")
+    return (f"{base}.", f"{base}..", f"{base}…")
+
+
 # Live notices when a model call is re-issued or fails over (overload/timeout),
 # so a long wait surfaces as a moving status line instead of a frozen message.
 # Keys match the model layer's NoticeCallback ("retry"/"fallback").
@@ -1193,11 +1208,13 @@ class StatusLine:
 
     Stage lines stick; a retry/fallback notice is a MOMENT, not a state — it
     shows for a few seconds and reverts to the current stage; a heartbeat
-    appends elapsed time when nothing changed for a while, so a long model
+    appends elapsed time when a stage hangs for a while, so a long model
     call never looks frozen (a frozen line reads as "broken" to the user).
-    A stage given as a tuple of frames is animated: frames rotate every
-    FRAME_SECONDS with the elapsed timer attached, pausing while a notice
-    is on screen so the notice stays readable.
+    A stage given as a tuple of frames — or a string ending in «…», which
+    auto-expands to dot frames — is animated: frames rotate every
+    FRAME_SECONDS (the elapsed timer joins once the stage hangs past
+    HEARTBEAT_SECONDS), pausing while a notice is on screen so the notice
+    stays readable.
     """
 
     NOTICE_SECONDS = 5.0
@@ -1220,9 +1237,9 @@ class StatusLine:
             await self._msg.edit_text(text)
 
     async def stage(self, text: str | tuple[str, ...]) -> None:
-        """Show the current stage; a tuple of frames rotates until the next stage."""
+        """Show the current stage; frames (or a trailing «…») rotate until the next one."""
         self._seq += 1
-        frames = (text,) if isinstance(text, str) else text
+        frames = _dot_frames(text) if isinstance(text, str) else text
         self._frames = frames
         self._frame_no = 0
         self._stage = frames[0]
@@ -1260,7 +1277,12 @@ class StatusLine:
                 if len(self._frames) > 1:
                     self._frame_no = (self._frame_no + 1) % len(self._frames)
                     self._stage = self._frames[self._frame_no]
-                    await self._edit(f"{self._stage} · уже {elapsed} с")
+                    line = self._stage
+                    # Dots show liveness by themselves; the timer is for real
+                    # hangs, so it joins only once the stage overstays.
+                    if now - self._changed >= self.HEARTBEAT_SECONDS:
+                        line = f"{self._stage} · уже {elapsed} с"
+                    await self._edit(line)
                     last_beat = now
                 elif (
                     now - self._changed >= self.HEARTBEAT_SECONDS
