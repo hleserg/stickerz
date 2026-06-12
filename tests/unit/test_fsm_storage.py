@@ -167,3 +167,37 @@ async def test_revive_orphaned_generations(storage: SqliteStorage) -> None:
     owner = get_settings().first_admin_id
     if owner is not None:  # the owner is informed about the orphan
         assert owner in chats
+
+
+async def test_keys_in_state_max_age_filters_ancient_rows(storage: SqliteStorage) -> None:
+    await storage.set_state(_key(7), "NewPack:publish")
+    await storage.set_state(_key(8), "NewPack:publish")
+    # Age row 8 artificially (stuck since "days ago").
+    await storage._conn.execute(
+        "UPDATE fsm SET updated_at = updated_at - 86400 WHERE key LIKE '1:8:%'"
+    )
+    await storage._conn.commit()
+    assert await storage.keys_in_state("NewPack:publish") == [(1, 7, 7), (1, 8, 8)]
+    assert await storage.keys_in_state("NewPack:publish", max_age_seconds=1800) == [(1, 7, 7)]
+
+
+async def test_revival_clears_ancient_rows_silently(storage: SqliteStorage) -> None:
+    # Live incident: a row stuck in `publish` since June 8 got "revived" on
+    # every deploy, messaging the user at 1 AM about a generation they never
+    # started. Ancient rows are cleared with NO messages.
+    from sticker_service.handlers.flow import NewPack, revive_orphaned_generations
+
+    await storage.set_state(_key(7), NewPack.publish.state)
+    await storage._conn.execute("UPDATE fsm SET updated_at = updated_at - 86400")
+    await storage._conn.commit()
+
+    sent: list[int] = []
+
+    class _Bot:
+        async def send_message(self, chat_id: int, text: str, **kw: object) -> None:
+            sent.append(chat_id)
+
+    revived = await revive_orphaned_generations(_Bot(), storage)
+    assert revived == 0
+    assert sent == []  # nobody messaged
+    assert await storage.get_state(_key(7)) is None  # mummy cleared

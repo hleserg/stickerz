@@ -135,14 +135,25 @@ class SqliteStorage(BaseStorage):
             row = await cur.fetchone()
         return _decode(row[0] if row else None)
 
-    async def keys_in_state(self, state: str) -> list[tuple[int, int, int]]:
+    async def keys_in_state(
+        self, state: str, *, max_age_seconds: float | None = None
+    ) -> list[tuple[int, int, int]]:
         """``(bot_id, chat_id, user_id)`` of every row currently in ``state``.
 
         Lets the boot path find flows orphaned mid-generation by a hard restart
         (the worker died, but the persistent state row still says "publish").
+        ``max_age_seconds`` keeps only rows touched recently — a row stuck for
+        days is an abandoned flow, not an interrupted one.
         """
         out: list[tuple[int, int, int]] = []
-        async with self._conn.execute("SELECT key FROM fsm WHERE state=?", (state,)) as cur:
+        if max_age_seconds is not None:
+            cutoff = time.time() - max_age_seconds
+            query = self._conn.execute(
+                "SELECT key FROM fsm WHERE state=? AND updated_at >= ?", (state, cutoff)
+            )
+        else:
+            query = self._conn.execute("SELECT key FROM fsm WHERE state=?", (state,))
+        async with query as cur:
             rows = await cur.fetchall()
         for (raw,) in rows:
             parts = str(raw).split(":")

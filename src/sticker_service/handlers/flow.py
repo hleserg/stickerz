@@ -1219,9 +1219,18 @@ async def revive_orphaned_generations(bot: Any, storage: Any) -> int:
     from aiogram.fsm.storage.base import StorageKey
 
     orphans = await storage.keys_in_state(NewPack.publish.state)
+    # Only flows touched RECENTLY were truly interrupted; a row stuck for days
+    # (user saw the preview and walked away) is abandoned — clear it silently,
+    # or every deploy "revives" the same mummy and messages people at 1 AM
+    # about a generation they never started (live: Zoya's June-8 row).
+    fresh = set(await storage.keys_in_state(NewPack.publish.state, max_age_seconds=1800))
     owner = get_settings().first_admin_id
     for bot_id, chat_id, user_id in orphans:
         key = StorageKey(bot_id=bot_id, chat_id=chat_id, user_id=user_id)
+        if (bot_id, chat_id, user_id) not in fresh:
+            with contextlib.suppress(Exception):
+                await storage.set_state(key, None)
+            continue
         with contextlib.suppress(Exception):
             await storage.set_state(key, NewPack.review.state)
         with contextlib.suppress(Exception):
@@ -1238,9 +1247,10 @@ async def revive_orphaned_generations(bot: Any, storage: Any) -> int:
                     f"♻️ Рестарт прервал генерацию у тестера id={user_id} — "
                     "отправил ему кнопку «повторить».",
                 )
-    if orphans:
-        logger.warning("revived %d generation(s) orphaned by a restart", len(orphans))
-    return len(orphans)
+    revived = len([o for o in orphans if o in fresh])
+    if revived:
+        logger.warning("revived %d generation(s) orphaned by a restart", revived)
+    return revived
 
 
 async def drain_generations(timeout: float) -> int:
