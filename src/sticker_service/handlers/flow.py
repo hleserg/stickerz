@@ -677,13 +677,13 @@ async def _alert_admins_quota(msg: Message, exc: Exception) -> None:  # pragma: 
 
 
 async def _alert_owner_genfail(
-    msg: Message, user_id: int, mode: str, exc: Exception
+    msg: Message, user_id: int, what: str, exc: Exception
 ) -> None:  # pragma: no cover
-    """DM the owner whenever a TESTER's generation fails.
+    """DM the owner whenever ANYTHING fails for a tester (gen/publish/redraw).
 
-    A tester hitting an error is the single most important alpha signal — it
-    must reach the owner immediately, not sit unseen in /stats (and a deploy
-    kill raises no exception at all, so Sentry alone misses such incidents).
+    The user sees only a friendly text (raw internals are hidden by policy),
+    so the raw reason must reach the owner instantly — not sit unseen in
+    Sentry's grouping delay. ``what`` names the failed action in Russian.
     """
     owner = get_settings().first_admin_id
     if owner is None or user_id == owner:  # the owner sees his own failures live
@@ -692,7 +692,7 @@ async def _alert_owner_genfail(
     with contextlib.suppress(Exception):
         await msg.bot.send_message(  # type: ignore[union-attr]
             owner,
-            f"⚠️ У тестера id={user_id} упала генерация (режим: {mode}).\n"
+            f"⚠️ У тестера id={user_id} сбой: {what}.\n"
             f"Причина: {reason}\n"
             f'Профиль: <a href="tg://user?id={user_id}">открыть</a>',
             parse_mode="HTML",
@@ -1390,7 +1390,7 @@ async def _generate_and_present(  # pragma: no cover
         )
         with contextlib.suppress(Exception):
             await msg.edit_text(_friendly_error(exc))
-        await _alert_owner_genfail(msg, user_id, mode, exc)
+        await _alert_owner_genfail(msg, user_id, f"генерация (режим: {mode})", exc)
         if model_errors.is_quota(exc):
             await _alert_admins_quota(msg, exc)
         if model_errors.is_retryable(exc):  # overload/timeout → offer a retry once it cools down
@@ -1589,6 +1589,7 @@ async def on_publish_yes(  # pragma: no cover
             logger.exception("publish failed")
             with contextlib.suppress(TelegramBadRequest):
                 await msg.edit_text(_friendly_error(exc))
+            await _alert_owner_genfail(msg, user_id, "публикация пака", exc)
             return
 
         event = analytics.EXTENDED if data.get("mode") == "extend" else analytics.PUBLISHED
@@ -1869,6 +1870,7 @@ async def on_redraw_photo(  # pragma: no cover
         logger.exception("redraw failed")
         with contextlib.suppress(TelegramBadRequest):
             await status.edit_text(_friendly_error(exc))
+        await _alert_owner_genfail(message, user_id, "перерисовка персонажа", exc)
         if model_errors.is_quota(exc):
             await _alert_admins_quota(message, exc)
         return
@@ -2062,6 +2064,7 @@ async def on_saved_publish(  # pragma: no cover
             logger.exception("publish failed")
             with contextlib.suppress(TelegramBadRequest):
                 await msg.edit_text(_friendly_error(exc))
+            await _alert_owner_genfail(msg, user_id, "публикация сохранённого пака", exc)
             return
         await analytics.log(
             db, user_id, analytics.PUBLISHED, set_name=result.set_name, count=result.count
