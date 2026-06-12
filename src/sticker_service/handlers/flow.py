@@ -397,6 +397,12 @@ def _review_text(captions: list[str]) -> str:
             f"\n\n⚠️ Это максимум — {MAX_CAPTIONS} стикеров за один проход (один лист). "
             "Больше за раз не добавить; уберите лишний, чтобы освободить место."
         )
+    # Expectations are set at the moment of decision (owner's rule, 12.06):
+    # the full version lives on /start and /help.
+    text += (
+        "\n\n🎨 ИИ не идеален: образ и подписи могут выйти не такими, как "
+        "задумано. Мы постоянно улучшаем качество; заметил косяк — /report."
+    )
     return text
 
 

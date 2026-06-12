@@ -803,6 +803,19 @@ async def test_owner_alert_attaches_rejected_sheet(monkeypatch: object, tmp_path
     msg.bot.send_message.assert_awaited_once()
 
 
+def test_quality_disclaimer_is_pinned() -> None:
+    # Owner's honesty rule (12.06): expectations are managed up front — full
+    # version on /start and /help, a short echo right before «✅ Создать».
+    from sticker_service.handlers.flow import _review_text
+    from sticker_service.handlers.start import HELP, QUALITY_NOTE, WELCOME
+
+    assert QUALITY_NOTE in WELCOME
+    assert QUALITY_NOTE in HELP
+    review = _review_text(["Привет!"])
+    assert "ИИ не идеален" in review
+    assert "/report" in review
+
+
 def test_duplicate_caption_detector() -> None:
     # Standard buttons are toggle-safe; the custom paths (typed text, 🎲) used
     # to accept duplicates, making the model honestly draw the sticker twice.
