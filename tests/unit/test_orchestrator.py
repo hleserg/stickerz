@@ -912,6 +912,29 @@ async def test_caption_gate_fails_open_without_vision_answer(
     assert await orch.build_stickers(char, captions=["Привет!", "Пока!"])
 
 
+async def test_draft_persists_captions_per_sticker(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    # History feature: each persisted sticker row carries the idea it was
+    # generated for, in batch order.
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    char = await orch.save_character(
+        owner_id=1,
+        name="A",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(2),
+    )
+    captions = ["Привет!", "Пока!"]
+    stickers = await orch.build_stickers(char, captions=captions)
+    pack = await orch.save_draft(
+        owner_id=1, character=char, title="t", stickers=stickers, captions=captions
+    )
+    rows = await db.list_stickers(pack.id)
+    assert [s.caption for s in rows] == captions
+
+
 async def test_scene_observer_reports_without_rejecting(
     db: Database, loader: StyleLoader, tmp_path: Path
 ) -> None:

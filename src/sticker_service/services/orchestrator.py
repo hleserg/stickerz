@@ -78,6 +78,13 @@ def _batch_digest(stickers: list[StickerInput]) -> str:
     return h.hexdigest()
 
 
+def _cap(captions: list[str] | None, index: int) -> str | None:
+    """Caption for a batch index, or None when unknown (no list / misaligned)."""
+    if captions is not None and 0 <= index < len(captions):
+        return captions[index]
+    return None
+
+
 def _read_json(path: Path) -> dict[str, object] | None:
     """Read a small JSON file; None when missing or unreadable."""
     try:
@@ -397,7 +404,11 @@ class Orchestrator:
             scratch_path = await self.save_scratch(owner_id=owner_id, stickers=stickers)
         else:
             draft = await self.save_draft(
-                owner_id=owner_id, character=character, title=title, stickers=stickers
+                owner_id=owner_id,
+                character=character,
+                title=title,
+                stickers=stickers,
+                captions=list(captions or [])[:MAX_CAPTIONS],
             )
             pack_id = draft.id
         return ReviewBundle(
@@ -416,6 +427,7 @@ class Orchestrator:
         character: Character,
         stickers: list[StickerInput],
         title: str | None = None,
+        captions: list[str] | None = None,
     ) -> PackResult:
         """Publish already-generated stickers as a new Telegram set + persist."""
         title = title or character.name
@@ -430,7 +442,7 @@ class Orchestrator:
             title=title,
             published=True,
         )
-        await self._persist_pairs(pack, stickers, start=0)
+        await self._persist_pairs(pack, stickers, start=0, captions=captions)
         logger.info("publish: done set=%s stickers=%d", set_name, len(stickers))
         return PackResult(set_name, self._publisher.link(set_name), len(stickers))
 
@@ -441,6 +453,7 @@ class Orchestrator:
         character: Character,
         title: str,
         stickers: list[StickerInput],
+        captions: list[str] | None = None,
     ) -> Pack:
         """Persist generated stickers as an UNPUBLISHED pack for later publish/download."""
         # Hidden machine name reserved now; replaced with the real one on publish.
@@ -452,7 +465,7 @@ class Orchestrator:
             title=title,
             published=False,
         )
-        await self._persist_pairs(pack, stickers, start=0)
+        await self._persist_pairs(pack, stickers, start=0, captions=captions)
         logger.info("draft saved: pack=%s stickers=%d", pack.id, len(stickers))
         return pack
 
@@ -575,7 +588,12 @@ class Orchestrator:
                 shutil.rmtree(set_dir)
 
     async def publish_extend(
-        self, *, owner_id: int, pack: Pack, stickers: list[StickerInput]
+        self,
+        *,
+        owner_id: int,
+        pack: Pack,
+        stickers: list[StickerInput],
+        captions: list[str] | None = None,
     ) -> PackResult:
         """Append already-generated stickers to an existing set + persist.
 
@@ -606,16 +624,23 @@ class Orchestrator:
             # sticker wide thanks to per-add persistence below).
             current = await self._db.count_stickers(pack.id)
             for offset in range(max(current - live_before, 0), skip):
-                await self._persist_one(pack, live_before + offset, stickers[offset])
+                await self._persist_one(
+                    pack, live_before + offset, stickers[offset], caption=_cap(captions, offset)
+                )
             await asyncio.to_thread(
                 self._write,
                 marker,
                 json.dumps({"digest": digest, "live_before": live_before}).encode(),
             )
         start = await self._db.count_stickers(pack.id)
+        # Captions are indexed over THIS batch; positions are absolute in the
+        # set, so the batch index of an added sticker is position - base.
+        base = start - skip
 
         async def _on_added(position: int, sticker: StickerInput) -> None:
-            await self._persist_one(pack, position, sticker)
+            await self._persist_one(
+                pack, position, sticker, caption=_cap(captions, position - base)
+            )
 
         await self._publisher.add_to_pack(
             user_id=owner_id,
@@ -643,7 +668,11 @@ class Orchestrator:
         stickers = await self.build_stickers(character, captions=captions, on_stage=on_stage)
         await self._stage(on_stage, "publish")
         return await self.publish_new(
-            owner_id=owner_id, character=character, stickers=stickers, title=title
+            owner_id=owner_id,
+            character=character,
+            stickers=stickers,
+            title=title,
+            captions=list(captions or [])[:MAX_CAPTIONS],
         )
 
     async def extend_pack(
@@ -660,7 +689,12 @@ class Orchestrator:
             raise OrchestratorError(f"pack {pack.id} references missing character")
         stickers = await self.build_stickers(character, captions=captions, on_stage=on_stage)
         await self._stage(on_stage, "publish")
-        return await self.publish_extend(owner_id=owner_id, pack=pack, stickers=stickers)
+        return await self.publish_extend(
+            owner_id=owner_id,
+            pack=pack,
+            stickers=stickers,
+            captions=list(captions or [])[:MAX_CAPTIONS],
+        )
 
     # --- internals -----------------------------------------------------------
 
@@ -831,11 +865,20 @@ class Orchestrator:
         if on_stage is not None:
             await on_stage(label)
 
-    async def _persist_pairs(self, pack: Pack, stickers: list[StickerInput], *, start: int) -> None:
+    async def _persist_pairs(
+        self,
+        pack: Pack,
+        stickers: list[StickerInput],
+        *,
+        start: int,
+        captions: list[str] | None = None,
+    ) -> None:
         for offset, sticker in enumerate(stickers):
-            await self._persist_one(pack, start + offset, sticker)
+            await self._persist_one(pack, start + offset, sticker, caption=_cap(captions, offset))
 
-    async def _persist_one(self, pack: Pack, position: int, sticker: StickerInput) -> None:
+    async def _persist_one(
+        self, pack: Pack, position: int, sticker: StickerInput, *, caption: str | None = None
+    ) -> None:
         """Write one sticker's PNG + DB row at ``position`` in the pack."""
         image, emoji = sticker
         path = await asyncio.to_thread(
@@ -844,7 +887,7 @@ class Orchestrator:
             image,
         )
         await self._db.add_sticker(
-            pack_id=pack.id, file_path=str(path), emoji=emoji, position=position
+            pack_id=pack.id, file_path=str(path), emoji=emoji, position=position, caption=caption
         )
 
     def _require_style(self, style_id: str) -> Style:
