@@ -37,7 +37,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sticker_service.config import get_settings
@@ -65,13 +65,22 @@ _STAGE_TEXT = {
     "photo_to_art": "🎨 Превращаю фото в рисунок…",
     "style": "✨ Придаю рисунку выбранный стиль…",
     "gate": "🧐 Проверяю рисунок…",
-    "sheet": "🖼️ Рисую лист стикеров: позы, эмоции, подписи…",
     "clean": "🪄 Убираю фон — делаю прозрачным…",
     "slice": "✂️ Режу лист на отдельные стикеры…",
     "emoji": "🎭 Подбираю каждому стикеру эмодзи…",
     "preview": "🧩 Собираю превью…",
     "publish": "📦 Публикую пак в Telegram…",
 }
+
+# The sheet call is the longest single model call (minutes), so its stage is
+# animated instead of static: StatusLine rotates these frames (one per
+# FRAME_SECONDS, with the elapsed timer) — the growing dots 1→2→3 are the
+# owner's requested rhythm, keep them in sync with the frame order.
+_SHEET_FRAMES = (
+    "🖼️ Рисую лист стикеров: позы.",
+    "🖼️ Рисую лист стикеров: эмоции..",
+    "🖼️ Рисую лист стикеров: подписи…",
+)
 
 # Live notices when a model call is re-issued or fails over (overload/timeout),
 # so a long wait surfaces as a moving status line instead of a frozen message.
@@ -676,17 +685,27 @@ async def _alert_admins_quota(msg: Message, exc: Exception) -> None:  # pragma: 
             await msg.bot.send_message(admin_id, text)  # type: ignore[union-attr]
 
 
-async def _alert_owner_genfail(
-    msg: Message, user_id: int, what: str, exc: Exception
-) -> None:  # pragma: no cover
+async def _alert_owner_genfail(msg: Message, user_id: int, what: str, exc: Exception) -> None:
     """DM the owner whenever ANYTHING fails for a tester (gen/publish/redraw).
 
     The user sees only a friendly text (raw internals are hidden by policy),
     so the raw reason must reach the owner instantly — not sit unseen in
     Sentry's grouping delay. ``what`` names the failed action in Russian.
+    A rejected-sheet artifact attached to the exception is sent even for the
+    owner's own failures: the sheet is evidence nobody can see otherwise.
     """
     owner = get_settings().first_admin_id
-    if owner is None or user_id == owner:  # the owner sees his own failures live
+    if owner is None:
+        return
+    rejected = getattr(exc, "rejected_path", None)
+    if rejected is not None:
+        with contextlib.suppress(Exception):
+            await msg.bot.send_document(  # type: ignore[union-attr]
+                owner,
+                FSInputFile(rejected),
+                caption=f"🗑 Отбракованный лист (тестер id={user_id}): {str(exc)[:200]}",
+            )
+    if user_id == owner:  # the owner sees his own failures live
         return
     reason = str(exc)[:150] or type(exc).__name__
     with contextlib.suppress(Exception):
@@ -887,6 +906,19 @@ async def on_custom_yes(callback: CallbackQuery, state: FSMContext) -> None:  # 
     await callback.answer()
 
 
+def _is_duplicate_caption(data: dict[str, Any], text: str) -> bool:
+    """True when an equal caption is already in the order (standard or custom).
+
+    Standard buttons are toggle-safe by design; this guards the custom paths
+    (typed text and the 🎲 dice), where a duplicate idea line in the prompt
+    makes the model honestly draw the same sticker twice.
+    """
+    norm = text.casefold().strip()
+    picked = [STANDARD_BLOCK[i] for i in data.get("std_sel", []) if 0 <= i < len(STANDARD_BLOCK)]
+    picked += list(data.get("custom", []))
+    return any(norm == c.casefold().strip() for c in picked)
+
+
 async def on_random_idea(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
     """🎲 «Случайный промт»: roll an idea from the meme pool onto the input screen.
 
@@ -925,6 +957,12 @@ async def on_random_take(callback: CallbackQuery, state: FSMContext) -> None:
     if _picked_count(data) >= MAX_CAPTIONS:
         await callback.answer(_TXT_CAP_FULL)
         return
+    if _is_duplicate_caption(data, item):
+        # The dice can roll the same pool item twice — a duplicate idea line
+        # makes the model honestly draw the same sticker twice.
+        await state.update_data(rand_idea=None)
+        await callback.answer("Такая идея уже есть в наборе 😉")
+        return
     custom = [*list(data.get("custom", [])), item]
     await state.update_data(custom=custom, rand_idea=None)
     await callback.answer("Добавил 🎲")
@@ -950,6 +988,9 @@ async def on_enter_custom(
         )
         return
     data = await state.get_data()
+    if text and _is_duplicate_caption(data, text):
+        await message.answer("Такая подпись уже есть в наборе — придумай другую 😉")
+        return
     custom = list(data.get("custom", []))
     if text and _picked_count(data) < MAX_CAPTIONS:
         custom.append(text)
@@ -1148,35 +1189,47 @@ class StatusLine:
     shows for a few seconds and reverts to the current stage; a heartbeat
     appends elapsed time when nothing changed for a while, so a long model
     call never looks frozen (a frozen line reads as "broken" to the user).
+    A stage given as a tuple of frames is animated: frames rotate every
+    FRAME_SECONDS with the elapsed timer attached, pausing while a notice
+    is on screen so the notice stays readable.
     """
 
     NOTICE_SECONDS = 5.0
     HEARTBEAT_SECONDS = 20.0
+    FRAME_SECONDS = 2.0
 
     def __init__(self, msg: Message) -> None:
         self._msg = msg
         self._stage = ""
+        self._frames: tuple[str, ...] = ()
+        self._frame_no = 0
         self._seq = 0
         self._started = time.monotonic()
         self._changed = time.monotonic()
+        self._notice_until = 0.0
         self._heartbeat: asyncio.Task[None] | None = None
 
     async def _edit(self, text: str) -> None:
         with contextlib.suppress(Exception):
             await self._msg.edit_text(text)
 
-    async def stage(self, text: str) -> None:
-        """Show the current stage; it stays until the next stage/notice."""
+    async def stage(self, text: str | tuple[str, ...]) -> None:
+        """Show the current stage; a tuple of frames rotates until the next stage."""
         self._seq += 1
-        self._stage = text
+        frames = (text,) if isinstance(text, str) else text
+        self._frames = frames
+        self._frame_no = 0
+        self._stage = frames[0]
         self._changed = time.monotonic()
-        await self._edit(text)
+        self._notice_until = 0.0
+        await self._edit(frames[0])
 
     async def notice(self, text: str) -> None:
         """Show a transient event, then fall back to the stage line."""
         self._seq += 1
         seq = self._seq
         self._changed = time.monotonic()
+        self._notice_until = time.monotonic() + self.NOTICE_SECONDS
         await self._edit(text)
 
         async def _revert() -> None:
@@ -1188,15 +1241,27 @@ class StatusLine:
         _track_bg(asyncio.create_task(_revert()))
 
     def start(self) -> None:
-        """Begin the liveness heartbeat (call ``stop`` when generation ends)."""
+        """Begin the liveness ticker (call ``stop`` when generation ends)."""
 
         async def _beat() -> None:
+            last_beat = time.monotonic()
             while True:
-                await asyncio.sleep(self.HEARTBEAT_SECONDS)
-                idle = time.monotonic() - self._changed
-                if self._stage and idle >= self.HEARTBEAT_SECONDS:
-                    elapsed = int(time.monotonic() - self._started)
+                await asyncio.sleep(min(self.FRAME_SECONDS, self.HEARTBEAT_SECONDS))
+                now = time.monotonic()
+                if not self._stage or now < self._notice_until:
+                    continue
+                elapsed = int(now - self._started)
+                if len(self._frames) > 1:
+                    self._frame_no = (self._frame_no + 1) % len(self._frames)
+                    self._stage = self._frames[self._frame_no]
                     await self._edit(f"{self._stage} · уже {elapsed} с")
+                    last_beat = now
+                elif (
+                    now - self._changed >= self.HEARTBEAT_SECONDS
+                    and now - last_beat >= self.HEARTBEAT_SECONDS
+                ):
+                    await self._edit(f"{self._stage} · уже {elapsed} с")
+                    last_beat = now
 
         self._heartbeat = asyncio.create_task(_beat())
         _track_bg(self._heartbeat)
@@ -1359,6 +1424,9 @@ async def _generate_and_present(  # pragma: no cover
         await status.stage(_canonical_progress_text(done, total))
 
     async def on_stage(label: str) -> None:
+        if label == "sheet":  # animated: frames rotate while the model draws
+            await status.stage(_SHEET_FRAMES)
+            return
         await status.stage(_STAGE_TEXT.get(label, "Работаю…"))
 
     async def on_notice(key: str) -> None:

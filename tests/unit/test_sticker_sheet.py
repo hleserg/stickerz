@@ -97,9 +97,23 @@ def test_sheet_prompt_turns_standard_reactions_into_drawn_ideas() -> None:
 
 def test_sheet_prompt_stays_lean() -> None:
     # The brief must not creep back into a micromanaging wall of text: the
-    # scaffold around the ideas list stays under a hard budget.
+    # scaffold around the ideas list stays under a hard budget. Raised from
+    # 1400 on 2026-06-12 for the owner-approved «Правила надписей» block.
     prompt = build_sheet_prompt(_style(), ["Привет!"], age_clause="")
-    assert len(prompt) < 1400
+    assert len(prompt) < 1900
+
+
+def test_sheet_prompt_carries_owner_caption_rules() -> None:
+    # Owner-approved contract (2026-06-12) after live caption defects:
+    # exactly-once, own tile only, nothing on unquoted tiles, top placement,
+    # exact tile count, no bleed onto neighbours.
+    prompt = build_sheet_prompt(_style(), ["«Привет!»", "Грустно"], age_clause="")
+    assert "Правила надписей" in prompt
+    assert "ровно один раз" in prompt
+    assert "не пиши ничего" in prompt
+    assert "верхней половине" in prompt
+    assert "стикеров ровно 2" in prompt
+    assert "не заходит на соседний" in prompt
 
 
 def test_sheet_prompt_pins_ideas_to_tiles_and_text_to_its_tile() -> None:

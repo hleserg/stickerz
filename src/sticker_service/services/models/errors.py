@@ -14,6 +14,7 @@ across the Gemini adapter and the handlers. Categories:
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from sticker_service.services.models.base import ModelQuotaError, ModelRefusalError
 
@@ -50,7 +51,9 @@ class TransientPipelineError(RuntimeError):
     Raised e.g. when a generated sheet cannot be sliced into stickers (the
     model broke the layout contract): garbage must never ship, the user gets
     the message below and the free retry button (credits are only charged on
-    success), and a new generation usually lands fine.
+    success), and a new generation usually lands fine. ``rejected_path``
+    optionally points at the dumped artifact (the rejected sheet) so the
+    owner's failure alert can attach the evidence.
     """
 
     USER_TEXT = (
@@ -58,8 +61,9 @@ class TransientPipelineError(RuntimeError):
         "Попробуй ещё раз — это бесплатно, кредит не списан."
     )
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, rejected_path: Path | None = None) -> None:
         super().__init__(reason)
+        self.rejected_path = rejected_path
 
 
 def classify(exc: Exception) -> str:

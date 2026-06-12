@@ -167,10 +167,12 @@ async def test_create_pack_reports_stages(
 
     await orch.create_pack(owner_id=1, character=char, on_stage=on_stage)
     assert stages == ["sheet", "clean", "slice", "emoji", "publish"]
-    # Contract with the UI: every emitted label has a live status line.
-    from sticker_service.handlers.flow import _STAGE_TEXT
+    # Contract with the UI: every emitted label has a live status line —
+    # "sheet" is the animated one (_SHEET_FRAMES), the rest are static.
+    from sticker_service.handlers.flow import _SHEET_FRAMES, _STAGE_TEXT
 
-    assert set(stages) <= set(_STAGE_TEXT)
+    assert _SHEET_FRAMES
+    assert set(stages) <= set(_STAGE_TEXT) | {"sheet"}
 
 
 async def test_one_character_many_packs(db: Database, loader: StyleLoader, tmp_path: Path) -> None:
@@ -841,3 +843,113 @@ async def test_unusable_sheet_fails_generation_with_retryable_error(
         await orch.build_stickers(char, captions=["Привет!"])
     assert is_retryable(err.value)
     assert await db.count_events(analytics.SLICING_FALLBACK) == 1
+    rejected = err.value.rejected_path
+    assert rejected is not None and rejected.exists()  # evidence for the owner alert
+
+
+async def test_caption_gate_rejects_and_dumps_evidence(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    # Vision sees «Привет!» twice and no «Пока!» → the page fails into the
+    # free-retry path, the analytics row is logged and the rejected sheet is
+    # dumped so the owner's alert can attach the evidence.
+    from sticker_service.services import analytics
+    from sticker_service.services.models.errors import TransientPipelineError, is_retryable
+
+    class _WrongTexts(_SheetModel):
+        async def ask(self, image: bytes, question: str) -> str:
+            return "Привет!\nПривет!"
+
+    orch = Orchestrator(
+        model=_WrongTexts(),
+        db=db,
+        publisher=Publisher(_FakeBot(), "yourbot"),
+        loader=loader,
+        storage_dir=tmp_path,
+    )
+    char = await orch.save_character(
+        owner_id=5,
+        name="Тест",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(1),
+    )
+    with pytest.raises(TransientPipelineError) as err:
+        await orch.build_stickers(char, captions=["Привет!", "Пока!"])
+    assert "caption check failed" in str(err.value)
+    assert is_retryable(err.value)
+    rejected = err.value.rejected_path
+    assert rejected is not None and rejected.exists()
+    assert rejected.parent == tmp_path / "rejected"
+    assert await db.count_events(analytics.CAPTION_GATE) == 1
+
+
+async def test_caption_gate_fails_open_without_vision_answer(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    # «НЕТ» while texts ARE expected smells like vision misreading the style —
+    # pass the sheet rather than burn a paid retry on a flaky check.
+    class _NoTexts(_SheetModel):
+        async def ask(self, image: bytes, question: str) -> str:
+            return "НЕТ"
+
+    orch = Orchestrator(
+        model=_NoTexts(),
+        db=db,
+        publisher=Publisher(_FakeBot(), "yourbot"),
+        loader=loader,
+        storage_dir=tmp_path,
+    )
+    char = await orch.save_character(
+        owner_id=5,
+        name="Тест",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(1),
+    )
+    assert await orch.build_stickers(char, captions=["Привет!", "Пока!"])
+
+
+async def test_scene_observer_reports_without_rejecting(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    # The observer has no rejection power (the check is subjective): a
+    # suspicious sheet still ships, but the owner gets the evidence DM with
+    # the dumped sheet attached, and the analytics row lands.
+    from sticker_service.services import analytics
+
+    class _SuspectScenes(_SheetModel):
+        async def ask(self, image: bytes, question: str) -> str:
+            if question.startswith("Перечисли"):
+                return "Привет!"  # caption gate: faithful texts
+            return "1. сердце уехало на соседний стикер"
+
+    alerts: list[tuple[str, Path | None]] = []
+
+    async def _notify(text: str, attachment: Path | None) -> None:
+        alerts.append((text, attachment))
+
+    orch = Orchestrator(
+        model=_SuspectScenes(),
+        db=db,
+        publisher=Publisher(_FakeBot(), "yourbot"),
+        loader=loader,
+        storage_dir=tmp_path,
+        owner_notify=_notify,
+    )
+    char = await orch.save_character(
+        owner_id=5,
+        name="Тест",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(1),
+    )
+    assert await orch.build_stickers(char, captions=["Привет!"])  # ships anyway
+    assert len(alerts) == 1
+    text, attachment = alerts[0]
+    assert "сердце" in text
+    assert attachment is not None and attachment.exists()
+    assert await db.count_events(analytics.SCENE_OBSERVER) == 1

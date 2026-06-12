@@ -47,6 +47,12 @@ from sticker_service.services.stickers import (
     build_caption_set,
     generate_sheet,
 )
+from sticker_service.services.stickers.caption_check import (
+    expected_captions,
+    judge_captions,
+    read_sheet_texts,
+    review_scenes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +165,7 @@ class Orchestrator:
         loader: StyleLoader,
         storage_dir: Path,
         engine: CanonicalEngine | None = None,
+        owner_notify: Callable[[str, Path | None], Awaitable[None]] | None = None,
     ) -> None:
         self._model = model
         self._db = db
@@ -166,6 +173,9 @@ class Orchestrator:
         self._loader = loader
         self._storage = Path(storage_dir)
         self._engine = engine or CanonicalEngine(model)
+        # Evidence channel to the owner (scene-observer alerts with the sheet
+        # attached); None in tests/CLI runs where no bot exists.
+        self._owner_notify = owner_notify
         # Global gate for CPU/RAM-heavy sheet postprocessing: each 4K key+slice
         # holds ~0.6-0.9 GB and ~7 s of CPU, so concurrent users must queue here
         # instead of stacking memory peaks until the box OOMs (CAPACITY.md).
@@ -701,15 +711,21 @@ class Orchestrator:
             if not quality.ok:
                 # Garbage must never ship (owner's rule): fail honestly — the
                 # user gets an apology + a free retry button (credits are only
-                # charged on success), the owner gets the genfail DM.
+                # charged on success), the owner gets the genfail DM with the
+                # rejected sheet attached as evidence.
                 logger.warning(
                     "sheet unusable for owner=%s: %s (path=%s)",
                     character.owner_id,
                     quality.reason,
                     quality.path,
                 )
-                raise TransientPipelineError(f"sheet slicing failed: {quality.reason}")
+                rejected = await self._dump_rejected(character.owner_id, page_no, sheet)
+                raise TransientPipelineError(
+                    f"sheet slicing failed: {quality.reason}", rejected_path=rejected
+                )
             await self._stage(on_stage, "slice")
+            await self._check_captions(character.owner_id, page_no, page, sheet)
+            await self._observe_scenes(character.owner_id, page_no, page, sheet)
             stickers.extend(sliced)
         if not stickers:  # pragma: no cover - defensive
             raise OrchestratorError("slicing produced no stickers")
@@ -722,6 +738,73 @@ class Orchestrator:
         await self._stage(on_stage, "emoji")
         emojis = await assign_emojis(self._model, stickers, captions)
         return stickers, emojis
+
+    async def _check_captions(
+        self, owner_id: int, page_no: int, page: list[str], sheet: bytes
+    ) -> None:
+        """Caption fidelity gate: reject the page when drawn texts betray the order.
+
+        One vision call per page. Fails OPEN when vision has no readable
+        answer — the gate exists to save paid retries on bad sheets, never to
+        spend them because the checking call itself was flaky.
+        """
+        if not get_settings().caption_gate_enabled:
+            return
+        expected = expected_captions(page)
+        drawn = await read_sheet_texts(self._model, sheet)
+        if drawn is None or (not drawn and expected):
+            logger.warning(
+                "caption gate: no readable vision answer; passing sheet as-is (owner=%s)",
+                owner_id,
+            )
+            return
+        verdict = judge_captions(drawn, expected)
+        if verdict.ok and not verdict.extra:
+            return
+        await analytics.log(
+            self._db, owner_id, analytics.CAPTION_GATE, ok=verdict.ok, reason=verdict.reason
+        )
+        if verdict.ok:  # extras alone are reported, not fatal (OCR noise vs. paid retry)
+            logger.warning("caption gate: extra texts for owner=%s: %s", owner_id, verdict.reason)
+            return
+        logger.warning("sheet captions unusable for owner=%s: %s", owner_id, verdict.reason)
+        rejected = await self._dump_rejected(owner_id, page_no, sheet)
+        raise TransientPipelineError(
+            f"caption check failed: {verdict.reason}", rejected_path=rejected
+        )
+
+    async def _observe_scenes(
+        self, owner_id: int, page_no: int, page: list[str], sheet: bytes
+    ) -> None:
+        """Scene observer: suspicious sheets reach the owner, but still ship.
+
+        Object/motif migration between tiles is real (live: the «Люблю»+«Шок!»
+        heart mutant), but judging «does the drawing match the idea» is
+        subjective — so the observer has NO rejection power until its precision
+        is proven by the alerts it sends.
+        """
+        if self._owner_notify is None or not get_settings().caption_gate_enabled:
+            return
+        complaint = await review_scenes(self._model, sheet, page)
+        if complaint is None:
+            return
+        await analytics.log(self._db, owner_id, analytics.SCENE_OBSERVER, reason=complaint[:300])
+        evidence = await self._dump_rejected(owner_id, page_no, sheet)
+        with contextlib.suppress(Exception):
+            await self._owner_notify(
+                f"👀 Наблюдатель сцен: лист пользователя id={owner_id} подозрителен "
+                f"(пак ушёл дальше):\n{complaint[:800]}",
+                evidence,
+            )
+
+    async def _dump_rejected(self, owner_id: int, page_no: int, sheet: bytes) -> Path | None:
+        """Persist a rejected sheet for post-mortem; the dump must never mask the rejection."""
+        name = f"{owner_id}_p{page_no}_{int(time.time())}.png"
+        try:
+            return await asyncio.to_thread(self._write, self._storage / "rejected" / name, sheet)
+        except Exception:
+            logger.warning("failed to persist rejected sheet for owner=%s", owner_id, exc_info=True)
+            return None
 
     async def _gated_to_thread[T](self, fn: Callable[[], T]) -> T:
         """Run CPU-heavy ``fn`` in a thread under the postprocess gate.

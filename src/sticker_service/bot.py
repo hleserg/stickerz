@@ -10,9 +10,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from pathlib import Path
 
 from aiogram import Bot
-from aiogram.types import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeChat
+from aiogram.types import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeChat, FSInputFile
 
 from sticker_service.config import Settings, get_settings
 from sticker_service.db import Database
@@ -56,12 +57,25 @@ async def run() -> None:
     loader = StyleLoader(settings.styles_dir)
     loader.load()
     model = build_model()
+
+    async def _owner_evidence(text: str, attachment: Path | None) -> None:
+        """Scene-observer channel: the sheet evidence goes straight to the owner."""
+        owner = settings.first_admin_id
+        if owner is None:
+            return
+        with contextlib.suppress(Exception):
+            if attachment is not None:
+                await bot.send_document(owner, FSInputFile(attachment), caption=text[:1000])
+            else:
+                await bot.send_message(owner, text[:4000])
+
     orchestrator = Orchestrator(
         model=model,
         db=db,
         publisher=Publisher(bot, me.username or ""),
         loader=loader,
         storage_dir=settings.data_dir,
+        owner_notify=_owner_evidence,
     )
     # Persist FSM state so an OOM/restart resumes flows instead of dropping them.
     storage = await SqliteStorage.create(settings.data_dir / "fsm.sqlite")
