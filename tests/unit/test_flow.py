@@ -589,7 +589,8 @@ async def test_status_line_notice_reverts_to_stage() -> None:
     await status.notice("⚖️ Беру менее загруженную модель…")
     assert msg.edit_text.call_args.args[0].startswith("⚖️")
     await asyncio.sleep(0.15)  # revert fires
-    assert msg.edit_text.call_args.args[0] == "🖼️ Рисую лист стикеров…"
+    # The «…» stage auto-expands to dot frames, so the revert shows frame 0.
+    assert msg.edit_text.call_args.args[0] == "🖼️ Рисую лист стикеров."
 
 
 async def test_status_line_newer_stage_cancels_revert() -> None:
@@ -610,8 +611,9 @@ async def test_status_line_newer_stage_cancels_revert() -> None:
 
 
 async def test_status_line_rotates_animated_stage_with_elapsed() -> None:
-    # An animated stage (tuple of frames) cycles one frame per tick, each with
-    # the elapsed timer — a minutes-long sheet call reads as motion, not freeze.
+    # An animated stage (tuple of frames) cycles one frame per tick; once the
+    # stage overstays HEARTBEAT_SECONDS the elapsed timer joins each frame —
+    # a minutes-long sheet call reads as motion, not freeze.
     import asyncio
     from unittest.mock import AsyncMock
 
@@ -620,6 +622,7 @@ async def test_status_line_rotates_animated_stage_with_elapsed() -> None:
     msg = AsyncMock()
     status = StatusLine(msg)
     status.FRAME_SECONDS = 0.03
+    status.HEARTBEAT_SECONDS = 0.0  # the stage "hangs" immediately
     await status.stage(("позы.", "эмоции..", "подписи…"))
     assert msg.edit_text.call_args.args[0] == "позы."  # first frame, no timer yet
     status.start()
@@ -631,6 +634,55 @@ async def test_status_line_rotates_animated_stage_with_elapsed() -> None:
     assert any(t.startswith("эмоции.. · уже") for t in shown)
     assert any(t.startswith("подписи… · уже") for t in shown)
     assert any(t.startswith("позы. · уже") for t in shown)  # wrapped around
+
+
+async def test_status_line_animates_trailing_ellipsis_without_timer() -> None:
+    # The owner's rhythm (13.06): a hanging «…» status ticks . / .. / … every
+    # frame tick; the timer stays away until the stage really overstays.
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from sticker_service.handlers.flow import StatusLine
+
+    msg = AsyncMock()
+    status = StatusLine(msg)
+    status.FRAME_SECONDS = 0.03  # HEARTBEAT stays at 20 s — no timer in this test
+    await status.stage("🎭 Подбираю каждому стикеру эмодзи…")
+    status.start()
+    try:
+        await asyncio.sleep(0.2)
+    finally:
+        status.stop()
+    shown = [c.args[0] for c in msg.edit_text.call_args_list]
+    for frame in (
+        "🎭 Подбираю каждому стикеру эмодзи.",
+        "🎭 Подбираю каждому стикеру эмодзи..",
+        "🎭 Подбираю каждому стикеру эмодзи…",
+    ):
+        assert frame in shown  # full . / .. / … cycle
+    assert not any("уже" in t for t in shown)  # dots alone show liveness
+
+
+async def test_status_line_text_without_trailing_ellipsis_stays_static() -> None:
+    # No «…» at the end (plain text, or «…» mid-line before a progress bar)
+    # means a single static frame — rotation must not invent motion there.
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from sticker_service.handlers.flow import StatusLine
+
+    msg = AsyncMock()
+    status = StatusLine(msg)
+    status.FRAME_SECONDS = 0.02
+    for text in ("Этап без многоточия", "✨ Стиль… ▓▓░░ 2/5"):
+        msg.edit_text.reset_mock()
+        await status.stage(text)
+        status.start()
+        try:
+            await asyncio.sleep(0.1)
+        finally:
+            status.stop()
+        assert [c.args[0] for c in msg.edit_text.call_args_list] == [text]
 
 
 async def test_status_line_notice_pauses_rotation() -> None:
@@ -670,8 +722,8 @@ def test_sheet_stage_is_animated_triplet() -> None:
 
 
 async def test_status_line_heartbeat_appends_elapsed_when_idle() -> None:
-    # Nothing changed for a while → the line gains elapsed time, so a long
-    # model call visibly ticks instead of looking frozen.
+    # A STATIC line («…»-frases rotate instead) that hangs for a while gains
+    # elapsed time, so a long model call visibly ticks instead of looking frozen.
     import asyncio
     from unittest.mock import AsyncMock
 
@@ -680,14 +732,14 @@ async def test_status_line_heartbeat_appends_elapsed_when_idle() -> None:
     msg = AsyncMock()
     status = StatusLine(msg)
     status.HEARTBEAT_SECONDS = 0.05
-    await status.stage("🎨 Превращаю фото в рисунок…")
+    await status.stage("🎨 Превращаю фото в рисунок")
     status.start()
     try:
         await asyncio.sleep(0.2)
     finally:
         status.stop()
     last = msg.edit_text.call_args.args[0]
-    assert last.startswith("🎨 Превращаю фото в рисунок… · уже")
+    assert last.startswith("🎨 Превращаю фото в рисунок · уже")
 
 
 def test_std_buttons_show_exact_prompt_lines() -> None:
