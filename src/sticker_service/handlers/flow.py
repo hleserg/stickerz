@@ -1505,7 +1505,9 @@ async def _generate_and_present(  # pragma: no cover
     # mode there is no budget, so neither charge nor alert (avoids "-$0.70" noise).
     if await modes.get_mode(db) == modes.ALPHA:
         if not _is_first_admin(user_id):
-            left = await db.consume_credits(user_id, cost)
+            left, spent = await db.consume_credits(user_id, cost)
+            if spent:  # a no-op spend must not leave a refundable charge event
+                await analytics.log(db, user_id, analytics.CREDITS_CHARGED, mode=mode, credits=cost)
             await state.update_data(bal=left)
             await msg.answer(
                 f"Списано {pricing.format_packs(cost)} пак. "
@@ -1971,7 +1973,11 @@ async def on_redraw_photo(  # pragma: no cover
         caption=f"✅ Готово, новый каноникл «{char.name}».",
     )
     if not _is_first_admin(user_id) and await modes.get_mode(db) == modes.ALPHA:
-        left = await db.consume_credits(user_id, pricing.COST_REDRAW)
+        left, spent = await db.consume_credits(user_id, pricing.COST_REDRAW)
+        if spent:  # a no-op spend must not leave a refundable charge event
+            await analytics.log(
+                db, user_id, analytics.CREDITS_CHARGED, mode="redraw", credits=pricing.COST_REDRAW
+            )
         await message.answer(
             f"Списано {pricing.format_packs(pricing.COST_REDRAW)} пак. "
             f"Осталось: {pricing.format_packs(left)}."

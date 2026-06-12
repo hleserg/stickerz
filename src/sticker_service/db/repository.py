@@ -635,21 +635,24 @@ class Database:
         await self._conn.commit()
         return await self.credits_left(user_id)
 
-    async def consume_credits(self, user_id: int, amount: int) -> int:
-        """Atomically spend ``amount`` credits if the balance covers it; returns new balance.
+    async def consume_credits(self, user_id: int, amount: int) -> tuple[int, bool]:
+        """Atomically spend ``amount`` credits if the balance covers it.
 
         A single conditional UPDATE, so two concurrent spends can't lose a
         decrement the way the old read-modify-write could. If the balance is
-        insufficient, nothing is spent.
+        insufficient, nothing is spent. Returns ``(new balance, spent)`` —
+        callers must not record a charge that never happened (a phantom
+        charge would later be "refunded" with credits the user never paid).
         """
         amount = abs(amount)
         await self._ensure_quota_row(user_id)
-        await self._conn.execute(
+        cursor = await self._conn.execute(
             "UPDATE quotas SET remaining = remaining - ? WHERE user_id = ? AND remaining >= ?",
             (amount, user_id, amount),
         )
+        spent = cursor.rowcount == 1
         await self._conn.commit()
-        return await self.credits_left(user_id)
+        return await self.credits_left(user_id), spent
 
     # --- analytics events ----------------------------------------------------
 

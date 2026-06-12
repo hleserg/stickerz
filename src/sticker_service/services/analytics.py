@@ -24,6 +24,12 @@ EXTENDED = "extended"
 SLICING_FALLBACK = "slicing_fallback"
 CAPTION_GATE = "caption_gate"
 SCENE_OBSERVER = "scene_observer"
+# Logged at the moment credits are actually spent, so a refund can verify a
+# charge really happened instead of gifting credits on top.
+CREDITS_CHARGED = "credits_charged"
+# Logged when the owner refunds a charge; a charge older than the latest
+# refund is considered settled and can never be refunded again.
+CREDITS_REFUNDED = "credits_refunded"
 
 
 async def log(db: Database, user_id: int, event: str, **detail: object) -> None:
