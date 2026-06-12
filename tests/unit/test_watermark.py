@@ -5,7 +5,7 @@ from __future__ import annotations
 from io import BytesIO
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from sticker_service.services.postprocess import apply_watermark
 
@@ -57,6 +57,44 @@ def test_watermark_text_is_configurable() -> None:
     a = apply_watermark(_sticker_png(), text="@yuki_stickers_bot")
     b = apply_watermark(_sticker_png(), text="@other_bot")
     assert a != b
+
+
+def _rows_of(mask: np.ndarray) -> np.ndarray:
+    return np.where(mask.any(axis=1))[0]
+
+
+def test_watermark_clears_a_full_height_sticker() -> None:
+    # Regression (owner screenshot): slices are tight crops, so a caption baked
+    # into the art runs to the bottom edge and the handle landed ON it (with
+    # Telegram's chat timestamp on top). The art must shrink to clear a bottom
+    # band; the handle sits strictly below every art pixel.
+    img = Image.new("RGBA", (400, 512), (0, 0, 0, 0))
+    ImageDraw.Draw(img).rectangle([60, 0, 340, 511], fill=(40, 90, 200, 255))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    out = np.asarray(Image.open(BytesIO(apply_watermark(buf.getvalue()))).convert("RGBA"))
+    assert max(out.shape[:2]) == 512  # the longest side still meets Telegram's rule
+    blue = (out[..., 2] > 150) & (out[..., 0] < 100) & (out[..., 3] > 0)
+    white = (out[..., :3] > 200).all(axis=-1) & (out[..., 3] > 0)
+    assert white.any()  # watermark drawn
+    assert _rows_of(blue).max() < _rows_of(white).min()  # strictly below the art
+
+
+def test_watermark_grows_a_wide_sticker_canvas_for_free() -> None:
+    # A wide slice has headroom below the 512 cap: the canvas grows downward
+    # and the art keeps its exact pixels instead of shrinking.
+    img = Image.new("RGBA", (512, 300), (0, 0, 0, 0))
+    ImageDraw.Draw(img).rectangle([0, 0, 511, 299], fill=(40, 90, 200, 255))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    out_img = Image.open(BytesIO(apply_watermark(buf.getvalue()))).convert("RGBA")
+    assert out_img.width == 512 and 300 < out_img.height <= 512
+    out = np.asarray(out_img)
+    blue = (out[..., 2] > 150) & (out[..., 0] < 100) & (out[..., 3] > 0)
+    white = (out[..., :3] > 200).all(axis=-1) & (out[..., 3] > 0)
+    assert int(blue[150].sum()) == 512  # art untouched, full original width
+    assert _rows_of(blue).max() == 299
+    assert _rows_of(white).min() > 299  # handle in the new band below
 
 
 def test_watermark_sits_below_the_figure() -> None:
