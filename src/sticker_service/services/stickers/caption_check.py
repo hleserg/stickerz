@@ -74,6 +74,11 @@ def _matches(drawn: str, expected: str) -> bool:
     # Containment covers punctuation/truncation drift; ratio covers OCR noise.
     if min(len(a), len(b)) >= 3 and (a in b or b in a):
         return True
+    # Fuzzy matching only helps long captions: on short words a one-letter
+    # delta still clears the threshold («шок» vs «ок» is exactly 0.8 — the
+    # live 2026-06-12 false rejection), so short ones must match exactly.
+    if min(len(a), len(b)) < 4:
+        return False
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.8
 
 
@@ -98,9 +103,19 @@ def judge_captions(drawn: Sequence[str], expected: Sequence[str]) -> CaptionVerd
     satisfied: list[str] = []
     duplicated: list[str] = []
     extra: list[str] = []
-    for line in drawn:
-        if not _norm(line):
-            continue
+    lines = [line for line in drawn if _norm(line)]
+    # Exact matches claim their captions first, so a fuzzy lookalike drawn
+    # nearby (a stray «Шок!» next to the real «Ок!») can never steal a slot
+    # and turn the genuine inscription into a false duplicate.
+    fuzzy_lines: list[str] = []
+    for line in lines:
+        hit = next((e for e in remaining if _norm(line) == _norm(e)), None)
+        if hit is not None:
+            remaining.remove(hit)
+            satisfied.append(hit)
+        else:
+            fuzzy_lines.append(line)
+    for line in fuzzy_lines:
         hit = next((e for e in remaining if _matches(line, e)), None)
         if hit is not None:
             remaining.remove(hit)
