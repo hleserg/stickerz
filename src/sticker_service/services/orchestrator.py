@@ -563,6 +563,36 @@ class Orchestrator:
             )
         return len(drafts)
 
+    async def gc_rejected_sheets(self, *, older_than_days: int) -> int:
+        """Delete rejected-sheet dumps past the retention window.
+
+        They are post-mortem evidence already DM'd to the owner at failure
+        time, 4-8 MB each, so an unbounded directory would eat the small VDS
+        disk. Returns the count removed; a non-positive window disables the
+        sweep.
+        """
+        if older_than_days <= 0:
+            return 0
+        removed = await asyncio.to_thread(
+            self._gc_old_files, self._storage / "rejected", older_than_days
+        )
+        if removed:
+            logger.info("gc: removed %d rejected sheet(s)", removed)
+        return removed
+
+    def _gc_old_files(self, root: Path, older_than_days: int) -> int:
+        """Best-effort delete plain files in root older than the window."""
+        if not root.is_dir():
+            return 0
+        cutoff_ts = time.time() - older_than_days * 86400
+        removed = 0
+        for entry in root.iterdir():
+            with contextlib.suppress(OSError):
+                if entry.is_file() and entry.stat().st_mtime < cutoff_ts:
+                    entry.unlink()
+                    removed += 1
+        return removed
+
     def _gc_scratch_dirs(self, older_than_days: int) -> int:
         """Delete scratch dirs past the retention window (abandoned extends)."""
         root = self._scratch_root

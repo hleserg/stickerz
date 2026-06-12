@@ -116,6 +116,11 @@ class Settings(BaseSettings):
     # mid-wizard; resuming them weeks later is meaningless). 0 keeps them and
     # only drops rows already cleared by state.clear().
     fsm_retention_days: int = 14
+    # Rejected-sheet dumps (post-mortem evidence from the quality/caption
+    # gates, 4-8 MB each) older than this many days are deleted. The owner
+    # already received each sheet by DM at failure time, so on-disk history
+    # only serves recent investigations. 0 disables the sweep.
+    rejected_retention_days: int = 14
     # The housekeeping pass (GC + prune + FSM sweep + disk check) runs at boot
     # and then every this many hours. <=0 restores the old run-once-at-boot mode.
     maintenance_interval_hours: int = 24
