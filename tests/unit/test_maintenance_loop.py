@@ -14,10 +14,15 @@ from sticker_service.maintenance import loop as maintenance
 class _FakeOrchestrator:
     def __init__(self) -> None:
         self.calls: list[int] = []
+        self.rejected_calls: list[int] = []
 
     async def gc_stale_drafts(self, *, older_than_days: int) -> int:
         self.calls.append(older_than_days)
         return 2
+
+    async def gc_rejected_sheets(self, *, older_than_days: int) -> int:
+        self.rejected_calls.append(older_than_days)
+        return 4
 
 
 class _FakeDb:
@@ -65,7 +70,8 @@ async def test_run_once_sweeps_everything_and_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     report, sent = await _run(_settings(tmp_path), monkeypatch, used_pct=10)
-    assert (report.drafts_removed, report.events_pruned, report.fsm_rows_swept) == (2, 5, 3)
+    assert (report.drafts_removed, report.rejected_removed) == (2, 4)
+    assert (report.events_pruned, report.fsm_rows_swept) == (5, 3)
     assert report.disk_used_pct == 10
     assert not report.disk_alerted
     assert sent == []  # well under the threshold — no alert noise
@@ -95,7 +101,11 @@ async def test_run_once_passes_retention_settings_through(tmp_path: Path) -> Non
         pass
 
     settings = _settings(
-        tmp_path, draft_retention_days=7, events_retention_days=90, fsm_retention_days=3
+        tmp_path,
+        draft_retention_days=7,
+        events_retention_days=90,
+        fsm_retention_days=3,
+        rejected_retention_days=5,
     )
     await maintenance.run_once(
         orchestrator=orchestrator,  # type: ignore[arg-type]
@@ -105,6 +115,7 @@ async def test_run_once_passes_retention_settings_through(tmp_path: Path) -> Non
         settings=settings,
     )
     assert orchestrator.calls == [7]
+    assert orchestrator.rejected_calls == [5]
     assert db.calls[0]["days"] == 90
     assert "generation_done" in db.calls[0]["keep"]
     assert storage.calls == [3]

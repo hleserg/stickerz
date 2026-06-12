@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import time
 from collections.abc import AsyncIterator, Sequence
 from io import BytesIO
 from pathlib import Path
@@ -509,6 +511,40 @@ async def test_gc_disabled_with_nonpositive_window(
     await _backdate_pack(db, draft.id, days=999)
     assert await orch.gc_stale_drafts(older_than_days=0) == 0
     assert await db.get_pack(draft.id) is not None  # untouched when disabled
+
+
+def _rejected_sheet(tmp_path: Path, name: str, *, age_days: int) -> Path:
+    rejected_dir = tmp_path / "rejected"
+    rejected_dir.mkdir(exist_ok=True)
+    path = rejected_dir / name
+    path.write_bytes(b"png")
+    old = time.time() - age_days * 86400
+    os.utime(path, (old, old))
+    return path
+
+
+async def test_gc_rejected_removes_old_keeps_fresh(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    old = _rejected_sheet(tmp_path, "1_p0_old.png", age_days=30)
+    fresh = _rejected_sheet(tmp_path, "1_p0_fresh.png", age_days=1)
+
+    removed = await orch.gc_rejected_sheets(older_than_days=14)
+
+    assert removed == 1
+    assert not old.exists()
+    assert fresh.exists()
+
+
+async def test_gc_rejected_disabled_or_missing_dir(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    orch = _orchestrator(db, loader, _FakeBot(), tmp_path)
+    assert await orch.gc_rejected_sheets(older_than_days=14) == 0  # no dir yet
+    old = _rejected_sheet(tmp_path, "1_p0_old.png", age_days=999)
+    assert await orch.gc_rejected_sheets(older_than_days=0) == 0
+    assert old.exists()  # untouched when disabled
 
 
 async def test_postprocess_gate_bounds_concurrent_sheet_keying(

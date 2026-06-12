@@ -2,8 +2,8 @@
 
 The boot-time sweep alone is not enough on a long-lived container: at full
 alpha burn the volume gains 1-2 GB/day (see docs/operations/CAPACITY.md), so
-drafts, analytics events and abandoned FSM rows must be pruned while the bot
-runs. The loop fires once at startup and then daily, and warns admins before
+drafts, rejected-sheet dumps, analytics events and abandoned FSM rows must be
+pruned while the bot runs. The loop fires once at startup and then daily, and warns admins before
 the disk actually fills.
 """
 
@@ -32,6 +32,7 @@ class MaintenanceReport:
     """What one housekeeping pass actually did (logged + asserted in tests)."""
 
     drafts_removed: int
+    rejected_removed: int
     events_pruned: int
     fsm_rows_swept: int
     disk_used_pct: int
@@ -57,9 +58,12 @@ async def run_once(
     notify: Notify,
     settings: Settings | None = None,
 ) -> MaintenanceReport:
-    """One housekeeping pass: GC drafts, prune events, sweep FSM, check disk."""
+    """One pass: GC drafts and rejected sheets, prune events, sweep FSM, check disk."""
     settings = settings or get_settings()
     drafts = await orchestrator.gc_stale_drafts(older_than_days=settings.draft_retention_days)
+    rejected = await orchestrator.gc_rejected_sheets(
+        older_than_days=settings.rejected_retention_days
+    )
     # generation_done is kept forever — the alpha budget counts it all-time.
     events = await db.prune_events(
         older_than_days=settings.events_retention_days,
@@ -76,15 +80,16 @@ async def run_once(
             "Старые паки/логи пора чистить или расширять том — детали: "
             "docs/operations/CAPACITY.md."
         )
-    if drafts or events or fsm_rows or alerted:
+    if drafts or rejected or events or fsm_rows or alerted:
         logger.info(
-            "maintenance: drafts=%d events=%d fsm=%d disk=%d%%",
+            "maintenance: drafts=%d rejected=%d events=%d fsm=%d disk=%d%%",
             drafts,
+            rejected,
             events,
             fsm_rows,
             used_pct,
         )
-    return MaintenanceReport(drafts, events, fsm_rows, used_pct, alerted)
+    return MaintenanceReport(drafts, rejected, events, fsm_rows, used_pct, alerted)
 
 
 async def maintenance_loop(
