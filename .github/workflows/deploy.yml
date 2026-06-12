@@ -75,6 +75,15 @@ jobs:
               sleep 10
             done
             docker tag "${{ env.IMAGE }}:${{ github.event.workflow_run.head_sha }}" "${{ env.IMAGE }}:latest"
+            # Wait for a quiet window: a recreate cuts generations longer than
+            # the drain (observed live), and generations are capped at 10 min —
+            # so waiting up to ~12 min guarantees nobody is mid-flight.
+            for i in $(seq 1 48); do
+              busy=$(docker compose logs --since 90s bot 2>/dev/null | grep -cE "canonical|gemini.generate|sheet:" || true)
+              [ "$busy" = "0" ] && break
+              echo "generation in flight ($busy lines), waiting 15s…"
+              sleep 15
+            done
             # Recreate only the bot; SIGTERM lets it drain in-flight flows within
             # the compose stop_grace_period before the new container starts.
             docker compose up -d bot
