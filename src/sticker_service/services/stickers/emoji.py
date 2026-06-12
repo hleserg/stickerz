@@ -30,6 +30,10 @@ def _is_emoji_codepoint(char: str) -> bool:
     )
 
 
+def _is_regional_indicator(char: str) -> bool:
+    return 0x1F1E6 <= ord(char) <= 0x1F1FF
+
+
 def is_single_emoji(value: str) -> bool:
     """True if ``value`` is exactly one emoji (allowing joiners/skin tones)."""
     value = value.strip()
@@ -37,6 +41,11 @@ def is_single_emoji(value: str) -> bool:
         return False
     cores = [c for c in value if ord(c) not in _JOINERS]
     if not cores or len(cores) > 3:  # a few cores for ZWJ sequences, not a sentence
+        return False
+    flags = [c for c in cores if _is_regional_indicator(c)]
+    # Regional indicators are an emoji only as a PAIR (a flag): a lone half
+    # («🇷») passes the range check but Telegram rejects it (live 13.06).
+    if flags and (len(flags) != 2 or len(cores) != 2):
         return False
     return all(_is_emoji_codepoint(c) for c in cores)
 
@@ -62,6 +71,11 @@ def extract_emoji(text: str) -> str | None:
         if _is_emoji_codepoint(ch):
             cluster = ch
             j = i + 1
+            # A flag is a PAIR of regional indicators — keep them together,
+            # or «🇷🇺» would be clipped to the half-flag Telegram rejects.
+            if _is_regional_indicator(ch) and j < len(chars) and _is_regional_indicator(chars[j]):
+                cluster += chars[j]
+                j += 1
             while j < len(chars) and ord(chars[j]) in _JOINERS:
                 cluster += chars[j]
                 j += 1

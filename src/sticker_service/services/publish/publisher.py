@@ -16,6 +16,7 @@ from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import BufferedInputFile, InputSticker
 
 from sticker_service.services.publish.naming import build_set_name, sticker_set_link
+from sticker_service.services.stickers.emoji import DEFAULT_EMOJI
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,13 @@ def _is_name_occupied(exc: Exception) -> bool:
     return "occupied" in str(exc).lower()
 
 
+def _is_bad_emoji(exc: Exception) -> bool:
+    # "Bad Request: can't parse sticker: expected a Unicode emoji" (live 13.06):
+    # Telegram's emoji set is the only authority, and it is stricter than any
+    # upstream validation we run — so the publisher keeps a fallback of its own.
+    return "unicode emoji" in str(exc).lower()
+
+
 def _input_sticker(image: bytes, emoji: str, index: int) -> InputSticker:
     return InputSticker(
         sticker=BufferedInputFile(image, filename=f"sticker_{index}.png"),
@@ -117,24 +125,37 @@ class Publisher:
         input_stickers = [
             _input_sticker(image, emoji, i) for i, (image, emoji) in enumerate(stickers)
         ]
-        attempts = max_name_retries + 1
-        for attempt in range(attempts):
+        name_retries = 0
+        emoji_fallback_used = False
+        while True:
             name = build_set_name(title, self._bot_username)
             try:
                 await _flood_wait(
-                    lambda name=name: self._bot.create_new_sticker_set(  # type: ignore[attr-defined]
-                        user_id=user_id, name=name, title=title, stickers=input_stickers
+                    lambda name=name, input_stickers=input_stickers: (
+                        self._bot.create_new_sticker_set(  # type: ignore[attr-defined]
+                            user_id=user_id, name=name, title=title, stickers=input_stickers
+                        )
                     )
                 )
             except Exception as exc:  # narrow by message below, then re-raise
-                if attempt < attempts - 1 and _is_name_occupied(exc):
+                if name_retries < max_name_retries and _is_name_occupied(exc):
+                    name_retries += 1
                     logger.warning("set name %s occupied; regenerating suffix", name)
                     continue
+                if not emoji_fallback_used and _is_bad_emoji(exc):
+                    # The create call is atomic, so Telegram won't say WHICH
+                    # emoji it disliked — retry the batch on safe defaults
+                    # rather than lose the user's paid generation.
+                    emoji_fallback_used = True
+                    logger.warning("telegram rejected an emoji in «%s»; retrying defaults", title)
+                    input_stickers = [
+                        _input_sticker(image, DEFAULT_EMOJI, i)
+                        for i, (image, _emoji) in enumerate(stickers)
+                    ]
+                    continue
                 raise
-            else:
-                await self._set_cover(user_id, name, stickers)
-                return name
-        raise RuntimeError("unreachable: create_pack retry loop exhausted")  # pragma: no cover
+            await self._set_cover(user_id, name, stickers)
+            return name
 
     async def _set_cover(self, user_id: int, name: str, stickers: Sequence[StickerInput]) -> None:
         """Pick a random sticker, fit it to a cover, set it as the set thumbnail."""
@@ -177,11 +198,26 @@ class Publisher:
         if current_count + len(stickers) > MAX_STICKERS_PER_SET:
             raise capacity_error(set_name, current_count)
         for i, (image, emoji) in enumerate(stickers, start=current_count):
-            await _flood_wait(
-                lambda i=i, image=image, emoji=emoji: self._bot.add_sticker_to_set(  # type: ignore[attr-defined]
-                    user_id=user_id, name=set_name, sticker=_input_sticker(image, emoji, i)
+            try:
+                await _flood_wait(
+                    lambda i=i, image=image, emoji=emoji: self._bot.add_sticker_to_set(  # type: ignore[attr-defined]
+                        user_id=user_id, name=set_name, sticker=_input_sticker(image, emoji, i)
+                    )
                 )
-            )
+            except Exception as exc:
+                if not _is_bad_emoji(exc):
+                    raise
+                # Land the sticker on the safe default instead of failing the
+                # batch; on_added below persists the emoji Telegram really has.
+                logger.warning("telegram rejected emoji %r; retrying with default", emoji)
+                emoji = DEFAULT_EMOJI
+                await _flood_wait(
+                    lambda i=i, image=image: self._bot.add_sticker_to_set(  # type: ignore[attr-defined]
+                        user_id=user_id,
+                        name=set_name,
+                        sticker=_input_sticker(image, DEFAULT_EMOJI, i),
+                    )
+                )
             if on_added is not None:
                 await on_added(i, (image, emoji))
 
