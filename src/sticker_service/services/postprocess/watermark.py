@@ -9,6 +9,7 @@ Docker image (no system fonts).
 
 from __future__ import annotations
 
+import math
 from io import BytesIO
 from pathlib import Path
 
@@ -52,11 +53,41 @@ def apply_watermark(
     draw = ImageDraw.Draw(layer)
     stroke = 2
     bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    # th is the ink BOTTOM measured from the draw origin (bbox[3]), not the ink
+    # height (bbox[3]-bbox[1]): the text is placed by origin, so reserving only
+    # the ink height would let descenders spill past the canvas edge.
+    tw, th = int(bbox[2] - bbox[0]), math.ceil(bbox[3])
+    gap = max(3, th // 3)
+    strip = th + gap
     bottom = _silhouette_bottom(np.asarray(img)[..., 3])
+    # PLAYBOOK-START
+    # id: reserve-strip-by-shrinking-content
+    # title: Free a margin for an overlay by shrinking content, not clamping
+    # status: draft
+    # category: media-processing
+    # tags: [overlay, layout, images]
+    # When an overlay must NEVER cover the content and the content can fill
+    # the whole canvas (here: tight-cropped + fit-to-edge stickers), clamping
+    # the overlay inward silently paints it over the content. Instead shrink
+    # the content proportionally to free a dedicated strip and draw the
+    # overlay there; keep the outer canvas dimensions unchanged so downstream
+    # size contracts (Telegram's 512px longest side) still hold.
+    # PLAYBOOK-END
+    if bottom + strip > h:
+        # Production stickers arrive tight-cropped (slice_sheet) and scaled to
+        # the canvas edge (fit_to_512), so the figure reaches the last row and
+        # the old min() clamp always painted the handle over the bottom ~30px
+        # of the art — including model-drawn captions (owner 2026-06-12: the
+        # watermark sits STRICTLY below the figure, never on art or captions).
+        art_h = max(1, h - strip)
+        art_w = max(1, round(w * art_h / h))
+        art = img.resize((art_w, art_h), Image.Resampling.LANCZOS)
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        img.paste(art, ((w - art_w) // 2, 0))
+        bottom = art_h  # == h - strip unless the canvas is degenerately small
     # Just BELOW the figure (owner: the handle must not cover the art), with a
-    # small gap; clamped so the text always stays inside the canvas.
-    y = min(h - th - 2, bottom + max(3, th // 3))
+    # small gap; after the shrink above it always fits inside the canvas.
+    y = bottom + gap
     draw.text(
         ((w - tw) // 2, y),
         text,
