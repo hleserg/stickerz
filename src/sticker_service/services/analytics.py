@@ -22,6 +22,8 @@ DOWNLOADED = "downloaded"
 PUBLISHED = "published"
 EXTENDED = "extended"
 SLICING_FALLBACK = "slicing_fallback"
+CAPTION_GATE = "caption_gate"
+SCENE_OBSERVER = "scene_observer"
 
 
 async def log(db: Database, user_id: int, event: str, **detail: object) -> None:

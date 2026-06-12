@@ -133,6 +133,11 @@ class Settings(BaseSettings):
     watermark_enabled: bool = True
     watermark_text: str = "@yuki_stickers_bot"
 
+    # --- Caption fidelity gate (one vision call per sheet page) ---
+    # Rejects a sheet whose drawn texts miss or duplicate the ordered captions
+    # (free retry for the user). Off-switch for when vision is flaky/expensive.
+    caption_gate_enabled: bool = True
+
     # --- Showcase (the Telegraph demo page surfaced to newcomers) ---
     # Shown as a url-button on /start and the alpha-application screen, and as
     # a line in /help. Empty string hides it everywhere.

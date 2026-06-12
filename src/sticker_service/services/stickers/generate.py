@@ -52,7 +52,10 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
     Only the load-bearing constraints stay (chroma background, grid, die-cut
     outline, connectivity, identity); everything creative is handed to the
     model. Text appears ONLY where an idea asks for it in quotes; emotion is
-    shown in the drawing, not written under it.
+    shown in the drawing, not written under it. The «Правила надписей» block
+    is the owner-approved contract (2026-06-12): live sheets duplicated,
+    dropped and stranded captions across tiles, so exactly-once / own-tile /
+    top-placement are spelled out instead of trusted.
     """
     from sticker_service.services.postprocess import grid_for
 
@@ -67,15 +70,20 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
         f"{rows}×{cols}, фон — сплошной {CHROMA}.\n"
         f"Лицо, причёска и цвет глаз — в точности как на референсе.\n"
         f"Каждый стикер — отдельная наклейка одним куском, с белой обводкой; стикеры "
-        f"не соприкасаются.\n"
+        f"не соприкасаются; ничего из одного стикера — ни рисунок, ни предмет, ни "
+        f"надпись — не заходит на соседний.\n"
         f"Одна идея из списка = один стикер, строго по порядку (слева направо, сверху "
-        f"вниз).\n"
+        f"вниз). Идей {len(captions)} — стикеров ровно {len(captions)}.\n"
         f"Всё, что в идее написано без кавычек, — это то, что надо НАРИСОВАТЬ. Всё, "
         f"что в кавычках (кавычки бывают «», \"\" или ''), — это надо НАПИСАТЬ без "
         f"самих кавычек, в уместном месте, не перекрывая рисунок. Если идея состоит "
         f"из одной надписи в кавычках — нарисуй персонажа, обыгрывающего её, и "
-        f"подпиши этим текстом: без кавычек и не перекрывая текстом картинку."
-        f"{empty_clause}\n"
+        f"подпиши этим текстом: без кавычек и не перекрывая текстом картинку.\n"
+        f"Правила надписей: каждая надпись появляется на листе ровно один раз — "
+        f"целиком, без изменений, на стикере своей идеи; на одном стикере не бывает "
+        f"двух надписей; если в идее нет кавычек — на её стикере не пиши ничего; "
+        f"надпись размещай в верхней половине стикера, никогда — у нижнего края "
+        f"(низ занят водяным знаком и интерфейсом Telegram).{empty_clause}\n"
         f"Идеи:\n{items}\n"
         f"{suffix}"
     ).strip()

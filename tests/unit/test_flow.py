@@ -609,6 +609,66 @@ async def test_status_line_newer_stage_cancels_revert() -> None:
     assert msg.edit_text.call_args.args[0] == "Этап 2"  # not reverted to "Этап 1"
 
 
+async def test_status_line_rotates_animated_stage_with_elapsed() -> None:
+    # An animated stage (tuple of frames) cycles one frame per tick, each with
+    # the elapsed timer — a minutes-long sheet call reads as motion, not freeze.
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from sticker_service.handlers.flow import StatusLine
+
+    msg = AsyncMock()
+    status = StatusLine(msg)
+    status.FRAME_SECONDS = 0.03
+    await status.stage(("позы.", "эмоции..", "подписи…"))
+    assert msg.edit_text.call_args.args[0] == "позы."  # first frame, no timer yet
+    status.start()
+    try:
+        await asyncio.sleep(0.2)
+    finally:
+        status.stop()
+    shown = [c.args[0] for c in msg.edit_text.call_args_list]
+    assert any(t.startswith("эмоции.. · уже") for t in shown)
+    assert any(t.startswith("подписи… · уже") for t in shown)
+    assert any(t.startswith("позы. · уже") for t in shown)  # wrapped around
+
+
+async def test_status_line_notice_pauses_rotation() -> None:
+    # A retry/fallback notice must stay readable: frames hold off for the
+    # notice window instead of stomping it two seconds in, then resume.
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from sticker_service.handlers.flow import StatusLine
+
+    msg = AsyncMock()
+    status = StatusLine(msg)
+    status.FRAME_SECONDS = 0.02
+    status.NOTICE_SECONDS = 0.1
+    await status.stage(("кадр1", "кадр2"))
+    status.start()
+    try:
+        await status.notice("🔁 Повторяю…")
+        await asyncio.sleep(0.05)  # inside the notice window
+        assert msg.edit_text.call_args.args[0] == "🔁 Повторяю…"
+        await asyncio.sleep(0.2)  # window passed → rotation resumed
+    finally:
+        status.stop()
+    assert msg.edit_text.call_args.args[0].split(" · ")[0] in {"кадр1", "кадр2"}
+
+
+def test_sheet_stage_is_animated_triplet() -> None:
+    # The sheet stage is a 3-frame animation with growing dots (owner's spec);
+    # flattening it back to a single string would silently kill the rotation.
+    from sticker_service.handlers.flow import _SHEET_FRAMES
+
+    assert _SHEET_FRAMES == (
+        "🖼️ Рисую лист стикеров: позы.",
+        "🖼️ Рисую лист стикеров: эмоции..",
+        "🖼️ Рисую лист стикеров: подписи…",
+    )
+
+
 async def test_status_line_heartbeat_appends_elapsed_when_idle() -> None:
     # Nothing changed for a while → the line gains elapsed time, so a long
     # model call visibly ticks instead of looking frozen.
@@ -708,3 +768,74 @@ async def test_stale_style_tap_is_answered_not_crashed() -> None:
     callback.answer.assert_awaited_once()
     assert "устарела" in callback.answer.call_args.args[0]
     callback.message.edit_reply_markup.assert_called_once_with(reply_markup=None)
+
+
+async def test_owner_alert_attaches_rejected_sheet(monkeypatch: object, tmp_path: object) -> None:
+    # The rejected sheet is evidence nobody can see otherwise: it goes to the
+    # owner even for his OWN failures; the text DM still only covers testers.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from sticker_service.handlers import flow
+    from sticker_service.services.models.errors import TransientPipelineError
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        flow, "get_settings", lambda: SimpleNamespace(first_admin_id=42)
+    )
+    rejected = tmp_path / "sheet.png"  # type: ignore[operator]
+    rejected.write_bytes(b"PNG")
+    exc = TransientPipelineError("caption check failed: пропали: «Пока!»", rejected_path=rejected)
+
+    msg = AsyncMock()
+    await flow._alert_owner_genfail(msg, 42, "генерация", exc)  # owner's own failure
+    msg.bot.send_document.assert_awaited_once()
+    msg.bot.send_message.assert_not_awaited()
+
+    msg = AsyncMock()
+    await flow._alert_owner_genfail(msg, 7, "генерация", exc)  # tester failure
+    msg.bot.send_document.assert_awaited_once()
+    msg.bot.send_message.assert_awaited_once()
+
+    msg = AsyncMock()
+    plain = RuntimeError("no artifact")
+    await flow._alert_owner_genfail(msg, 7, "генерация", plain)  # no sheet → text only
+    msg.bot.send_document.assert_not_awaited()
+    msg.bot.send_message.assert_awaited_once()
+
+
+def test_quality_disclaimer_is_pinned() -> None:
+    # Owner's honesty rule (12.06): expectations are managed up front — full
+    # version on /start and /help, a short echo right before «✅ Создать».
+    from sticker_service.handlers.flow import _review_text
+    from sticker_service.handlers.start import HELP, QUALITY_NOTE, WELCOME
+
+    assert QUALITY_NOTE in WELCOME
+    assert QUALITY_NOTE in HELP
+    review = _review_text(["Привет!"])
+    assert "ИИ не идеален" in review
+    assert "/report" in review
+
+
+def test_duplicate_caption_detector() -> None:
+    # Standard buttons are toggle-safe; the custom paths (typed text, 🎲) used
+    # to accept duplicates, making the model honestly draw the sticker twice.
+    from sticker_service.handlers.flow import _is_duplicate_caption
+
+    data = {"std_sel": [0], "custom": ["Огонь!"]}  # std_sel[0] = «Привет!»
+    assert _is_duplicate_caption(data, "привет!  ")
+    assert _is_duplicate_caption(data, "ОГОНЬ!")
+    assert not _is_duplicate_caption(data, "Новая идея")
+
+
+async def test_random_take_refuses_duplicates() -> None:
+    from unittest.mock import AsyncMock
+
+    from sticker_service.handlers.flow import on_random_take
+
+    state = AsyncMock()
+    state.get_data.return_value = {"rand_idea": "Привет!", "std_sel": [0], "custom": []}
+    callback = AsyncMock()
+    await on_random_take(callback, state)
+    callback.answer.assert_awaited_once()
+    assert "уже есть" in callback.answer.call_args.args[0]
+    state.update_data.assert_awaited_once_with(rand_idea=None)  # die re-armed, no append
