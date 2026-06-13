@@ -259,6 +259,51 @@ async def test_publish_upload_chunks_big_batches_for_telegram(
     assert bot.added == 10  # the tail rides addStickerToSet
 
 
+async def test_publish_upload_resumes_after_tail_failure_without_duplicate_set(
+    db: Database, tmp_path: object
+) -> None:
+    # createNewStickerSet succeeds, the >50 tail add fails → retry must CONTINUE
+    # the same set from its live count, not mint a duplicate (finding #3/#19).
+    class _FlakyTailBot(_FakeBot):
+        def __init__(self) -> None:
+            super().__init__()
+            self.added = 0
+            self.live = 0
+            self.fail_tail = True
+
+        async def create_new_sticker_set(self, **kwargs: object) -> None:
+            await super().create_new_sticker_set(**kwargs)
+            self.live = len(kwargs["stickers"])  # type: ignore[arg-type]
+
+        async def add_sticker_to_set(self, **kwargs: object) -> None:
+            if self.fail_tail and self.added == 0:
+                raise RuntimeError("Bad Request: tail add boom")
+            self.added += 1
+            self.live += 1
+
+        async def get_sticker_set(self, *, name: str) -> object:
+            return SimpleNamespace(stickers=[object()] * self.live, title="Большой")
+
+    bot = _FlakyTailBot()
+    orch = Orchestrator(
+        model=MockImageModel(emoji="🔥"),
+        db=db,
+        publisher=Publisher(bot, "yourbot"),
+        loader=StyleLoader(get_settings().styles_dir),
+        storage_dir=tmp_path,  # type: ignore[arg-type]
+    )
+    scratch, _ = await orch.prepare_upload(owner_id=5, images=[_png((16, 16))] * 60)
+    with pytest.raises(Exception, match="tail add boom"):
+        await orch.publish_upload_new(owner_id=5, title="Большой", scratch_path=scratch)
+    assert len(bot.created) == 1 and bot.live == 50  # set created, tail not yet in
+
+    bot.fail_tail = False
+    result = await orch.publish_upload_new(owner_id=5, title="Большой", scratch_path=scratch)
+    assert len(bot.created) == 1  # NO duplicate createNewStickerSet
+    assert result.count == 60 and bot.live == 60  # tail finished on the retry
+    assert len(await db.list_packs(5)) == 1  # one pack, not two
+
+
 # --- packs adopted by link (owner's spec, 13.06) --------------------------------
 
 

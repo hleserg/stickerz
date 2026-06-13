@@ -161,7 +161,7 @@ def test_sheet_prompt_bans_drawn_quotes_and_merges_caption_outline() -> None:
     # merge with the figure's outline instead of floating as an island.
     prompt = build_sheet_prompt(_style(), ['"Спасибо!"'], age_clause="")
     assert "НИКОГДА не рисуются" in prompt
-    assert "сливаются с обводкой рисунка" in prompt
+    assert "касается рисунка своей обводкой" in prompt
 
 
 def test_sheet_prompt_carries_owner_caption_rules() -> None:
