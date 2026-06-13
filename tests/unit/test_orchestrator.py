@@ -991,6 +991,46 @@ async def test_caption_gate_substitution_never_excuses_duplicates(
         await orch.build_stickers(char, captions=["Привет!", '"слежу за тобой"'])
 
 
+async def test_caption_gate_substitution_short_circuits_when_too_few_extras(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    # Two captions missing but only one extra text drawn: a substitution can't
+    # cover both, so the cheap-out guard must reject WITHOUT asking the model
+    # (no paid substitution call), even if the model would say «ДА».
+    from sticker_service.services.models.errors import TransientPipelineError
+
+    class _OneExtra(_SheetModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.substitution_asked = False
+
+        async def ask(self, image: bytes, question: str) -> str:
+            if question.startswith("Перечисли"):
+                return "Огонь"  # neither ordered caption; only one extra
+            self.substitution_asked = True
+            return "ДА"
+
+    model = _OneExtra()
+    orch = Orchestrator(
+        model=model,
+        db=db,
+        publisher=Publisher(_FakeBot(), "yourbot"),
+        loader=loader,
+        storage_dir=tmp_path,
+    )
+    char = await orch.save_character(
+        owner_id=5,
+        name="Тест",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(1),
+    )
+    with pytest.raises(TransientPipelineError):
+        await orch.build_stickers(char, captions=['"Привет!"', '"Пока!"'])
+    assert not model.substitution_asked  # short-circuited before the paid call
+
+
 async def test_caption_gate_fails_open_without_vision_answer(
     db: Database, loader: StyleLoader, tmp_path: Path
 ) -> None:

@@ -385,6 +385,39 @@ async def test_adopt_link_pack_refuses_foreign_and_garbage(db: Database, tmp_pat
         await orch_flaky.adopt_pack_by_link(owner_id=5, text="ghost_by_yourbot")
 
 
+async def test_adopted_pack_extends_from_live_baseline(db: Database, tmp_path: object) -> None:
+    # End-to-end: adopt a link pack that already holds 7 stickers, then extend
+    # it — capacity and positions follow the LIVE count, not the (empty) rows,
+    # so the new stickers land after the existing ones, not on top of them.
+    class _GrowingSetBot(_FakeBot):
+        def __init__(self) -> None:
+            super().__init__()
+            self.live = 7
+            self.added: list[int] = []
+
+        async def get_sticker_set(self, *, name: str) -> object:
+            stickers = [SimpleNamespace(file_id=f"f{i}") for i in range(self.live)]
+            return SimpleNamespace(title="По ссылке", stickers=stickers)
+
+        async def download(self, file_id: str) -> io.BytesIO:
+            return io.BytesIO(_png((64, 64)))
+
+        async def add_sticker_to_set(self, **kwargs: object) -> None:
+            self.added.append(self.live)
+            self.live += 1
+
+    bot = _GrowingSetBot()
+    orch = _link_orchestrator(db, tmp_path, bot)
+    pack = await orch.adopt_pack_by_link(owner_id=5, text="grown_by_yourbot")
+    assert await orch.pack_live_count(pack) == 7  # live, despite 0 DB rows
+
+    new = [(_png((32, 32)), "🔥"), (_png((32, 32)), "👍")]
+    result = await orch.publish_extend(owner_id=5, pack=pack, stickers=new, captions=["A", "B"])
+    assert result.count == 2
+    assert bot.added == [7, 8]  # appended AFTER the 7 live ones, not from 0
+    assert bot.live == 9
+
+
 # --- the command gate -----------------------------------------------------------
 
 
