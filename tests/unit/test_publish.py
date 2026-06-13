@@ -47,6 +47,20 @@ def test_sticker_set_link() -> None:
     assert sticker_set_link("foo_by_bot") == "https://t.me/addstickers/foo_by_bot"
 
 
+def test_parse_set_link_accepts_only_our_bots_sets() -> None:
+    from sticker_service.services.publish import parse_set_link
+
+    assert (
+        parse_set_link("https://t.me/addstickers/kotya_9m0ta_by_yuki_bot", "yuki_bot")
+        == "kotya_9m0ta_by_yuki_bot"
+    )
+    assert parse_set_link("t.me/addstickers/x_by_yuki_bot ура", "Yuki_Bot") == "x_by_yuki_bot"
+    assert parse_set_link("kotya_by_yuki_bot", "yuki_bot") == "kotya_by_yuki_bot"  # bare name
+    assert parse_set_link("https://t.me/addstickers/foreign_by_other_bot", "yuki_bot") is None
+    assert parse_set_link("просто текст", "yuki_bot") is None
+    assert parse_set_link("", "yuki_bot") is None
+
+
 def test_next_part_title_starts_and_increments_parts() -> None:
     from sticker_service.services.publish import next_part_title
 

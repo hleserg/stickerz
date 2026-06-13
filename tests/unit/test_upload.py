@@ -259,6 +259,75 @@ async def test_publish_upload_chunks_big_batches_for_telegram(
     assert bot.added == 10  # the tail rides addStickerToSet
 
 
+# --- packs adopted by link (owner's spec, 13.06) --------------------------------
+
+
+class _LinkedSetBot(_FakeBot):
+    """Serves a published foreign-to-the-DB set with 7 stickers."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.downloads = 0
+
+    async def get_sticker_set(self, *, name: str) -> object:
+        stickers = [SimpleNamespace(file_id=f"f{i}") for i in range(7)]
+        return SimpleNamespace(title="Старый пак", stickers=stickers)
+
+    async def download(self, file_id: str) -> io.BytesIO:
+        self.downloads += 1
+        return io.BytesIO(_png((64, 64)))
+
+
+def _link_orchestrator(db: Database, tmp_path: object, bot: _FakeBot) -> Orchestrator:
+    return Orchestrator(
+        model=MockImageModel(emoji="🔥"),
+        db=db,
+        publisher=Publisher(bot, "yourbot"),
+        loader=StyleLoader(get_settings().styles_dir),
+        storage_dir=tmp_path,  # type: ignore[arg-type]
+    )
+
+
+async def test_adopt_link_pack_builds_grid_canonical(db: Database, tmp_path: object) -> None:
+    from sticker_service.services.orchestrator import OrchestratorError
+
+    bot = _LinkedSetBot()
+    orch = _link_orchestrator(db, tmp_path, bot)
+    pack = await orch.adopt_pack_by_link(
+        owner_id=5, text="https://t.me/addstickers/old_abc_by_yourbot"
+    )
+    assert pack.published and pack.title == "Старый пак"
+    assert bot.downloads == 6  # only the first 6 stickers feed the 2×3 grid
+    chars = await db.list_characters(5)
+    assert len(chars) == 1 and chars[0].style_id == orch.LINK_PACK_STYLE
+    grid = Image.open(chars[0].canonical_path)
+    assert grid.size[0] < grid.size[1]  # 2 cols × 3 rows: portrait grid
+
+    again = await orch.adopt_pack_by_link(owner_id=5, text="old_abc_by_yourbot")
+    assert again.id == pack.id  # second adoption returns the same pack
+
+    with pytest.raises(OrchestratorError, match="другому пользователю"):
+        await orch.adopt_pack_by_link(owner_id=6, text="old_abc_by_yourbot")
+
+
+async def test_adopt_link_pack_refuses_foreign_and_garbage(db: Database, tmp_path: object) -> None:
+    from sticker_service.services.orchestrator import OrchestratorError
+
+    orch = _link_orchestrator(db, tmp_path, _LinkedSetBot())
+    with pytest.raises(OrchestratorError, match="созданный этим ботом"):
+        await orch.adopt_pack_by_link(owner_id=5, text="t.me/addstickers/x_by_other_bot")
+    with pytest.raises(OrchestratorError, match="созданный этим ботом"):
+        await orch.adopt_pack_by_link(owner_id=5, text="просто текст")
+
+    class _NoSuchSet(_FakeBot):
+        async def get_sticker_set(self, *, name: str) -> object:
+            raise RuntimeError("Bad Request: STICKERSET_INVALID")
+
+    orch_missing = _link_orchestrator(db, tmp_path, _NoSuchSet())
+    with pytest.raises(OrchestratorError, match="не нашёл"):
+        await orch_missing.adopt_pack_by_link(owner_id=5, text="ghost_by_yourbot")
+
+
 # --- the command gate -----------------------------------------------------------
 
 
