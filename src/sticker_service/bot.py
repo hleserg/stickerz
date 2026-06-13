@@ -148,6 +148,7 @@ def _user_commands() -> list[BotCommand]:
         BotCommand(command="history", description="История заказов: какие стикеры я просил"),
         BotCommand(command="addto", description="Дополнить существующий пак"),
         BotCommand(command="upload", description="Загрузить готовые стики (лист или ZIP)"),
+        BotCommand(command="balance", description="Остаток паков и цены"),
         BotCommand(command="cancel", description="Отменить текущее действие"),
         BotCommand(command="help", description="Что умеет бот и цены"),
         BotCommand(command="rules", description="Правила"),
