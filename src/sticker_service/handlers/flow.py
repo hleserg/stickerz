@@ -29,6 +29,7 @@ import logging
 import random
 import time
 from collections.abc import AsyncIterator
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -758,11 +759,13 @@ async def _alert_owner_genfail(msg: Message, user_id: int, what: str, exc: Excep
             )
     if user_id == owner:  # the owner sees his own failures live
         return
-    reason = str(exc)[:150] or type(exc).__name__
+    # Exception text can carry user-typed content (pack titles) — escape it,
+    # or a stray <>& breaks (or injects into) the parse_mode="HTML" DM.
+    reason = escape(str(exc)[:150] or type(exc).__name__)
     with contextlib.suppress(Exception):
         await msg.bot.send_message(  # type: ignore[union-attr]
             owner,
-            f"⚠️ У тестера id={user_id} сбой: {what}.\n"
+            f"⚠️ У тестера id={user_id} сбой: {escape(what)}.\n"
             f"Причина: {reason}\n"
             f'Профиль: <a href="tg://user?id={user_id}">открыть</a>',
             parse_mode="HTML",
@@ -1376,12 +1379,24 @@ async def revive_orphaned_generations(bot: Any, storage: Any) -> int:
     # about a generation they never started (live: Zoya's June-8 row).
     fresh = set(await storage.keys_in_state(NewPack.publish.state, max_age_seconds=1800))
     owner = get_settings().first_admin_id
+    revived = 0
     for bot_id, chat_id, user_id in orphans:
         key = StorageKey(bot_id=bot_id, chat_id=chat_id, user_id=user_id)
         if (bot_id, chat_id, user_id) not in fresh:
             with contextlib.suppress(Exception):
                 await storage.set_state(key, None)
             continue
+        # Both run phases share the publish state; only rows still GENERATING
+        # were interrupted. A user quietly viewing their finished preview
+        # (generating=False) keeps working buttons — never reset them.
+        # On data-read trouble fall back to reviving (the pre-flag behavior):
+        # a false revive is an extra button, a false skip is a stuck user.
+        try:
+            if not (await storage.get_data(key)).get("generating"):
+                continue
+        except Exception:  # nosec B110 - storage hiccup must not stop the sweep
+            logger.warning("revival: could not read FSM data for %s; reviving", key)
+        revived += 1
         with contextlib.suppress(Exception):
             await storage.set_state(key, NewPack.review.state)
         with contextlib.suppress(Exception):
@@ -1398,7 +1413,6 @@ async def revive_orphaned_generations(bot: Any, storage: Any) -> int:
                     f"♻️ Рестарт прервал генерацию у тестера id={user_id} — "
                     "отправил ему кнопку «повторить».",
                 )
-    revived = len([o for o in orphans if o in fresh])
     if revived:
         logger.warning("revived %d generation(s) orphaned by a restart", revived)
     return revived
@@ -1503,6 +1517,9 @@ async def _generate_and_present(  # pragma: no cover
     cost = pricing.cost_for_mode(mode)
     started = time.monotonic()
     await state.set_state(NewPack.publish)
+    # Phase marker for boot revival: only rows still GENERATING are orphans;
+    # a user quietly viewing a finished preview must never be reset.
+    await state.update_data(generating=True)
 
     status = StatusLine(msg)
 
@@ -1619,6 +1636,16 @@ async def on_retry(  # pragma: no cover
         msg = callback.message if isinstance(callback.message, Message) else None
         if msg is None:
             return
+        data = await state.get_data()
+        retries = int(data.get("free_retries", 0))
+        if retries >= 3:  # a sheet that failed 3 retries needs a new order, not more burn
+            await msg.answer("Не выходит с этим набором — попробуй изменить идеи: /new")
+            return
+        cost = pricing.cost_for_mode(data.get("mode", "fresh"))
+        if (hint := await _generation_gate(db, user_id, cost)) is not None:
+            await msg.answer(hint)
+            return
+        await state.update_data(free_retries=retries + 1)
         with contextlib.suppress(Exception):
             await msg.edit_reply_markup(reply_markup=None)  # drop the button while retrying
         _spawn_generation(msg, state, orchestrator, db, user_id)
@@ -1654,7 +1681,12 @@ async def _present_for_publish(  # pragma: no cover
     with contextlib.suppress(Exception):
         await msg.edit_text(_STAGE_TEXT["preview"])
     await state.update_data(
-        stickers=None, mode=mode, pack_id=pack_id, pub_title=title, scratch_path=scratch_path
+        stickers=None,
+        mode=mode,
+        pack_id=pack_id,
+        pub_title=title,
+        scratch_path=scratch_path,
+        generating=False,
     )
     await state.set_state(NewPack.publish)
     # Drop the progress message, drop previews, then put controls *below* the previews.
@@ -1758,8 +1790,10 @@ async def on_publish_yes(  # pragma: no cover
                     )
         except Exception as exc:
             logger.exception("publish failed")
+            # Keep the publish/download buttons: the ZIP caption promises a
+            # retry «той же кнопкой», and the state is still NewPack.publish.
             with contextlib.suppress(TelegramBadRequest):
-                await msg.edit_text(_friendly_error(exc))
+                await msg.edit_text(_friendly_error(exc), reply_markup=publish_kb())
             await _send_stickers_zip(msg, stickers)
             await _alert_owner_genfail(msg, user_id, "публикация пака", exc)
             return
@@ -2010,6 +2044,20 @@ async def on_redraw_photo(  # pragma: no cover
     if not message.photo:
         await message.answer("Нужно именно фото. Пришли изображение человека.")
         return
+    guard_id = message.from_user.id if message.from_user else 0
+    # Single-flight: a second photo while the redraw runs must not double-charge.
+    if not _begin_action(guard_id):
+        await message.answer(_BUSY_TEXT)
+        return
+    try:
+        await _redraw_photo_locked(message, state, orchestrator, db)
+    finally:
+        _end_action(guard_id)
+
+
+async def _redraw_photo_locked(  # pragma: no cover
+    message: Message, state: FSMContext, orchestrator: Orchestrator, db: Database
+) -> None:
     data = await state.get_data()
     char = await db.get_character(int(data.get("redraw_char_id", 0)))
     user_id = message.from_user.id if message.from_user else 0
@@ -2110,10 +2158,16 @@ class LinkExtend(StatesGroup):
 _TXT_LINK = "Введите ссылку на опубликованный стикерпак:"
 
 
-async def on_extlink(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+async def on_extlink(  # pragma: no cover
+    callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator
+) -> None:
     """«🔗 По ссылке» in /addto: ask for the set link."""
     tag_component("handlers.flow")
     await callback.answer()
+    # A flow entry like cmd_new: leftovers (incl. another flow's scratch dir)
+    # must not leak into — or be orphaned by — the link conversation.
+    await _drop_review_scratch(orchestrator, state)
+    await state.set_data({})
     await state.set_state(LinkExtend.link)
     if isinstance(callback.message, Message):
         await callback.message.answer(_TXT_LINK)
@@ -2363,6 +2417,10 @@ async def on_pick_pack(  # pragma: no cover
     # An uploaded pack has no drawn character — a generation-extend would walk
     # the whole wizard and die on the synthetic style at create time.
     target = await db.get_pack(pack_id)
+    caller = callback.from_user.id if callback.from_user else 0
+    if target is not None and target.owner_id != caller:  # forged callback id
+        await callback.answer("Пак не найден", show_alert=True)
+        return
     character = await db.get_character(target.character_id) if target else None
     if character is not None and character.style_id == UPLOADED_STYLE_ID:
         await callback.answer()
@@ -2400,8 +2458,9 @@ async def on_continue_pack(  # pragma: no cover
     tag_component("handlers.flow")
     pack_id = int((callback.data or "cont:0").split(":", 1)[-1])
     pack = await db.get_pack(pack_id)
+    caller = callback.from_user.id if callback.from_user else 0
     character = await db.get_character(pack.character_id) if pack else None
-    if pack is None or character is None:
+    if pack is None or character is None or pack.owner_id != caller:
         await callback.answer("Пак не найден", show_alert=True)
         return
     if isinstance(callback.message, Message):
