@@ -887,14 +887,18 @@ async def test_unusable_sheet_fails_generation_with_retryable_error(
     assert rejected is not None and rejected.exists()  # evidence for the owner alert
 
 
-async def test_caption_gate_rejects_and_dumps_evidence(
+async def test_caption_observer_ships_and_reports_mismatch(
     db: Database, loader: StyleLoader, tmp_path: Path
 ) -> None:
-    # Vision sees «Привет!» twice and no «Пока!» → the page fails into the
-    # free-retry path, the analytics row is logged and the rejected sheet is
-    # dumped so the owner's alert can attach the evidence.
+    # HLE-1254: a text mismatch (vision sees «Привет!» twice, no «Пока!») is no
+    # longer a hard reject — the sheet SHIPS, the analytics row is logged, and
+    # the owner gets an observation DM instead of a rejection.
     from sticker_service.services import analytics
-    from sticker_service.services.models.errors import TransientPipelineError, is_retryable
+
+    alerts: list[str] = []
+
+    async def _notify(text: str, _attachment: object) -> None:
+        alerts.append(text)
 
     class _WrongTexts(_SheetModel):
         async def ask(self, image: bytes, question: str) -> str:
@@ -906,6 +910,7 @@ async def test_caption_gate_rejects_and_dumps_evidence(
         publisher=Publisher(_FakeBot(), "yourbot"),
         loader=loader,
         storage_dir=tmp_path,
+        owner_notify=_notify,  # type: ignore[arg-type]
     )
     char = await orch.save_character(
         owner_id=5,
@@ -915,32 +920,23 @@ async def test_caption_gate_rejects_and_dumps_evidence(
         child_age=None,
         canonical=_sheet_bytes(1),
     )
-    with pytest.raises(TransientPipelineError) as err:
-        await orch.build_stickers(char, captions=["Привет!", "Пока!"])
-    assert "caption check failed" in str(err.value)
-    assert is_retryable(err.value)
-    rejected = err.value.rejected_path
-    assert rejected is not None and rejected.exists()
-    assert rejected.parent == tmp_path / "rejected"
+    stickers = await orch.build_stickers(char, captions=["Привет!", "Пока!"])
+    assert stickers  # shipped, not rejected
     assert await db.count_events(analytics.CAPTION_GATE) == 1
+    assert alerts and "разошлись с заказом" in alerts[0]
 
 
-async def test_caption_gate_accepts_semantic_substitution(
+async def test_caption_observer_quiet_on_clean_sheet(
     db: Database, loader: StyleLoader, tmp_path: Path
 ) -> None:
-    # Owner's rule (13.06): «слежу за тобой» drawn as «Я всё вижу» is a
-    # replacement in spirit, not a defect — one extra vision call confirms it,
-    # the sheet ships, and the gate logs «substituted» instead of rejecting.
     from sticker_service.services import analytics
 
-    class _Substituting(_SheetModel):
+    class _FaithfulTexts(_SheetModel):
         async def ask(self, image: bytes, question: str) -> str:
-            if question.startswith("Перечисли"):
-                return "Я всё вижу\nПока!"
-            return "ДА"  # the substitution question
+            return "Привет!\nПока!"
 
     orch = Orchestrator(
-        model=_Substituting(),
+        model=_FaithfulTexts(),
         db=db,
         publisher=Publisher(_FakeBot(), "yourbot"),
         loader=loader,
@@ -954,81 +950,8 @@ async def test_caption_gate_accepts_semantic_substitution(
         child_age=None,
         canonical=_sheet_bytes(1),
     )
-    assert await orch.build_stickers(char, captions=['"слежу за тобой"', "Пока!"])
-    rows = await db.events_for(5, analytics.CAPTION_GATE, limit=2)
-    assert any(d.get("reason") == "substituted" for _, d in rows)
-
-
-async def test_caption_gate_substitution_never_excuses_duplicates(
-    db: Database, loader: StyleLoader, tmp_path: Path
-) -> None:
-    # A duplicated caption is fatal even when the model would bless the swap:
-    # the softening branch must not even be consulted.
-    from sticker_service.services.models.errors import TransientPipelineError
-
-    class _DupAndBless(_SheetModel):
-        async def ask(self, image: bytes, question: str) -> str:
-            if question.startswith("Перечисли"):
-                return "Привет!\nПривет!\nЯ всё вижу"
-            return "ДА"
-
-    orch = Orchestrator(
-        model=_DupAndBless(),
-        db=db,
-        publisher=Publisher(_FakeBot(), "yourbot"),
-        loader=loader,
-        storage_dir=tmp_path,
-    )
-    char = await orch.save_character(
-        owner_id=5,
-        name="Тест",
-        style_id="watercolor",
-        subject_type="adult",
-        child_age=None,
-        canonical=_sheet_bytes(1),
-    )
-    with pytest.raises(TransientPipelineError):
-        await orch.build_stickers(char, captions=["Привет!", '"слежу за тобой"'])
-
-
-async def test_caption_gate_substitution_short_circuits_when_too_few_extras(
-    db: Database, loader: StyleLoader, tmp_path: Path
-) -> None:
-    # Two captions missing but only one extra text drawn: a substitution can't
-    # cover both, so the cheap-out guard must reject WITHOUT asking the model
-    # (no paid substitution call), even if the model would say «ДА».
-    from sticker_service.services.models.errors import TransientPipelineError
-
-    class _OneExtra(_SheetModel):
-        def __init__(self) -> None:
-            super().__init__()
-            self.substitution_asked = False
-
-        async def ask(self, image: bytes, question: str) -> str:
-            if question.startswith("Перечисли"):
-                return "Огонь"  # neither ordered caption; only one extra
-            self.substitution_asked = True
-            return "ДА"
-
-    model = _OneExtra()
-    orch = Orchestrator(
-        model=model,
-        db=db,
-        publisher=Publisher(_FakeBot(), "yourbot"),
-        loader=loader,
-        storage_dir=tmp_path,
-    )
-    char = await orch.save_character(
-        owner_id=5,
-        name="Тест",
-        style_id="watercolor",
-        subject_type="adult",
-        child_age=None,
-        canonical=_sheet_bytes(1),
-    )
-    with pytest.raises(TransientPipelineError):
-        await orch.build_stickers(char, captions=['"Привет!"', '"Пока!"'])
-    assert not model.substitution_asked  # short-circuited before the paid call
+    assert await orch.build_stickers(char, captions=["Привет!", "Пока!"])
+    assert await db.count_events(analytics.CAPTION_GATE) == 0  # no mismatch → quiet
 
 
 async def test_caption_gate_fails_open_without_vision_answer(

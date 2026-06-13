@@ -499,47 +499,30 @@ def drop_text_strips(pieces: list[Image.Image]) -> list[Image.Image]:
 def drop_outlier_fragments(
     pieces: list[Image.Image], *, expected: int | None = None, area_frac: float = 0.4
 ) -> list[Image.Image]:
-    """Drop small-area outlier pieces: stray glyphs, scenery shards, paint splashes.
+    """Drop only clear small-area scraps: stray glyphs, scenery shards, splashes.
 
-    A valid sticker fills its tile with the character, so every real piece has a
-    similar opaque footprint; a detached letter (e.g. a lone «Я»), a corner
-    picture-frame or a splash is an outlier. Two modes:
+    A valid sticker fills its tile, so every real piece has a similar opaque
+    footprint; a detached letter, a corner picture-frame or a splash is well
+    below the median and is dropped.
 
-    - ``expected`` known: cap to it by dropping the smallest extras. A stray
-      fragment isn't always *small* (a duplicated limb, a blob the chroma key
-      missed), so an area threshold alone can't catch it — we must land on
-      exactly ``expected`` (this is the "7 pieces for 6 captions" fix).
-    - ``expected`` unknown: drop only clear small-area outliers (below
-      ``area_frac`` of the median).
+    Owner's rule (HLE-1254, 2026-06-13): EXTRA well-formed tiles are NOT
+    trimmed to ``expected`` — the model padding the grid with a couple of
+    bonus emotions is a gift to the user, not a defect. ``expected`` is kept
+    only so a sliver hidden among exactly-N pieces can still be measured
+    against the median; it never caps healthy pieces. (Previously the cap
+    silently dropped a legit wide scene tile — «Всё, я спать!» — to hit N.)
 
-    Complements ``drop_text_strips`` (short-wide caption lines). Never returns an
-    empty list.
+    Complements ``drop_text_strips`` (short-wide caption lines). Never returns
+    an empty list.
     """
     if len(pieces) < 2:
         return pieces
-    if expected is not None and len(pieces) <= expected:
-        return pieces  # already at/under target — nothing to drop, skip the scan
     areas = [_opaque_area(p) for p in pieces]
-    # Owner's rule: pieces near the pack's median are KEPT; anomalies are what
-    # to hunt — much smaller than the median AND/OR of a clearly different
-    # shape (a sticker is chunky; a stray lettering strip is long and narrow).
-    aspects = [max(p.size) / max(1, min(p.size)) for p in pieces]
-    med_area = max(1, sorted(areas)[len(areas) // 2])
-    med_aspect = sorted(aspects)[len(aspects) // 2]
-
-    def _anomaly(i: int) -> float:
-        return max(0.0, 1.0 - areas[i] / med_area) + max(0.0, aspects[i] - med_aspect) / 2.0
-
-    smallest_first = sorted(range(len(pieces)), key=_anomaly, reverse=True)
-    if expected is not None:
-        to_drop = set(smallest_first[: len(pieces) - expected])
-    else:
-        median = sorted(areas)[len(areas) // 2]
-        if median == 0:
-            return pieces
-        threshold = area_frac * median
-        to_drop = {i for i in smallest_first if areas[i] < threshold}
-    kept = [p for i, p in enumerate(pieces) if i not in to_drop]
+    median = sorted(areas)[len(areas) // 2]
+    if median == 0:
+        return pieces
+    threshold = area_frac * median
+    kept = [p for p, a in zip(pieces, areas, strict=True) if a >= threshold]
     return kept or pieces
 
 
@@ -573,14 +556,17 @@ def sheet_quality(
     fraction of its grid tile; nothing is a sliver. Any failure means the
     sheet itself is broken and regenerating beats publishing garbage.
     """
-    if len(pieces) != expected:
-        return SheetQuality(False, f"count {len(pieces)} != {expected}", 0.0)
+    # Owner's rule (HLE-1254): a MISSING sticker (sliced < ordered) is a defect
+    # — regenerate. EXTRA well-drawn tiles (sliced > ordered) are a bonus, not a
+    # reject; shape sanity then runs against the ACTUAL layout, not the ordered N.
+    if len(pieces) < expected:
+        return SheetQuality(False, f"count {len(pieces)} < {expected}", 0.0)
     areas = [_opaque_area(p) for p in pieces]
     median = sorted(areas)[len(areas) // 2]
     if median <= 0:
         return SheetQuality(False, "empty pieces", 0.0)
     area_ratio = min(areas) / median
-    rows, cols = grid
+    rows, cols = grid_for(len(pieces))
     tile_area = (sheet_size[0] / cols) * (sheet_size[1] / rows)
     tile_fracs = [(p.size[0] * p.size[1]) / tile_area for p in pieces]
     aspects = [max(p.size) / max(1, min(p.size)) for p in pieces]
