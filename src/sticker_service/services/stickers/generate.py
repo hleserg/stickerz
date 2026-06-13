@@ -53,9 +53,12 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
     outline, connectivity, identity); everything creative is handed to the
     model. Text appears ONLY where an idea asks for it in quotes; emotion is
     shown in the drawing, not written under it. The «Правила надписей» block
-    is the owner-approved contract (2026-06-12): live sheets duplicated,
-    dropped and stranded captions across tiles, so exactly-once / own-tile /
-    top-placement are spelled out instead of trusted.
+    keeps the exactly-once / own-tile / top-placement rules that live defects
+    forced (2026-06-12), but stays compact: the block had bloated with
+    per-defect clauses (quote-marks, caption-plate outline) and the owner
+    found the longer prompt LOWERED quality (2026-06-13), so it was trimmed
+    back to the freedom-first brief — write-without-quote-marks survives in
+    one line, the fiddly outline-merge rule was dropped.
     """
     from sticker_service.services.postprocess import grid_for
 
@@ -74,20 +77,12 @@ def build_sheet_prompt(style: Style, captions: list[str], age_clause: str) -> st
         f"надпись — не заходит на соседний.\n"
         f"Одна идея из списка = один стикер, строго по порядку (слева направо, сверху "
         f"вниз). Идей {len(captions)} — стикеров ровно {len(captions)}.\n"
-        f"Всё, что в идее написано без кавычек, — это то, что надо НАРИСОВАТЬ. Всё, "
-        f"что в кавычках (кавычки бывают «», \"\" или ''), — это надо НАПИСАТЬ без "
-        f"самих кавычек, в уместном месте, не перекрывая рисунок. Если идея состоит "
-        f"из одной надписи в кавычках — нарисуй персонажа, обыгрывающего её, и "
-        f"подпиши этим текстом: без кавычек и не перекрывая текстом картинку.\n"
-        f"Правила надписей: каждая надпись появляется на листе ровно один раз — "
-        f"целиком, без изменений, на стикере своей идеи; на одном стикере не бывает "
-        f"двух надписей; если в идее нет кавычек — на её стикере не пиши ничего; "
-        f"сами кавычки — «», \"\" или '' — НИКОГДА не рисуются: они только маркер в "
-        f"списке идей, нарисованная кавычка = брак; плашка надписи слегка касается "
-        f"рисунка своей обводкой (не висит отдельным островом), но сам текст рисунок "
-        f"не перекрывает; надпись "
-        f"размещай в верхней половине стикера, никогда — у нижнего края "
-        f"(низ занят водяным знаком и интерфейсом Telegram).{empty_clause}\n"
+        f"Текст в идее без кавычек — это то, что надо НАРИСОВАТЬ; текст в кавычках "
+        f"(«», \"\" или '') надо НАПИСАТЬ на его стикере без самих кавычек, не "
+        f"перекрывая рисунок.\n"
+        f"Правила надписей: каждая надпись — ровно один раз, на стикере своей идеи; "
+        f"если в идее нет кавычек — не пиши ничего; надпись в верхней половине "
+        f"стикера, не у нижнего края (там водяной знак).{empty_clause}\n"
         f"Идеи:\n{items}\n"
         f"{suffix}"
     ).strip()
