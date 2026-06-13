@@ -635,6 +635,28 @@ class Database:
         await self._conn.commit()
         return await self.credits_left(user_id)
 
+    async def refund_credits(
+        self, user_id: int, amount: int, event: str, detail: dict[str, object]
+    ) -> int:
+        """Credit a refund AND record its ledger event in ONE transaction.
+
+        Atomicity matters both ways: a settled-marker without the credit
+        permanently strands the refund (and the dedup gate then blocks every
+        retry), while the credit without the marker lets the same charge be
+        refunded again. A single commit makes neither state reachable.
+        """
+        await self._ensure_quota_row(user_id)
+        await self._conn.execute(
+            "INSERT INTO events (user_id, event, detail, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, event, json.dumps(detail, ensure_ascii=False), _now().isoformat()),
+        )
+        await self._conn.execute(
+            "UPDATE quotas SET remaining = MAX(0, remaining + ?) WHERE user_id = ?",
+            (abs(amount), user_id),
+        )
+        await self._conn.commit()
+        return await self.credits_left(user_id)
+
     async def consume_credits(self, user_id: int, amount: int) -> tuple[int, bool]:
         """Atomically spend ``amount`` credits if the balance covers it.
 

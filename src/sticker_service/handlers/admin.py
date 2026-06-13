@@ -459,9 +459,10 @@ async def on_refund_request(callback: CallbackQuery, db: Database) -> None:
 async def on_refund_confirm(callback: CallbackQuery, db: Database, bot: Bot) -> None:
     """Re-verify the charge, mark it refunded, return it and apologize.
 
-    The refund marker is written BEFORE the credits (and not via the
-    error-swallowing analytics helper): if the marker fails the user merely
-    gets the refund a press later, while the reverse order could double-pay.
+    The settled-marker and the credit are written in ONE transaction
+    (``refund_credits``): neither a stranded refund (marker without credit,
+    which the dedup gate would then block forever) nor a double-pay (credit
+    without marker) is reachable.
     """
     tag_component("handlers.admin")
     if callback.from_user is None or not _is_admin(callback.from_user.id):
@@ -479,8 +480,9 @@ async def on_refund_confirm(callback: CallbackQuery, db: Database, bot: Bot) -> 
             await _strip_card_keyboard(callback)
             return
         _, credits, _ = charge
-        await db.add_event(user_id, analytics.CREDITS_REFUNDED, {"credits": credits})
-        left = await db.add_credits(user_id, credits)
+        left = await db.refund_credits(
+            user_id, credits, analytics.CREDITS_REFUNDED, {"credits": credits}
+        )
     finally:
         _refunds_in_flight.discard(user_id)
     await callback.answer("Возвращено")
