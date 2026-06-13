@@ -57,7 +57,6 @@ from sticker_service.services.stickers import (
     generate_sheet,
 )
 from sticker_service.services.stickers.caption_check import (
-    captions_substituted,
     expected_captions,
     judge_captions,
     read_sheet_texts,
@@ -1014,25 +1013,22 @@ class Orchestrator:
     async def _check_captions(
         self, owner_id: int, page_no: int, page: list[str], sheet: bytes
     ) -> None:
-        """Caption fidelity gate: reject the page when drawn texts betray the order.
+        """Caption observer: report text mismatches; never reject on them.
 
-        One vision call per page. Fails OPEN when vision has no readable
-        answer — the gate exists to save paid retries on bad sheets, never to
-        spend them because the checking call itself was flaky.
+        Owner's redesign (HLE-1254, 2026-06-13): a missing/duplicated/shifted
+        caption is NOT a hard reject anymore — the sheet ships, the mismatch
+        is logged and DM'd to the owner as an observation. (A genuinely
+        missing STICKER is caught earlier by the slicing count gate; gibberish
+        text / caption bleed / lettered-unquoted-ideas are a separate vision
+        check still to be built.) One cheap vision call per page; fails open.
         """
         if not get_settings().caption_gate_enabled:
             return
         expected = expected_captions(page)
         if not expected:
-            # No captions ordered → the gate could only ever report non-fatal
-            # extras, so the paid vision call buys nothing. Skip it.
             return
         drawn = await read_sheet_texts(self._model, sheet)
-        if drawn is None or (not drawn and expected):
-            logger.warning(
-                "caption gate: no readable vision answer; passing sheet as-is (owner=%s)",
-                owner_id,
-            )
+        if drawn is None or not drawn:
             return
         verdict = judge_captions(drawn, expected)
         if verdict.ok and not verdict.extra:
@@ -1040,37 +1036,14 @@ class Orchestrator:
         await analytics.log(
             self._db, owner_id, analytics.CAPTION_GATE, ok=verdict.ok, reason=verdict.reason
         )
-        if verdict.ok:  # extras alone are reported, not fatal (OCR noise vs. paid retry)
-            logger.warning("caption gate: extra texts for owner=%s: %s", owner_id, verdict.reason)
-            return
-        # Owner's rule (13.06): a missing caption REPLACED in spirit by one of
-        # the extra texts («слежу за тобой» → «Я всё вижу») is not a defect.
-        # One extra vision call, only on a would-be rejection; duplicates stay
-        # fatal, and an unconfirmed substitution keeps the rejection.
-        if (
-            verdict.missing
-            and not verdict.duplicated
-            and len(verdict.extra) >= len(verdict.missing)
-            and await captions_substituted(self._model, sheet, verdict.missing, verdict.extra)
-        ):
-            logger.warning(
-                "caption gate: substitution accepted for owner=%s: %s", owner_id, verdict.reason
-            )
-            await analytics.log(
-                self._db, owner_id, analytics.CAPTION_GATE, ok=True, reason="substituted"
-            )
-            if self._owner_notify is not None:
-                with contextlib.suppress(Exception):
-                    await self._owner_notify(
-                        f"✏️ Замена по смыслу у id={owner_id} (лист пропущен): {verdict.reason}",
-                        None,
-                    )
-            return
-        logger.warning("sheet captions unusable for owner=%s: %s", owner_id, verdict.reason)
-        rejected = await self._dump_rejected(owner_id, page_no, sheet)
-        raise TransientPipelineError(
-            f"caption check failed: {verdict.reason}", rejected_path=rejected
-        )
+        logger.warning("caption observer for owner=%s: %s", owner_id, verdict.reason)
+        if not verdict.ok and self._owner_notify is not None:
+            with contextlib.suppress(Exception):
+                await self._owner_notify(
+                    f"👀 Подписи у id={owner_id} разошлись с заказом (пак ушёл дальше): "
+                    f"{verdict.reason}",
+                    None,
+                )
 
     async def _observe_scenes(
         self, owner_id: int, page_no: int, page: list[str], sheet: bytes

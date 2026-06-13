@@ -217,23 +217,22 @@ def test_drop_outlier_fragments_drops_lone_glyph() -> None:
     assert len(drop_outlier_fragments(pieces)) == 2  # area heuristic drops it
 
 
-def test_drop_outlier_fragments_respects_expected() -> None:
+def test_drop_outlier_fragments_drops_only_small_scraps() -> None:
     char = Image.new("RGBA", (300, 400), (0, 0, 0, 255))
-    glyph = Image.new("RGBA", (60, 250), (0, 0, 0, 255))
+    glyph = Image.new("RGBA", (60, 250), (0, 0, 0, 255))  # tiny opaque area → scrap
     pieces = [char.copy(), char.copy(), glyph]
-    # expected already met by the real characters → never thin below it.
-    assert len(drop_outlier_fragments(pieces, expected=3)) == 3
+    assert len(drop_outlier_fragments(pieces, expected=3)) == 2  # lone glyph dropped
 
 
-def test_drop_outlier_fragments_caps_to_expected_for_large_extra() -> None:
-    # The "7 for 6" bug: a sizeable stray fragment (>40% of the median, so the
-    # small-area heuristic can't catch it) must still be dropped when the count
-    # is known. The old budget could only remove sub-threshold pieces.
+def test_drop_outlier_fragments_keeps_healthy_extras() -> None:
+    # HLE-1254: a near-median EXTRA tile (the model padded with a bonus) is NOT
+    # trimmed to ``expected`` — only sub-threshold scraps are dropped. Previously
+    # the cap silently dropped a legit wide scene tile to hit N.
     char = Image.new("RGBA", (300, 400), (0, 0, 0, 255))
-    extra = Image.new("RGBA", (220, 300), (0, 0, 0, 255))  # large-ish, not "small"
+    extra = Image.new("RGBA", (260, 380), (0, 0, 0, 255))  # near-median: real tile
     pieces = [char.copy() for _ in range(6)] + [extra]
     kept = drop_outlier_fragments(pieces, expected=6)
-    assert len(kept) == 6  # capped to expected; the extra (smallest) is dropped
+    assert len(kept) == 7  # the bonus tile is KEPT, not capped to 6
 
 
 def test_process_sheet_drops_lone_letter_tile() -> None:
@@ -449,16 +448,16 @@ def test_gradient_background_fails_honestly() -> None:
     assert not quality.ok
 
 
-def test_drop_outlier_prefers_shape_anomaly() -> None:
-    # Owner's rule: with one slot over, the long narrow lettering strip must be
-    # dropped before a chunky (if smaller) sticker.
+def test_drop_outlier_drops_small_area_scrap() -> None:
+    # A small-area scrap (a lone lettering strip / shard) is dropped by area.
+    # Aspect-based strip removal is drop_text_strips' job, run earlier in the
+    # real pipeline — drop_outlier_fragments now only judges small footprints.
     def _blob(w: int, h: int) -> Image.Image:
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         ImageDraw.Draw(img).rectangle([0, 0, w - 1, h - 1], fill=(50, 50, 200, 255))
         return img
 
-    chunky = [_blob(90, 100), _blob(100, 95), _blob(95, 100), _blob(70, 75)]
-    strip = _blob(200, 18)  # lettering: long and narrow
-    kept = drop_outlier_fragments([*chunky, strip], expected=4)
-    assert len(kept) == 4
-    assert all(max(p.size) / min(p.size) < 3 for p in kept)  # strip is gone
+    chunky = [_blob(150, 160), _blob(160, 155), _blob(155, 160), _blob(150, 150)]
+    scrap = _blob(60, 30)  # tiny opaque footprint, well under 40% of the median
+    kept = drop_outlier_fragments([*chunky, scrap])
+    assert len(kept) == 4  # scrap dropped; the four real tiles kept
