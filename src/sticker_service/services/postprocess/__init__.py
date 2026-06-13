@@ -6,7 +6,7 @@ from PIL import Image
 
 from sticker_service.services.postprocess.bundle import bundle_zip
 from sticker_service.services.postprocess.cover import make_cover
-from sticker_service.services.postprocess.preview import compose_preview
+from sticker_service.services.postprocess.preview import compose_canonical_grid, compose_preview
 from sticker_service.services.postprocess.slice_stickers import (
     CHROMA_DEFAULT,
     SheetQuality,
@@ -43,6 +43,7 @@ __all__ = [
     "bundle_zip",
     "chroma_key",
     "chroma_key_auto",
+    "compose_canonical_grid",
     "compose_preview",
     "drop_outlier_fragments",
     "drop_text_strips",

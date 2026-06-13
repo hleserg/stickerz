@@ -50,6 +50,7 @@ class Upload(StatesGroup):
     dest = State()  # «Куда его?» new pack vs extend
     title = State()  # naming the new pack
     pick = State()  # choosing which pack to extend
+    link = State()  # awaiting a t.me/addstickers/... link to extend
 
 
 _TXT_PROMPT = (
@@ -240,10 +241,48 @@ async def on_dest_add(callback: CallbackQuery, state: FSMContext, db: Database) 
     kb = InlineKeyboardBuilder()
     for pack in packs:
         kb.button(text=pack.title, callback_data=f"uppick:{pack.id}")
+    kb.button(text="🔗 По ссылке", callback_data="updest:link")
     kb.adjust(1)
     if isinstance(callback.message, Message):
         await callback.message.answer("К какому паку добавить?", reply_markup=kb.as_markup())
     await state.set_state(Upload.pick)
+
+
+async def on_dest_link(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    """«🔗 По ссылке» in the upload flow: ask for the set link."""
+    tag_component("handlers.upload")
+    await callback.answer()
+    await _disarm(callback)
+    await state.set_state(Upload.link)
+    if isinstance(callback.message, Message):
+        await callback.message.answer("Введите ссылку на опубликованный стикерпак:")
+
+
+async def on_upload_link(  # pragma: no cover - thin I/O over tested orchestrator path
+    message: Message, state: FSMContext, orchestrator: Orchestrator
+) -> None:
+    """Adopt the linked set and offer it as the upload's extend target."""
+    tag_component("handlers.upload")
+    user_id = message.from_user.id if message.from_user else 0
+    status = await message.answer("📥 Изучаю пак по ссылке…")
+    try:
+        pack = await orchestrator.adopt_pack_by_link(owner_id=user_id, text=message.text or "")
+    except OrchestratorError as exc:
+        with contextlib.suppress(TelegramBadRequest):
+            await status.edit_text(f"Не получилось: {exc}.")
+        return
+    except Exception:
+        logger.exception("upload link adoption failed")
+        with contextlib.suppress(TelegramBadRequest):
+            await status.edit_text("Что-то пошло не так со ссылкой — попробуй ещё раз.")
+        return
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"➕ Добавить в «{pack.title}»", callback_data=f"uppick:{pack.id}")
+    await state.set_state(Upload.pick)
+    with contextlib.suppress(TelegramBadRequest):
+        await status.edit_text(
+            f"Нашёл пак «{pack.title}» — добавляем туда?", reply_markup=kb.as_markup()
+        )
 
 
 async def _notify_owner(  # pragma: no cover - best-effort DM
@@ -457,6 +496,8 @@ def build_router() -> Router:
     router.callback_query.register(on_cancel, F.data == "up:no", StateFilter(Upload))
     router.callback_query.register(on_dest_new, F.data == "updest:new", Upload.dest)
     router.callback_query.register(on_dest_add, F.data == "updest:add", Upload.dest)
+    router.callback_query.register(on_dest_link, F.data == "updest:link", Upload.pick)
+    router.message.register(on_upload_link, Upload.link, ~F.text.startswith("/"))
     router.callback_query.register(on_pick, F.data.startswith("uppick:"), Upload.pick)
     router.callback_query.register(on_continue_upload, F.data == "upcont", Upload.pick)
 

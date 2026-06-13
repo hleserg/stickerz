@@ -80,6 +80,28 @@ def next_part_title(title: str) -> str:
     return base[: _TITLE_MAX - len(tail)].rstrip() + tail
 
 
+_LINK_RE = re.compile(
+    r"(?:https?://)?t(?:elegram)?\.me/addstickers/(?P<name>[A-Za-z][\w]*)", re.IGNORECASE
+)
+
+
+def parse_set_link(text: str, bot_username: str) -> str | None:
+    """Extract OUR bot's set name from a t.me/addstickers link (or a bare name).
+
+    Telegram lets a bot edit only the sets it created, so anything not ending
+    in ``_by_<bot>`` returns None — the caller refuses honestly instead of
+    failing later, after the user already invested in the flow.
+    """
+    text = text.strip()
+    match = _LINK_RE.search(text)
+    name = match.group("name") if match else text
+    if not re.fullmatch(r"[A-Za-z][\w]*", name):
+        return None
+    if not name.lower().endswith(f"_by_{bot_username.lower()}"):
+        return None
+    return name
+
+
 def sticker_set_link(set_name: str) -> str:
     """Public add link for a published set."""
     return f"https://t.me/addstickers/{set_name}"

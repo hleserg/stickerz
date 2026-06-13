@@ -34,6 +34,7 @@ from sticker_service.services.models.base import ImageModel
 from sticker_service.services.models.errors import TransientPipelineError
 from sticker_service.services.postprocess import (
     apply_watermark,
+    compose_canonical_grid,
     grid_for,
     process_sheet_checked,
     slice_uploaded_sheet,
@@ -43,7 +44,7 @@ from sticker_service.services.publish import (
     Publisher,
     capacity_error,
 )
-from sticker_service.services.publish.naming import build_set_name
+from sticker_service.services.publish.naming import build_set_name, parse_set_link
 from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers import (
     DEFAULT_EMOJI,
@@ -515,6 +516,59 @@ class Orchestrator:
             if live is not None:
                 return live
         return await self._db.count_stickers(pack.id)
+
+    # Style for characters built from a linked pack's sticker grid. The grid
+    # canonical drives the look via reference images; the style only words the
+    # sheet prompt. Owner to confirm a better default (Linear).
+    LINK_PACK_STYLE = "watercolor"
+
+    async def adopt_pack_by_link(self, *, owner_id: int, text: str) -> Pack:
+        """Resolve user-typed link text into an owned Pack (parse + register)."""
+        set_name = parse_set_link(text, self._publisher.bot_username)
+        if set_name is None:
+            raise OrchestratorError(
+                "нужна ссылка вида t.me/addstickers/… на пак, созданный этим ботом"
+            )
+        return await self.register_link_pack(owner_id=owner_id, set_name=set_name)
+
+    async def register_link_pack(self, *, owner_id: int, set_name: str) -> Pack:
+        """Adopt a published set added by link into our DB; returns its Pack.
+
+        Known set → ownership check. Unknown set → its first 6 stickers
+        become a 2×3 canonical grid (owner's spec, 13.06) behind a fresh
+        character, and the pack row is registered as published — from then on
+        it behaves like any other pack. User-facing failures raise
+        OrchestratorError with a ready RU message.
+        """
+        existing = await self._db.get_pack_by_set_name(set_name)
+        if existing is not None:
+            if existing.owner_id != owner_id:
+                raise OrchestratorError("этот пак принадлежит другому пользователю")
+            return existing
+        try:
+            title, _live, images = await self._publisher.fetch_set_stickers(set_name)
+        except Exception as exc:
+            raise OrchestratorError("не нашёл такой пак в Telegram — проверь ссылку") from exc
+        if not images:
+            raise OrchestratorError("в паке по ссылке не видно стикеров")
+        grid = await asyncio.to_thread(compose_canonical_grid, images)
+        character = await self.save_character(
+            owner_id=owner_id,
+            name=title[:60] or set_name,
+            style_id=self.LINK_PACK_STYLE,
+            subject_type="adult",
+            child_age=None,
+            canonical=grid,
+        )
+        pack = await self._db.add_pack(
+            character_id=character.id,
+            owner_id=owner_id,
+            set_name=set_name,
+            title=title or set_name,
+            published=True,
+        )
+        logger.info("link pack adopted: %s (pack=%s)", set_name, pack.id)
+        return pack
 
     # --- uploads: ready-made stickers in, packs out (owner's spec, 13.06) ----
 

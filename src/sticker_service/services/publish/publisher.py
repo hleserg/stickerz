@@ -226,6 +226,27 @@ class Publisher:
             if on_added is not None:
                 await on_added(i, (image, emoji))
 
+    async def fetch_set_stickers(
+        self, set_name: str, *, limit: int = 6
+    ) -> tuple[str, int, list[bytes]]:
+        """A linked set's title, live size and its first ``limit`` images.
+
+        Used when a pack arrives by link (owner's spec, 13.06) and we need its
+        stickers to build a canonical grid. Raises whatever the Bot API raises
+        for an unknown set — the caller translates it for the user.
+        """
+        sticker_set = await _flood_wait(
+            lambda: self._bot.get_sticker_set(name=set_name)  # type: ignore[attr-defined]
+        )
+        images: list[bytes] = []
+        for sticker in list(sticker_set.stickers)[:limit]:
+            file = await _flood_wait(
+                lambda fid=sticker.file_id: self._bot.download(fid)  # type: ignore[attr-defined]
+            )
+            if file is not None:
+                images.append(file.read())
+        return sticker_set.title, len(sticker_set.stickers), images
+
     async def live_count(self, set_name: str) -> int | None:
         """The set's actual sticker count per Telegram; None when the bot can't tell.
 

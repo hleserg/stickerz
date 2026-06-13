@@ -74,3 +74,28 @@ def compose_preview(
         canvas.save(buffer, format="PNG")
         sheets.append(buffer.getvalue())
     return sheets
+
+
+def compose_canonical_grid(
+    stickers: list[bytes], *, cols: int = 2, rows: int = 3, cell: int = 384, pad: int = 16
+) -> bytes:
+    """Tile up to ``cols×rows`` stickers into ONE image to serve as a canonical.
+
+    A pack added by link (owner's spec, 13.06) has no drawn character, so its
+    first stickers become the reference image the sheet generation looks at —
+    the character is "whoever is on these stickers". White background: the
+    canonical pipeline expects an opaque reference, not a transparent sheet.
+    """
+    chunk = stickers[: cols * rows]
+    width = pad + cols * (cell + pad)
+    height = pad + math.ceil(len(chunk) / cols) * (cell + pad)
+    canvas = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+    for i, data in enumerate(chunk):
+        tile = fit_to_512(Image.open(BytesIO(data)), side=cell)
+        r, c = divmod(i, cols)
+        x = pad + c * (cell + pad) + (cell - tile.width) // 2
+        y = pad + r * (cell + pad) + (cell - tile.height) // 2
+        canvas.paste(tile, (x, y), tile)
+    buffer = BytesIO()
+    canvas.convert("RGB").save(buffer, format="PNG")
+    return buffer.getvalue()

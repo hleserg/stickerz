@@ -48,7 +48,11 @@ from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.models import errors as model_errors
 from sticker_service.services.models.base import notice_sink
 from sticker_service.services.moderation import caption_rejection_reason
-from sticker_service.services.orchestrator import UPLOADED_STYLE_ID, Orchestrator
+from sticker_service.services.orchestrator import (
+    UPLOADED_STYLE_ID,
+    Orchestrator,
+    OrchestratorError,
+)
 from sticker_service.services.postprocess import bundle_zip, compose_preview
 from sticker_service.services.publish import PackFullError, next_part_title, remaining_capacity
 from sticker_service.services.publish.publisher import StickerInput
@@ -2078,13 +2082,18 @@ async def cmd_addto(message: Message, db: Database) -> None:
         await message.answer(hint)
         return
     packs = [p for p in await db.list_packs(user_id) if p.published]
-    if not packs:
-        await message.answer("Пока нет опубликованных паков для дополнения. Создай пак: /new")
-        return
     kb = InlineKeyboardBuilder()
     for pack in packs:
         kb.button(text=pack.title, callback_data=f"extend:{pack.id}")
+    kb.button(text="🔗 По ссылке", callback_data="extlink")
     kb.adjust(1)
+    if not packs:
+        await message.answer(
+            "Пока нет опубликованных паков для дополнения. Создай пак (/new) — "
+            "или добавь по ссылке:",
+            reply_markup=kb.as_markup(),
+        )
+        return
     text = (
         "Дополнить пак (тем же персонажем — новое фото нельзя, иначе пак станет "
         f"разнородным). Это стоит {pricing.format_packs(pricing.COST_ADD_STICKERS)} пака:"
@@ -2092,6 +2101,50 @@ async def cmd_addto(message: Message, db: Database) -> None:
     if (wallet := await _alpha_wallet(db, user_id)).get("alpha"):
         text += f"\n\n💎 Баланс: {pricing.format_packs(wallet['bal'])} паков."
     await message.answer(text, reply_markup=kb.as_markup())
+
+
+class LinkExtend(StatesGroup):
+    link = State()  # awaiting a t.me/addstickers/... link to adopt
+
+
+_TXT_LINK = "Введите ссылку на опубликованный стикерпак:"
+
+
+async def on_extlink(callback: CallbackQuery, state: FSMContext) -> None:  # pragma: no cover
+    """«🔗 По ссылке» in /addto: ask for the set link."""
+    tag_component("handlers.flow")
+    await callback.answer()
+    await state.set_state(LinkExtend.link)
+    if isinstance(callback.message, Message):
+        await callback.message.answer(_TXT_LINK)
+
+
+async def on_extend_link(  # pragma: no cover
+    message: Message, state: FSMContext, orchestrator: Orchestrator
+) -> None:
+    """Adopt the linked set (grid canonical if unknown) and offer it to extend."""
+    tag_component("handlers.flow")
+    user_id = message.from_user.id if message.from_user else 0
+    status = await message.answer("📥 Изучаю пак по ссылке…")
+    try:
+        pack = await orchestrator.adopt_pack_by_link(owner_id=user_id, text=message.text or "")
+    except OrchestratorError as exc:
+        with contextlib.suppress(TelegramBadRequest):
+            await status.edit_text(f"Не получилось: {exc}.")
+        return
+    except Exception:
+        logger.exception("link adoption failed")
+        with contextlib.suppress(TelegramBadRequest):
+            await status.edit_text("Что-то пошло не так со ссылкой — попробуй ещё раз: /addto")
+        return
+    await state.clear()
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"➕ Дополнить «{pack.title}»", callback_data=f"extend:{pack.id}")
+    with contextlib.suppress(TelegramBadRequest):
+        await status.edit_text(
+            f"Нашёл пак «{pack.title}» — теперь он в твоём списке:",
+            reply_markup=kb.as_markup(),
+        )
 
 
 # --- saved packs: list → actions (edit in place + back) ----------------------
@@ -2425,6 +2478,8 @@ def build_router() -> Router:
     router.callback_query.register(on_pick_pack, F.data.startswith("extend:"))
     router.callback_query.register(on_continue_pack, F.data.startswith("cont:"))
     router.callback_query.register(on_continue_cancel, F.data == "contno")
+    router.callback_query.register(on_extlink, F.data == "extlink")
+    router.message.register(on_extend_link, LinkExtend.link, ~F.text.startswith("/"))
     router.callback_query.register(on_pick_saved_pack, F.data.startswith("pk:"))
     router.callback_query.register(on_saved_publish, F.data.startswith("pkpub:"))
     router.callback_query.register(on_saved_download, F.data.startswith("pkdl:"))
