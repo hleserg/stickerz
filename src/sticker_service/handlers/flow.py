@@ -703,6 +703,27 @@ async def _strike(
     await msg.answer(text)
 
 
+# Owner's rule (13.06): a failed publish must never cost the user the finished
+# work — the PNGs ship as a document next to the friendly error.
+_ZIP_FAIL_TEXT = (
+    "📦 Чтобы ничего не пропало — держи свои стикеры архивом. "
+    "А публикацию можно повторить той же кнопкой чуть позже."
+)
+
+
+async def _send_stickers_zip(  # pragma: no cover - thin I/O over the tested zip builder
+    msg: Message, stickers: list[StickerInput]
+) -> None:
+    """Best-effort safety net: deliver the stickers as a ZIP after a failed publish."""
+    try:
+        payload = await asyncio.to_thread(bundle_zip, [img for img, _ in stickers])
+        await msg.answer_document(
+            BufferedInputFile(payload, filename="stickers.zip"), caption=_ZIP_FAIL_TEXT
+        )
+    except Exception:  # the error flow must never be masked by its safety net
+        logger.warning("could not send the stickers zip", exc_info=True)
+
+
 async def _alert_admins_quota(msg: Message, exc: Exception) -> None:  # pragma: no cover
     """DM every admin once a generation fails because the model is out of credits."""
     text = f"🔴 Генерация остановлена: у провайдера закончились кредиты.\n{str(exc)[:200]}"
@@ -1735,6 +1756,7 @@ async def on_publish_yes(  # pragma: no cover
             logger.exception("publish failed")
             with contextlib.suppress(TelegramBadRequest):
                 await msg.edit_text(_friendly_error(exc))
+            await _send_stickers_zip(msg, stickers)
             await _alert_owner_genfail(msg, user_id, "публикация пака", exc)
             return
 
