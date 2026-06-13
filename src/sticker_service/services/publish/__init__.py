@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sticker_service.services.publish.naming import (
     build_set_name,
+    next_part_title,
     sticker_set_link,
     transliterate,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "Publisher",
     "build_set_name",
     "capacity_error",
+    "next_part_title",
     "remaining_capacity",
     "sticker_set_link",
     "transliterate",

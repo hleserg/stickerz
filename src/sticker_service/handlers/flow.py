@@ -50,7 +50,7 @@ from sticker_service.services.models.base import notice_sink
 from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import UPLOADED_STYLE_ID, Orchestrator
 from sticker_service.services.postprocess import bundle_zip, compose_preview
-from sticker_service.services.publish import PackFullError, remaining_capacity
+from sticker_service.services.publish import PackFullError, next_part_title, remaining_capacity
 from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers import (
     MAX_CAPTIONS,
@@ -2318,19 +2318,59 @@ async def on_pick_pack(  # pragma: no cover
                 "Этот пак собран из загруженных стикеров — дополнить его можно через /upload 🙂"
             )
         return
-    # Refuse a full pack up front, so the user never builds captions for a set
-    # that can't take any more stickers (the 120-limit is enforced again, for
-    # free, at generation time if they pick more than the remaining room).
-    # Fullness follows the LIVE Telegram count: the owner prunes sets by hand.
+    # A full pack is not a dead end: offer a continuation with the same
+    # character — «Котя» → «Котя часть 2» (owner's rule, 13.06). Fullness
+    # follows the LIVE Telegram count: the owner prunes sets by hand.
     room = remaining_capacity(await orchestrator.pack_live_count(target)) if target else 0
     if room == 0:
         msg = callback.message if isinstance(callback.message, Message) else None
         await callback.answer()
-        if msg is not None:
-            title = target.title if target else "этот"
-            await msg.answer(f"Пак «{title}» уже заполнен (120/120). Создай новый пак: /new")
+        if msg is not None and target is not None:
+            sequel = next_part_title(target.title)
+            kb = InlineKeyboardBuilder()
+            kb.button(text=f"✅ Создать «{sequel}»", callback_data=f"cont:{target.id}")
+            kb.button(text="✖️ Не надо", callback_data="contno")
+            kb.adjust(1)
+            await msg.answer(
+                f"Пак «{target.title}» заполнен — 120 стикеров, это лимит Telegram. "
+                f"Создать продолжение «{sequel}» с тем же персонажем?",
+                reply_markup=kb.as_markup(),
+            )
         return
     await _enter_captions(callback, state, db, orchestrator, mode="extend", pack_id=pack_id)
+
+
+async def on_continue_pack(  # pragma: no cover
+    callback: CallbackQuery, state: FSMContext, db: Database, orchestrator: Orchestrator
+) -> None:
+    """Start the continuation pack: the reuse flow under the «часть N» title."""
+    tag_component("handlers.flow")
+    pack_id = int((callback.data or "cont:0").split(":", 1)[-1])
+    pack = await db.get_pack(pack_id)
+    character = await db.get_character(pack.character_id) if pack else None
+    if pack is None or character is None:
+        await callback.answer("Пак не найден", show_alert=True)
+        return
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_reply_markup(reply_markup=None)
+    await _enter_captions(
+        callback,
+        state,
+        db,
+        orchestrator,
+        mode="reuse",
+        character_id=character.id,
+        name=next_part_title(pack.title),
+    )
+
+
+async def on_continue_cancel(callback: CallbackQuery) -> None:  # pragma: no cover
+    tag_component("handlers.flow")
+    await callback.answer("Отменено")
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_reply_markup(reply_markup=None)
 
 
 def build_router() -> Router:
@@ -2383,6 +2423,8 @@ def build_router() -> Router:
     router.callback_query.register(on_char_redraw, F.data.startswith("credraw:"))
     router.message.register(on_redraw_photo, Redraw.photo)
     router.callback_query.register(on_pick_pack, F.data.startswith("extend:"))
+    router.callback_query.register(on_continue_pack, F.data.startswith("cont:"))
+    router.callback_query.register(on_continue_cancel, F.data == "contno")
     router.callback_query.register(on_pick_saved_pack, F.data.startswith("pk:"))
     router.callback_query.register(on_saved_publish, F.data.startswith("pkpub:"))
     router.callback_query.register(on_saved_download, F.data.startswith("pkdl:"))

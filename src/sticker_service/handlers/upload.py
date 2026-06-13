@@ -33,7 +33,7 @@ from sticker_service.services import analytics
 from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import Orchestrator, OrchestratorError
 from sticker_service.services.postprocess import compose_preview
-from sticker_service.services.publish import PackFullError
+from sticker_service.services.publish import PackFullError, next_part_title
 from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers.upload import (
     MAX_ZIP_BYTES,
@@ -352,9 +352,21 @@ async def on_pick(  # pragma: no cover - thin I/O over tested orchestrator path
             result = await orchestrator.publish_extend(
                 owner_id=user_id, pack=pack, stickers=stickers
             )
-        except PackFullError as exc:
+        except PackFullError:
+            # A full pack is not a dead end (owner's rule, 13.06): offer a
+            # continuation pack named «{title} часть N» for the same upload.
+            sequel = next_part_title(pack.title)
+            await state.update_data(cont_title=sequel)
+            kb = InlineKeyboardBuilder()
+            kb.button(text=f"✅ Создать «{sequel}»", callback_data="upcont")
+            kb.button(text="✖️ Не надо", callback_data="up:no")
+            kb.adjust(1)
             with contextlib.suppress(TelegramBadRequest):
-                await status.edit_text(str(exc))
+                await status.edit_text(
+                    f"Пак «{pack.title}» заполнен — 120 стикеров, это лимит Telegram. "
+                    f"Создать продолжение «{sequel}» из загруженных стикеров?",
+                    reply_markup=kb.as_markup(),
+                )
             return
         except Exception as exc:
             logger.exception("upload publish (extend) failed")
@@ -370,6 +382,52 @@ async def on_pick(  # pragma: no cover - thin I/O over tested orchestrator path
         with contextlib.suppress(TelegramBadRequest):
             await status.edit_text(f"✅ Готово! Пак: {result.link}")
         await _notify_owner(bot, callback.from_user, result.count, result.link, stickers[0][0])
+    finally:
+        _end_action(user_id)
+
+
+async def on_continue_upload(  # pragma: no cover - thin I/O over tested orchestrator path
+    callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator, db: Database, bot: Bot
+) -> None:
+    """Publish the upload as the continuation pack offered after PackFullError."""
+    tag_component("handlers.upload")
+    user_id = callback.from_user.id if callback.from_user else 0
+    title = str((await state.get_data()).get("cont_title") or "")
+    if not title:
+        await on_stale_button(callback)
+        return
+    if not _begin_action(user_id):
+        await callback.answer(_BUSY_TEXT, show_alert=True)
+        return
+    try:
+        await callback.answer()
+        await _disarm(callback)
+        msg = callback.message if isinstance(callback.message, Message) else None
+        if msg is None:
+            return
+        scratch = str((await state.get_data()).get("scratch_path") or "")
+        first = await orchestrator.load_scratch(scratch)
+        preview = first[0][0] if first else None
+        status = await msg.answer("🎭 Подбираю каждому стикеру эмодзи…")
+        try:
+            result = await orchestrator.publish_upload_new(
+                owner_id=user_id, title=title, scratch_path=scratch
+            )
+        except OrchestratorError as exc:
+            await state.clear()
+            with contextlib.suppress(TelegramBadRequest):
+                await status.edit_text(f"{exc} — /upload")
+            return
+        except Exception as exc:
+            logger.exception("upload publish (continuation) failed")
+            with contextlib.suppress(TelegramBadRequest):
+                await status.edit_text(_friendly_error(exc))
+            return
+        await state.clear()
+        await analytics.log(db, user_id, analytics.UPLOAD_PUBLISHED, mode="new", count=result.count)
+        with contextlib.suppress(TelegramBadRequest):
+            await status.edit_text(f"✅ Готово! Пак: {result.link}")
+        await _notify_owner(bot, callback.from_user, result.count, result.link, preview)
     finally:
         _end_action(user_id)
 
@@ -400,11 +458,12 @@ def build_router() -> Router:
     router.callback_query.register(on_dest_new, F.data == "updest:new", Upload.dest)
     router.callback_query.register(on_dest_add, F.data == "updest:add", Upload.dest)
     router.callback_query.register(on_pick, F.data.startswith("uppick:"), Upload.pick)
+    router.callback_query.register(on_continue_upload, F.data == "upcont", Upload.pick)
 
     # Catch-all for any upload button outside its state: registered last.
     def _is_upload_button(data: str | None) -> bool:
         return bool(data) and (
-            data in ("up:ok", "up:no") or data.startswith(("updest:", "uppick:"))  # type: ignore[union-attr]
+            data in ("up:ok", "up:no", "upcont") or data.startswith(("updest:", "uppick:"))  # type: ignore[union-attr]
         )
 
     router.callback_query.register(on_stale_button, F.data.func(_is_upload_button))
