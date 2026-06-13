@@ -40,7 +40,9 @@ async def approve_user(db: Database, user_id: int) -> None:
     username = app.username if app is not None else None
     await db.set_application_status(user_id, "approved")
     await db.allow(user_id, username)
-    await db.set_credits(user_id, DEFAULT_CREDITS)
+    # Starting budget only for a brand-new user — re-approval must not refill
+    # a spent balance or wipe bug-bonus packs.
+    await db.grant_starting_credits(user_id)
 
 
 async def maybe_auto_approve(db: Database, user_id: int) -> bool:

@@ -33,6 +33,7 @@ from sticker_service.handlers.flow import (
     _end_action,
     _friendly_error,
     _is_action_inflight,
+    _strike,
 )
 from sticker_service.observability import tag_component
 from sticker_service.services import analytics
@@ -341,7 +342,9 @@ async def on_title(  # pragma: no cover - thin I/O over tested orchestrator path
         await message.answer(f"Название длинновато — уложись в {_TITLE_MAX} символов 🙂")
         return
     if reason := caption_rejection_reason(title):
-        await message.answer(f"Так нельзя ({reason}). Придумай другое название.")
+        # Parity with /new pack naming: a profane title is a strike, not a
+        # free retry — otherwise /upload is an unmoderated naming channel.
+        await _strike(db, user_id, message, f"Так нельзя ({reason})")
         return
     if not _begin_action(user_id):
         await message.answer(_BUSY_TEXT)

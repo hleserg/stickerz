@@ -73,7 +73,14 @@ async def run_once(
 
     used_pct = disk_used_pct(settings)
     threshold = settings.disk_alert_threshold_pct
-    alerted = bool(threshold) and used_pct >= threshold
+    over = bool(threshold) and used_pct >= threshold
+    # Edge-triggered, like the budget alert: warn once when crossing the
+    # threshold, not on every pass — and re-arm only after disk drops back
+    # under it. Daily passes would otherwise spam the admin indefinitely.
+    was_over = await db.get_config("disk_alerted", "0") == "1"
+    alerted = over and not was_over
+    if over != was_over:
+        await db.set_config("disk_alerted", "1" if over else "0")
     if alerted:
         await notify(
             f"⚠️ Диск заполнен на {used_pct}% (порог {threshold}%). "

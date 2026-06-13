@@ -28,10 +28,17 @@ class _FakeOrchestrator:
 class _FakeDb:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.config: dict[str, str] = {}
 
     async def prune_events(self, *, older_than_days: int, keep_events: Any) -> int:
         self.calls.append({"days": older_than_days, "keep": tuple(keep_events)})
         return 5
+
+    async def get_config(self, key: str, default: str = "") -> str:
+        return self.config.get(key, default)
+
+    async def set_config(self, key: str, value: str) -> None:
+        self.config[key] = value
 
 
 class _FakeStorage:
@@ -83,6 +90,39 @@ async def test_run_once_alerts_admins_when_disk_nearly_full(
     report, sent = await _run(_settings(tmp_path), monkeypatch, used_pct=85)
     assert report.disk_alerted
     assert len(sent) == 1 and "85%" in sent[0]
+
+
+async def test_disk_alert_is_edge_triggered_not_repeated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The alert fires once on crossing the threshold and stays quiet on later
+    # passes while still over it — only re-arming after disk drops back under.
+    monkeypatch.setattr(maintenance, "disk_used_pct", lambda _s: 85)
+    settings, db = _settings(tmp_path), _FakeDb()
+    storage = _FakeStorage()
+    sent: list[str] = []
+
+    async def notify(text: str) -> None:
+        sent.append(text)
+
+    async def _pass(pct_db: _FakeDb) -> bool:
+        rep = await maintenance.run_once(
+            orchestrator=_FakeOrchestrator(),  # type: ignore[arg-type]
+            db=pct_db,  # type: ignore[arg-type]
+            storage=storage,  # type: ignore[arg-type]
+            notify=notify,
+            settings=settings,
+        )
+        return rep.disk_alerted
+
+    assert await _pass(db) is True  # crossing → alert
+    assert await _pass(db) is False  # still over → silent
+    assert len(sent) == 1
+    monkeypatch.setattr(maintenance, "disk_used_pct", lambda _s: 10)
+    assert await _pass(db) is False  # dropped under → re-arm, no alert
+    monkeypatch.setattr(maintenance, "disk_used_pct", lambda _s: 85)
+    assert await _pass(db) is True  # crosses again → alert again
+    assert len(sent) == 2
 
 
 async def test_disk_alert_disabled_by_zero_threshold(

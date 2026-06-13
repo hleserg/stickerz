@@ -569,12 +569,19 @@ class Database:
     # --- applications (§alpha) -----------------------------------------------
 
     async def add_application(self, user_id: int, username: str | None, source: str) -> None:
-        """Create or reset an application to 'pending'."""
+        """Create or refresh an application; re-applying never DOWNGRADES status.
+
+        An already-approved tester who taps the start flow again keeps their
+        approved status — resetting them to 'pending' would silently revoke
+        access and drop them back into the review queue.
+        """
         await self._conn.execute(
             "INSERT INTO applications (user_id, username, source, created_at, status) "
             "VALUES (?, ?, ?, ?, 'pending') "
             "ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, "
-            "source = excluded.source, created_at = excluded.created_at, status = 'pending'",
+            "source = excluded.source, created_at = excluded.created_at, "
+            "status = CASE WHEN applications.status = 'approved' "
+            "THEN 'approved' ELSE 'pending' END",
             (user_id, username, source, _now().isoformat()),
         )
         await self._conn.commit()
@@ -616,6 +623,16 @@ class Database:
             "ON CONFLICT(user_id) DO UPDATE SET remaining = excluded.remaining",
             (user_id, remaining),
         )
+        await self._conn.commit()
+
+    async def grant_starting_credits(self, user_id: int) -> None:
+        """Give the default budget ONLY to a brand-new user; never overwrite.
+
+        Approval can fire more than once (re-approve, re-apply→approve). It
+        must not reset an existing balance — that would refill spent packs and
+        wipe bug-bonus credits. A row already present is left untouched.
+        """
+        await self._ensure_quota_row(user_id)
         await self._conn.commit()
 
     async def _ensure_quota_row(self, user_id: int) -> None:
