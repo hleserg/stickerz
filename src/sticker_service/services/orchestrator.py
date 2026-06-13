@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from aiogram.exceptions import TelegramBadRequest
+
 from sticker_service.config import get_settings
 from sticker_service.db import Character, Database, Pack, Sticker
 from sticker_service.db.models import SubjectType
@@ -220,8 +222,12 @@ class Orchestrator:
         regenerating (and re-paying for) the work already done.
         """
         style = self._require_style(style_id)
-        pending = self._canonical_pending_dir(owner_id) if owner_id is not None else None
         key = _canonical_job_key(photo, style_id, subject_type, child_age)
+        # Keyed per JOB (owner+key), not per owner: two concurrent canonical
+        # runs for the same person (a redraw racing a new pack) must not
+        # rmtree/overwrite each other's resume steps. A retry of the SAME job
+        # is deterministic in key, so it still lands on the same dir and resumes.
+        pending = self._canonical_pending_dir(owner_id, key) if owner_id is not None else None
         done_steps: dict[int, bytes] = {}
         if pending is not None:
             done_steps = await asyncio.to_thread(_load_pending_steps, pending, key)
@@ -249,8 +255,8 @@ class Orchestrator:
             await asyncio.to_thread(shutil.rmtree, pending, True)
         return canonical
 
-    def _canonical_pending_dir(self, owner_id: int) -> Path:
-        return self._storage / "canonical_pending" / str(owner_id)
+    def _canonical_pending_dir(self, owner_id: int, key: str) -> Path:
+        return self._storage / "canonical_pending" / f"{owner_id}_{key}"
 
     async def validate_photo(self, image: bytes) -> str | None:
         """Vision foolproof check on upload; returns a problem code or None."""
@@ -547,7 +553,10 @@ class Orchestrator:
             return existing
         try:
             title, _live, images = await self._publisher.fetch_set_stickers(set_name)
-        except Exception as exc:
+        except TelegramBadRequest as exc:
+            # A genuinely unknown set (STICKERSET_INVALID). Flood waits, network
+            # errors and bugs are NOT «not found» — let them propagate to the
+            # caller's generic «что-то пошло не так, попробуй ещё раз».
             raise OrchestratorError("не нашёл такой пак в Telegram — проверь ссылку") from exc
         if not images:
             raise OrchestratorError("в паке по ссылке не видно стикеров")
@@ -1014,6 +1023,10 @@ class Orchestrator:
         if not get_settings().caption_gate_enabled:
             return
         expected = expected_captions(page)
+        if not expected:
+            # No captions ordered → the gate could only ever report non-fatal
+            # extras, so the paid vision call buys nothing. Skip it.
+            return
         drawn = await read_sheet_texts(self._model, sheet)
         if drawn is None or (not drawn and expected):
             logger.warning(
