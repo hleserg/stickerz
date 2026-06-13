@@ -1209,6 +1209,11 @@ def _end_action(user_id: int) -> None:
     _inflight_users.discard(user_id)
 
 
+def _is_action_inflight(user_id: int) -> bool:
+    """True while the user has a paid/long action running (entry guard for resets)."""
+    return user_id in _inflight_users
+
+
 async def on_rev_create(  # pragma: no cover
     callback: CallbackQuery, state: FSMContext, orchestrator: Orchestrator, db: Database
 ) -> None:
@@ -1358,6 +1363,11 @@ class StatusLine:
     def stop(self) -> None:
         if self._heartbeat is not None:
             self._heartbeat.cancel()
+        # Invalidate any pending notice-revert: bumping the sequence makes its
+        # `self._seq == seq` guard fail, so a late revert can't overwrite the
+        # terminal text (the final «✅ Готово» / error) edited after stop().
+        self._seq += 1
+        self._stage = ""
 
 
 async def revive_orphaned_generations(bot: Any, storage: Any) -> int:
@@ -2179,26 +2189,34 @@ async def on_extend_link(  # pragma: no cover
     """Adopt the linked set (grid canonical if unknown) and offer it to extend."""
     tag_component("handlers.flow")
     user_id = message.from_user.id if message.from_user else 0
-    status = await message.answer("📥 Изучаю пак по ссылке…")
+    # Adoption downloads up to 6 stickers + composes a grid — single-flight so
+    # two quick sends can't create duplicate character rows for the same set.
+    if not _begin_action(user_id):
+        await message.answer(_BUSY_TEXT)
+        return
     try:
-        pack = await orchestrator.adopt_pack_by_link(owner_id=user_id, text=message.text or "")
-    except OrchestratorError as exc:
+        status = await message.answer("📥 Изучаю пак по ссылке…")
+        try:
+            pack = await orchestrator.adopt_pack_by_link(owner_id=user_id, text=message.text or "")
+        except OrchestratorError as exc:
+            with contextlib.suppress(TelegramBadRequest):
+                await status.edit_text(f"Не получилось: {exc}.")
+            return
+        except Exception:
+            logger.exception("link adoption failed")
+            with contextlib.suppress(TelegramBadRequest):
+                await status.edit_text("Что-то пошло не так со ссылкой — попробуй ещё раз: /addto")
+            return
+        await state.clear()
+        kb = InlineKeyboardBuilder()
+        kb.button(text=f"➕ Дополнить «{pack.title}»", callback_data=f"extend:{pack.id}")
         with contextlib.suppress(TelegramBadRequest):
-            await status.edit_text(f"Не получилось: {exc}.")
-        return
-    except Exception:
-        logger.exception("link adoption failed")
-        with contextlib.suppress(TelegramBadRequest):
-            await status.edit_text("Что-то пошло не так со ссылкой — попробуй ещё раз: /addto")
-        return
-    await state.clear()
-    kb = InlineKeyboardBuilder()
-    kb.button(text=f"➕ Дополнить «{pack.title}»", callback_data=f"extend:{pack.id}")
-    with contextlib.suppress(TelegramBadRequest):
-        await status.edit_text(
-            f"Нашёл пак «{pack.title}» — теперь он в твоём списке:",
-            reply_markup=kb.as_markup(),
-        )
+            await status.edit_text(
+                f"Нашёл пак «{pack.title}» — теперь он в твоём списке:",
+                reply_markup=kb.as_markup(),
+            )
+    finally:
+        _end_action(user_id)
 
 
 # --- saved packs: list → actions (edit in place + back) ----------------------

@@ -27,13 +27,19 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sticker_service.config import get_settings
 from sticker_service.db import Database
 from sticker_service.handlers.errors import _user_ref
-from sticker_service.handlers.flow import _BUSY_TEXT, _begin_action, _end_action, _friendly_error
+from sticker_service.handlers.flow import (
+    _BUSY_TEXT,
+    _begin_action,
+    _end_action,
+    _friendly_error,
+    _is_action_inflight,
+)
 from sticker_service.observability import tag_component
 from sticker_service.services import analytics
 from sticker_service.services.moderation import caption_rejection_reason
 from sticker_service.services.orchestrator import Orchestrator, OrchestratorError
 from sticker_service.services.postprocess import compose_preview
-from sticker_service.services.publish import PackFullError, next_part_title
+from sticker_service.services.publish import PackFullError, next_part_title, remaining_capacity
 from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers.upload import (
     MAX_ZIP_BYTES,
@@ -83,6 +89,11 @@ async def cmd_upload(
     """Start the upload flow (gated: at least one finished generation)."""
     tag_component("handlers.upload")
     user_id = message.from_user.id if message.from_user else 0
+    # A publish in flight owns the scratch dir — re-entry must not yank it out
+    # from under the running job (would strand a half-published set).
+    if _is_action_inflight(user_id):
+        await message.answer(_BUSY_TEXT)
+        return
     if not await _has_generated(db, user_id):
         await message.answer(_TXT_GATE)
         return
@@ -233,11 +244,15 @@ async def on_dest_add(callback: CallbackQuery, state: FSMContext, db: Database) 
     user_id = callback.from_user.id if callback.from_user else 0
     packs = [p for p in await db.list_packs(user_id) if p.published]
     await callback.answer()
-    await _disarm(callback)
     if not packs:
+        # Don't disarm: the «🆕 Новый стикерпак» / «🔗 По ссылке» buttons on the
+        # dest card stay live so the user has a way forward (state is unchanged).
         if isinstance(callback.message, Message):
-            await callback.message.answer(_TXT_NO_PACKS)
+            await callback.message.answer(
+                f"{_TXT_NO_PACKS} Или добавь существующий по ссылке кнопкой ниже."
+            )
         return
+    await _disarm(callback)
     kb = InlineKeyboardBuilder()
     for pack in packs:
         kb.button(text=pack.title, callback_data=f"uppick:{pack.id}")
@@ -380,6 +395,23 @@ async def on_pick(  # pragma: no cover - thin I/O over tested orchestrator path
             return
         scratch = str((await state.get_data()).get("scratch_path") or "")
         await _disarm(callback)
+        # Capacity check BEFORE the paid per-sticker emoji calls: a full pack
+        # must offer its continuation without first burning vision on emojis.
+        room = remaining_capacity(await orchestrator.pack_live_count(pack))
+        scratch_stickers = await orchestrator.load_scratch(scratch)
+        if scratch_stickers and len(scratch_stickers) > room:
+            sequel = next_part_title(pack.title)
+            await state.update_data(cont_title=sequel)
+            kb = InlineKeyboardBuilder()
+            kb.button(text=f"✅ Создать «{sequel}»", callback_data="upcont")
+            kb.button(text="✖️ Не надо", callback_data="up:no")
+            kb.adjust(1)
+            await msg.answer(
+                f"Пак «{pack.title}» заполнен — 120 стикеров, это лимит Telegram. "
+                f"Создать продолжение «{sequel}» из загруженных стикеров?",
+                reply_markup=kb.as_markup(),
+            )
+            return
         status = await msg.answer("🎭 Подбираю каждому стикеру эмодзи…")
         try:
             # emojify_scratch picks emojis once and persists them back, so a

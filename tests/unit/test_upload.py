@@ -364,13 +364,25 @@ async def test_adopt_link_pack_refuses_foreign_and_garbage(db: Database, tmp_pat
     with pytest.raises(OrchestratorError, match="созданный этим ботом"):
         await orch.adopt_pack_by_link(owner_id=5, text="просто текст")
 
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import GetStickerSet
+
     class _NoSuchSet(_FakeBot):
         async def get_sticker_set(self, *, name: str) -> object:
-            raise RuntimeError("Bad Request: STICKERSET_INVALID")
+            raise TelegramBadRequest(method=GetStickerSet(name=name), message="STICKERSET_INVALID")
 
     orch_missing = _link_orchestrator(db, tmp_path, _NoSuchSet())
     with pytest.raises(OrchestratorError, match="не нашёл"):
         await orch_missing.adopt_pack_by_link(owner_id=5, text="ghost_by_yourbot")
+
+    # A transient fetch failure (flood/network) must NOT masquerade as «not found».
+    class _Flaky(_FakeBot):
+        async def get_sticker_set(self, *, name: str) -> object:
+            raise RuntimeError("network down")
+
+    orch_flaky = _link_orchestrator(db, tmp_path, _Flaky())
+    with pytest.raises(RuntimeError, match="network down"):
+        await orch_flaky.adopt_pack_by_link(owner_id=5, text="ghost_by_yourbot")
 
 
 # --- the command gate -----------------------------------------------------------

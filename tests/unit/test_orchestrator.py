@@ -827,7 +827,11 @@ async def test_canonical_resumes_from_persisted_steps(
 
     with pytest.raises(ModelError):
         await orch.build_canonical(**args, on_step=_fail_after_first)  # type: ignore[arg-type]
-    pending = tmp_path / "canonical_pending" / "7"
+    # The resume dir is keyed per JOB (owner + job key), not just per owner.
+    from sticker_service.services.orchestrator import _canonical_job_key
+
+    job_key = _canonical_job_key(b"PHOTO", "watercolor", "adult", None)
+    pending = tmp_path / "canonical_pending" / f"7_{job_key}"
     assert (pending / "step1.png").exists()  # progress persisted for resume
     step1_calls = len(model.generate_calls)
 
