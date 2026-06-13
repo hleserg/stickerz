@@ -265,6 +265,8 @@ class GeminiImageModel(ImageModel):
                     )
                     return response.text or ""
                 except Exception as exc:  # retry, then fail over to the next model
+                    if _is_billing(exc):  # out of credits: 6 retries can't help
+                        raise ModelQuotaError("Gemini vision out of credits/quota") from exc
                     last = exc
                     final_attempt = attempt == _VISION_ATTEMPTS_PER_MODEL - 1
                     logger.warning(

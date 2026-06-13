@@ -11,6 +11,7 @@ Identity key is the durable Telegram ``user_id``.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -83,7 +84,10 @@ class WhitelistMiddleware(BaseMiddleware):
                     "maintenance_notice",
                     "🛠 Бот сейчас в разработке — скоро мы всё покажем! Загляни чуть позже.",
                 )
-                await answer(notice)
+                # This is the OUTERMOST gate — a failed soft-notice (stale
+                # message, bot blocked) must not escape and crash the update.
+                with contextlib.suppress(Exception):
+                    await answer(notice)
             return None
 
         # Temporary ban (auto-moderation) applies in any non-debug mode.
