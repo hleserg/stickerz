@@ -2321,13 +2321,13 @@ async def on_pick_pack(  # pragma: no cover
     # Refuse a full pack up front, so the user never builds captions for a set
     # that can't take any more stickers (the 120-limit is enforced again, for
     # free, at generation time if they pick more than the remaining room).
-    room = remaining_capacity(await db.count_stickers(pack_id))
+    # Fullness follows the LIVE Telegram count: the owner prunes sets by hand.
+    room = remaining_capacity(await orchestrator.pack_live_count(target)) if target else 0
     if room == 0:
         msg = callback.message if isinstance(callback.message, Message) else None
         await callback.answer()
         if msg is not None:
-            pack = await db.get_pack(pack_id)
-            title = pack.title if pack else "этот"
+            title = target.title if target else "этот"
             await msg.answer(f"Пак «{title}» уже заполнен (120/120). Создай новый пак: /new")
         return
     await _enter_captions(callback, state, db, orchestrator, mode="extend", pack_id=pack_id)

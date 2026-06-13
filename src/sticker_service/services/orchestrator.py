@@ -373,7 +373,7 @@ class Orchestrator:
             # Capacity pre-check BEFORE generating (and before the caller charges):
             # an extend that can't fit the 120-sticker limit must fail for free,
             # not after a paid generation that publish_extend would then reject.
-            current = await self._db.count_stickers(pack.id)
+            current = await self.pack_live_count(pack)
             if len(captions) + current > MAX_STICKERS_PER_SET:
                 raise capacity_error(pack.title, current)
             character = await self._db.get_character(pack.character_id)
@@ -498,6 +498,20 @@ class Orchestrator:
         return await asyncio.to_thread(
             lambda: [(Path(s.file_path).read_bytes(), s.emoji) for s in rows]
         )
+
+    async def pack_live_count(self, pack: Pack) -> int:
+        """The pack's REAL size: Telegram's count when reachable, else our rows.
+
+        The owner deletes (and may add) stickers by hand via @Stickers, so
+        every capacity decision must follow the live set, not the DB
+        (owner's rule, 13.06: «Серг» holds 84 live vs more in rows). The DB
+        count stays the fallback when Telegram can't answer right now.
+        """
+        with contextlib.suppress(Exception):
+            live = await self._publisher.live_count(pack.set_name)
+            if live is not None:
+                return live
+        return await self._db.count_stickers(pack.id)
 
     # --- uploads: ready-made stickers in, packs out (owner's spec, 13.06) ----
 
@@ -766,6 +780,9 @@ class Orchestrator:
             set_name=pack.set_name,
             stickers=list(stickers)[skip:],
             current_count=start,
+            # Capacity follows the LIVE set when Telegram answered: the owner
+            # prunes packs by hand, and stale DB rows must not fake fullness.
+            capacity_count=live if live is not None else None,
             on_added=_on_added,
         )
         await asyncio.to_thread(lambda: marker.unlink(missing_ok=True))
