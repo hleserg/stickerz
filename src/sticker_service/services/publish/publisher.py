@@ -186,17 +186,22 @@ class Publisher:
         set_name: str,
         stickers: Sequence[StickerInput],
         current_count: int,
+        capacity_count: int | None = None,
         on_added: AddedCallback | None = None,
     ) -> None:
         """Append stickers to an existing set, respecting the 120 limit.
 
-        ``on_added`` (if given) is awaited after each sticker actually lands,
-        so the caller can persist progress — a crash mid-batch then leaves the
-        DB at most one sticker behind the Telegram set, and the orchestrator's
-        resume marker can retry the same batch without duplicates.
+        ``current_count`` numbers the new stickers (``on_added`` positions);
+        ``capacity_count`` — when the caller knows the LIVE Telegram size —
+        is what the 120-limit is checked against, so hand-pruned sets are not
+        faked full by stale DB rows. ``on_added`` (if given) is awaited after
+        each sticker actually lands, so the caller can persist progress — a
+        crash mid-batch then leaves the DB at most one sticker behind, and
+        the orchestrator's resume marker can retry without duplicates.
         """
-        if current_count + len(stickers) > MAX_STICKERS_PER_SET:
-            raise capacity_error(set_name, current_count)
+        in_set = capacity_count if capacity_count is not None else current_count
+        if in_set + len(stickers) > MAX_STICKERS_PER_SET:
+            raise capacity_error(set_name, in_set)
         for i, (image, emoji) in enumerate(stickers, start=current_count):
             try:
                 await _flood_wait(

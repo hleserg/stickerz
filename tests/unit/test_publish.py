@@ -304,6 +304,37 @@ async def test_add_to_pack_enforces_limit() -> None:
         )
 
 
+async def test_add_to_pack_capacity_follows_live_count() -> None:
+    # The owner prunes sets by hand (live 84 vs 120+ DB rows): the limit is
+    # checked against the LIVE count when given, while positions keep
+    # numbering from the DB rows.
+    bot = _FakeBot()
+    pub = Publisher(bot, "yourbot")
+    landed: list[int] = []
+
+    async def on_added(position: int, _sticker: tuple[bytes, str]) -> None:
+        landed.append(position)
+
+    await pub.add_to_pack(
+        user_id=1,
+        set_name="s_by_yourbot",
+        stickers=[(b"a", "🙂")],
+        current_count=MAX_STICKERS_PER_SET,  # stale rows would say "full"
+        capacity_count=84,  # ...but Telegram says there is room
+        on_added=on_added,
+    )
+    assert len(bot.added) == 1
+    assert landed == [MAX_STICKERS_PER_SET]  # positions still follow the rows
+    with pytest.raises(PackFullError):  # and a really full live set still refuses
+        await pub.add_to_pack(
+            user_id=1,
+            set_name="s_by_yourbot",
+            stickers=[(b"a", "🙂")],
+            current_count=10,
+            capacity_count=MAX_STICKERS_PER_SET,
+        )
+
+
 def test_remaining_capacity() -> None:
     assert remaining_capacity(0) == MAX_STICKERS_PER_SET
     assert remaining_capacity(MAX_STICKERS_PER_SET - 10) == 10

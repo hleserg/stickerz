@@ -291,6 +291,29 @@ async def test_cmd_upload_reentry_drops_previous_scratch(db: Database, tmp_path:
     assert await orch.load_scratch(scratch) == []  # dropped on re-entry
 
 
+async def test_pack_live_count_prefers_telegram(db: Database, tmp_path: object) -> None:
+    # Capacity decisions follow the live set (the owner prunes by hand);
+    # the DB rows are only the fallback when Telegram can't answer.
+    class _LiveBot(_FakeBot):
+        async def get_sticker_set(self, *, name: str) -> object:
+            return SimpleNamespace(stickers=[object()] * 84)
+
+    orch_live = Orchestrator(
+        model=MockImageModel(emoji="🔥"),
+        db=db,
+        publisher=Publisher(_LiveBot(), "yourbot"),
+        loader=StyleLoader(get_settings().styles_dir),
+        storage_dir=tmp_path,  # type: ignore[arg-type]
+    )
+    scratch, _ = await orch_live.prepare_upload(owner_id=3, images=[_png()])
+    await orch_live.publish_upload_new(owner_id=3, title="Серг", scratch_path=scratch)
+    pack = (await db.list_packs(3))[0]
+    assert await orch_live.pack_live_count(pack) == 84  # live wins over 1 DB row
+
+    orch_blind = _orchestrator(db, tmp_path)  # _FakeBot has no get_sticker_set
+    assert await orch_blind.pack_live_count(pack) == 1  # falls back to rows
+
+
 async def test_extend_wizard_refuses_uploaded_packs(db: Database, tmp_path: object) -> None:
     # /addto into an upload-backed pack would walk the whole caption wizard
     # and die at create time on the synthetic style — refuse at the door.
