@@ -47,6 +47,20 @@ def test_sticker_set_link() -> None:
     assert sticker_set_link("foo_by_bot") == "https://t.me/addstickers/foo_by_bot"
 
 
+def test_next_part_title_starts_and_increments_parts() -> None:
+    from sticker_service.services.publish import next_part_title
+
+    assert next_part_title("Котя") == "Котя часть 2"
+    assert next_part_title("Котя часть 2") == "Котя часть 3"
+    assert next_part_title("котя ЧАСТЬ 9") == "котя часть 10"
+    # «часть» glued into a word is not a part marker.
+    assert next_part_title("Участь") == "Участь часть 2"
+    # The result always fits Telegram's 64-char title cap.
+    long = "Очень длинное название пака про кота которое почти упирается в лимит"
+    sequel = next_part_title(long)
+    assert len(sequel) <= 64 and sequel.endswith(" часть 2")
+
+
 # --- publisher ---------------------------------------------------------------
 
 

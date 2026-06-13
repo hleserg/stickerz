@@ -57,6 +57,29 @@ def build_set_name(
     return name
 
 
+# Telegram caps a set's TITLE at 64 chars.
+_TITLE_MAX = 64
+_PART_RE = re.compile(r"^(?P<base>.*\S)\s+часть\s+(?P<n>\d+)\s*$", re.IGNORECASE)
+
+
+def next_part_title(title: str) -> str:
+    """The continuation title for a FULL pack: «Котя» → «Котя часть 2» → «часть 3»…
+
+    Owner's rule (13.06): when a set hits Telegram's 120-sticker cap, the new
+    pack continues the name. A title already ending in «часть N» increments N
+    (the base before it is preserved); anything else gets « часть 2». The
+    result always fits Telegram's 64-char title cap — the base is trimmed,
+    never the part number.
+    """
+    match = _PART_RE.match(title.strip())
+    if match:
+        base, part = match.group("base"), int(match.group("n")) + 1
+    else:
+        base, part = title.strip(), 2
+    tail = f" часть {part}"
+    return base[: _TITLE_MAX - len(tail)].rstrip() + tail
+
+
 def sticker_set_link(set_name: str) -> str:
     """Public add link for a published set."""
     return f"https://t.me/addstickers/{set_name}"

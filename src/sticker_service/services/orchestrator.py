@@ -383,7 +383,9 @@ class Orchestrator:
             if character_id is None:
                 raise OrchestratorError("reuse mode needs a character_id")
             character = await self._db.get_character(character_id)
-            title = character.name if character else ""
+            # An explicit name wins (pack continuations: «Котя часть 2»);
+            # otherwise the pack inherits the character's name as before.
+            title = name or (character.name if character else "")
             pack_id = None
         else:  # fresh — build the canonical now
             if photo is None or style_id is None or subject_type is None:
