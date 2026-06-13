@@ -149,9 +149,19 @@ def test_sheet_prompt_turns_standard_reactions_into_drawn_ideas() -> None:
 def test_sheet_prompt_stays_lean() -> None:
     # The brief must not creep back into a micromanaging wall of text: the
     # scaffold around the ideas list stays under a hard budget. Raised from
-    # 1400 on 2026-06-12 for the owner-approved «Правила надписей» block.
+    # 1400 on 2026-06-12 for the owner-approved «Правила надписей» block and
+    # again on 2026-06-13 for the owner-ordered no-quotes/merged-outline rules.
     prompt = build_sheet_prompt(_style(), ["Привет!"], age_clause="")
-    assert len(prompt) < 1900
+    assert len(prompt) < 2250
+
+
+def test_sheet_prompt_bans_drawn_quotes_and_merges_caption_outline() -> None:
+    # Owner's order (13.06, live «Серг» sheet lettered «» around every caption):
+    # the quote MARKS are never drawn, and the caption's die-cut outline must
+    # merge with the figure's outline instead of floating as an island.
+    prompt = build_sheet_prompt(_style(), ['"Спасибо!"'], age_clause="")
+    assert "НИКОГДА не рисуются" in prompt
+    assert "сливаются с обводкой рисунка" in prompt
 
 
 def test_sheet_prompt_carries_owner_caption_rules() -> None:
