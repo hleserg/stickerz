@@ -112,6 +112,16 @@ async def test_refund_confirm_returns_charge_and_apologizes(db: Database) -> Non
     cb.message.edit_reply_markup.assert_awaited_with(reply_markup=None)  # card disarmed
 
 
+async def test_refund_credits_writes_marker_and_credit_together(db: Database) -> None:
+    # The repository primitive must do both in one call — the handler relies on
+    # the marker and the credit being inseparable.
+    await db.consume_credits(TESTER, 2)
+    left = await db.refund_credits(TESTER, 2, analytics.CREDITS_REFUNDED, {"credits": 2})
+    assert left == DEFAULT_CREDITS  # credited
+    refunds = await db.events_for(TESTER, analytics.CREDITS_REFUNDED, limit=1)
+    assert refunds and refunds[0][1]["credits"] == 2  # marker recorded
+
+
 async def test_refund_confirm_is_idempotent(db: Database) -> None:
     # A double-tap / stale card / repeat 🐞 report must never refund twice:
     # the refund marker settles the charge, so every later press refuses.
