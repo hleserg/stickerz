@@ -152,6 +152,11 @@ async def test_revive_orphaned_generations(storage: SqliteStorage) -> None:
     from sticker_service.handlers.flow import NewPack, revive_orphaned_generations
 
     await storage.set_state(_key(7), NewPack.publish.state)
+    await storage.set_data(_key(7), {"generating": True})  # interrupted mid-model-call
+    # User 9 reached the PREVIEW (generating cleared): same FSM state, but the
+    # buttons under their preview work — revival must leave them alone.
+    await storage.set_state(_key(9), NewPack.publish.state)
+    await storage.set_data(_key(9), {"generating": False})
 
     sent: list[tuple[int, str]] = []
 
@@ -162,8 +167,10 @@ async def test_revive_orphaned_generations(storage: SqliteStorage) -> None:
     revived = await revive_orphaned_generations(_Bot(), storage)
     assert revived == 1
     assert await storage.get_state(_key(7)) == NewPack.review.state  # un-stuck
+    assert await storage.get_state(_key(9)) == NewPack.publish.state  # untouched preview
     chats = [c for c, _ in sent]
     assert 7 in chats  # the user got the resume offer
+    assert 9 not in chats
     owner = get_settings().first_admin_id
     if owner is not None:  # the owner is informed about the orphan
         assert owner in chats
