@@ -611,6 +611,44 @@ def process_sheet(
     )[0]
 
 
+def slice_uploaded_sheet(
+    sheet: bytes, *, min_area: int = 256, max_pieces: int = 120
+) -> list[bytes]:
+    """Slice a USER-UPLOADED sheet into stickers; ``[]`` when honesty fails.
+
+    Unlike the generation pipeline there is no chroma/grid contract: the
+    picture may sit on any solid background or already carry transparency.
+    Mirrors the auto-key rung of :func:`process_sheet_checked` — dominant
+    border color, outer-only flood, ≥80% of the border must clear (a busy
+    or gradient background returns ``[]`` instead of blind cuts), a whitish
+    background gets the die-cut ring back, stray fragments are dropped.
+    A crafted picture that explodes into more than ``max_pieces`` components
+    is refused outright — every piece later costs a paid vision call.
+    """
+    image = Image.open(BytesIO(sheet))
+    if max(image.size) > 4096:  # uploads never need 4K+; bound RAM on the VDS
+        image.thumbnail((4096, 4096))
+    arr = np.asarray(image.convert("RGBA"))
+    border_alpha = np.concatenate([arr[0, :, 3], arr[-1, :, 3], arr[:, 0, 3], arr[:, -1, 3]])
+    need_ring = False
+    if (border_alpha < 16).mean() >= 0.8:  # transparent margins: nothing to key
+        keyed = image.convert("RGBA")
+    else:
+        dominant = _dominant_border_color(arr)
+        keyed = outer_flood_key(image, dominant)
+        if _border_clear_frac(keyed) < 0.8:
+            return []
+        need_ring = _is_whitish(dominant)
+    pieces = drop_text_strips(slice_sheet(keyed, min_area=min_area))
+    if len(pieces) > max_pieces:
+        return []
+    if need_ring and pieces:
+        width = estimate_outline_width(pieces)
+        pieces = [add_outline(piece, width) for piece in pieces]
+    pieces = drop_outlier_fragments(pieces, expected=None)
+    return [encode_sticker(fit_to_512(piece)) for piece in pieces]
+
+
 def process_sheet_checked(
     sheet: bytes | Image.Image,
     *,

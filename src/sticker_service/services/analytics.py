@@ -27,6 +27,8 @@ SCENE_OBSERVER = "scene_observer"
 # Logged at the moment credits are actually spent, so a refund can verify a
 # charge really happened instead of gifting credits on top.
 CREDITS_CHARGED = "credits_charged"
+# A ready-made upload published as/into a set (mode: new | extend).
+UPLOAD_PUBLISHED = "upload_published"
 # Logged when the owner refunds a charge; a charge older than the latest
 # refund is considered settled and can never be refunded again.
 CREDITS_REFUNDED = "credits_refunded"
