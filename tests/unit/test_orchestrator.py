@@ -921,6 +921,72 @@ async def test_caption_gate_rejects_and_dumps_evidence(
     assert await db.count_events(analytics.CAPTION_GATE) == 1
 
 
+async def test_caption_gate_accepts_semantic_substitution(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    # Owner's rule (13.06): «слежу за тобой» drawn as «Я всё вижу» is a
+    # replacement in spirit, not a defect — one extra vision call confirms it,
+    # the sheet ships, and the gate logs «substituted» instead of rejecting.
+    from sticker_service.services import analytics
+
+    class _Substituting(_SheetModel):
+        async def ask(self, image: bytes, question: str) -> str:
+            if question.startswith("Перечисли"):
+                return "Я всё вижу\nПока!"
+            return "ДА"  # the substitution question
+
+    orch = Orchestrator(
+        model=_Substituting(),
+        db=db,
+        publisher=Publisher(_FakeBot(), "yourbot"),
+        loader=loader,
+        storage_dir=tmp_path,
+    )
+    char = await orch.save_character(
+        owner_id=5,
+        name="Тест",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(1),
+    )
+    assert await orch.build_stickers(char, captions=['"слежу за тобой"', "Пока!"])
+    rows = await db.events_for(5, analytics.CAPTION_GATE, limit=2)
+    assert any(d.get("reason") == "substituted" for _, d in rows)
+
+
+async def test_caption_gate_substitution_never_excuses_duplicates(
+    db: Database, loader: StyleLoader, tmp_path: Path
+) -> None:
+    # A duplicated caption is fatal even when the model would bless the swap:
+    # the softening branch must not even be consulted.
+    from sticker_service.services.models.errors import TransientPipelineError
+
+    class _DupAndBless(_SheetModel):
+        async def ask(self, image: bytes, question: str) -> str:
+            if question.startswith("Перечисли"):
+                return "Привет!\nПривет!\nЯ всё вижу"
+            return "ДА"
+
+    orch = Orchestrator(
+        model=_DupAndBless(),
+        db=db,
+        publisher=Publisher(_FakeBot(), "yourbot"),
+        loader=loader,
+        storage_dir=tmp_path,
+    )
+    char = await orch.save_character(
+        owner_id=5,
+        name="Тест",
+        style_id="watercolor",
+        subject_type="adult",
+        child_age=None,
+        canonical=_sheet_bytes(1),
+    )
+    with pytest.raises(TransientPipelineError):
+        await orch.build_stickers(char, captions=["Привет!", '"слежу за тобой"'])
+
+
 async def test_caption_gate_fails_open_without_vision_answer(
     db: Database, loader: StyleLoader, tmp_path: Path
 ) -> None:

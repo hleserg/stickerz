@@ -144,6 +144,35 @@ def judge_captions(drawn: Sequence[str], expected: Sequence[str]) -> CaptionVerd
     )
 
 
+_SUBSTITUTION_QUESTION = (
+    "Заказ просил надписи: {missing}. Их на листе нет, зато нарисованы: {extra}. "
+    "Каждая ли заказанная надпись осмысленно заменена одной из нарисованных "
+    "(то же настроение и смысл)? Ответь ровно: ДА или НЕТ"
+)
+
+
+async def captions_substituted(
+    model: ImageModel, sheet: bytes, missing: Sequence[str], extra: Sequence[str]
+) -> bool:
+    """True when vision confirms every missing caption was replaced in spirit.
+
+    Owner's rule (13.06, live: «слежу за тобой» drawn as «Я всё вижу»): a
+    close-in-meaning replacement is not a defect worth a paid regeneration.
+    Fails CLOSED (False) on model trouble — an unverified substitution keeps
+    the normal rejection path; this check can only SOFTEN the gate knowingly.
+    """
+    question = _SUBSTITUTION_QUESTION.format(
+        missing=", ".join(f"«{t}»" for t in missing),
+        extra=", ".join(f"«{t}»" for t in extra),
+    )
+    try:
+        answer = (await model.ask(sheet, question) or "").strip().casefold()
+    except Exception:
+        logger.warning("substitution check failed; keeping the rejection", exc_info=True)
+        return False
+    return answer.startswith(("да", "yes"))
+
+
 _SCENE_OK = ("ок", "ok", "нет")
 
 

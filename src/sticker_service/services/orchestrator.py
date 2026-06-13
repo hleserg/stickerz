@@ -54,6 +54,7 @@ from sticker_service.services.stickers import (
     generate_sheet,
 )
 from sticker_service.services.stickers.caption_check import (
+    captions_substituted,
     expected_captions,
     judge_captions,
     read_sheet_texts,
@@ -936,6 +937,29 @@ class Orchestrator:
         )
         if verdict.ok:  # extras alone are reported, not fatal (OCR noise vs. paid retry)
             logger.warning("caption gate: extra texts for owner=%s: %s", owner_id, verdict.reason)
+            return
+        # Owner's rule (13.06): a missing caption REPLACED in spirit by one of
+        # the extra texts («слежу за тобой» → «Я всё вижу») is not a defect.
+        # One extra vision call, only on a would-be rejection; duplicates stay
+        # fatal, and an unconfirmed substitution keeps the rejection.
+        if (
+            verdict.missing
+            and not verdict.duplicated
+            and len(verdict.extra) >= len(verdict.missing)
+            and await captions_substituted(self._model, sheet, verdict.missing, verdict.extra)
+        ):
+            logger.warning(
+                "caption gate: substitution accepted for owner=%s: %s", owner_id, verdict.reason
+            )
+            await analytics.log(
+                self._db, owner_id, analytics.CAPTION_GATE, ok=True, reason="substituted"
+            )
+            if self._owner_notify is not None:
+                with contextlib.suppress(Exception):
+                    await self._owner_notify(
+                        f"✏️ Замена по смыслу у id={owner_id} (лист пропущен): {verdict.reason}",
+                        None,
+                    )
             return
         logger.warning("sheet captions unusable for owner=%s: %s", owner_id, verdict.reason)
         rejected = await self._dump_rejected(owner_id, page_no, sheet)
