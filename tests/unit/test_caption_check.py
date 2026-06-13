@@ -91,6 +91,24 @@ def test_judge_short_caption_still_required_exactly() -> None:
     assert verdict.missing == ("Ок!",)
 
 
+async def test_captions_substituted_verdicts_and_fails_closed() -> None:
+    from sticker_service.services.stickers.caption_check import captions_substituted
+
+    assert await captions_substituted(
+        MockImageModel(ask_answer="ДА"), b"PNG", ["слежу за тобой"], ["Я всё вижу"]
+    )
+    assert not await captions_substituted(
+        MockImageModel(ask_answer="НЕТ"), b"PNG", ["слежу за тобой"], ["Я всё вижу"]
+    )
+
+    class _Boom(MockImageModel):
+        async def ask(self, image: bytes, question: str) -> str:
+            raise RuntimeError("vision down")
+
+    # Fails CLOSED: an unverified substitution must keep the rejection.
+    assert not await captions_substituted(_Boom(), b"PNG", ["а"], ["б"])
+
+
 async def test_read_sheet_texts_parses_lines_and_sentinel() -> None:
     model = MockImageModel(ask_answer="- Привет!\n• Пока!\n")
     assert await read_sheet_texts(model, b"PNG") == ["Привет!", "Пока!"]
