@@ -48,7 +48,7 @@ from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.models import errors as model_errors
 from sticker_service.services.models.base import notice_sink
 from sticker_service.services.moderation import caption_rejection_reason
-from sticker_service.services.orchestrator import Orchestrator
+from sticker_service.services.orchestrator import UPLOADED_STYLE_ID, Orchestrator
 from sticker_service.services.postprocess import bundle_zip, compose_preview
 from sticker_service.services.publish import PackFullError, remaining_capacity
 from sticker_service.services.publish.publisher import StickerInput
@@ -1871,6 +1871,15 @@ def _char_actions_kb(char_id: int) -> Any:
     return kb.as_markup()
 
 
+async def _drawable_characters(db: Database, user_id: int) -> list[Any]:
+    """Characters with a real drawn canonical — synthetic upload backers hidden.
+
+    A pack made via /upload is backed by a character row only because the
+    schema requires one; there is nothing to redraw or re-generate from it.
+    """
+    return [c for c in await db.list_characters(user_id) if c.style_id != UPLOADED_STYLE_ID]
+
+
 async def cmd_mychars(message: Message, db: Database) -> None:
     """List saved characters; selecting one starts a new pack about them (§3.2)."""
     tag_component("handlers.flow")
@@ -1878,7 +1887,7 @@ async def cmd_mychars(message: Message, db: Database) -> None:
     if (hint := await _alpha_gate(db, user_id)) is not None:
         await message.answer(hint)
         return
-    characters = await db.list_characters(user_id)
+    characters = await _drawable_characters(db, user_id)
     if not characters:
         await message.answer("Пока нет сохранённых персонажей. Создай пак: /new")
         return
@@ -1896,7 +1905,7 @@ async def on_nav_chars(callback: CallbackQuery, db: Database) -> None:  # pragma
     if msg is None:
         return
     user_id = callback.from_user.id if callback.from_user else 0
-    characters = await db.list_characters(user_id)
+    characters = await _drawable_characters(db, user_id)
     if not characters:
         with contextlib.suppress(TelegramBadRequest):
             await msg.edit_text("Пока нет сохранённых персонажей. Создай пак: /new")
@@ -2298,6 +2307,17 @@ async def on_pick_pack(  # pragma: no cover
     """Extend an existing pack → caption selection → create → append."""
     tag_component("handlers.flow")
     pack_id = int((callback.data or "extend:0").split(":", 1)[-1])
+    # An uploaded pack has no drawn character — a generation-extend would walk
+    # the whole wizard and die on the synthetic style at create time.
+    target = await db.get_pack(pack_id)
+    character = await db.get_character(target.character_id) if target else None
+    if character is not None and character.style_id == UPLOADED_STYLE_ID:
+        await callback.answer()
+        if isinstance(callback.message, Message):
+            await callback.message.answer(
+                "Этот пак собран из загруженных стикеров — дополнить его можно через /upload 🙂"
+            )
+        return
     # Refuse a full pack up front, so the user never builds captions for a set
     # that can't take any more stickers (the 120-limit is enforced again, for
     # free, at generation time if they pick more than the remaining room).

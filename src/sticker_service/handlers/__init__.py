@@ -6,7 +6,7 @@ from aiogram import Dispatcher
 from aiogram.fsm.storage.base import BaseStorage
 
 from sticker_service.db import Database
-from sticker_service.handlers import admin, apply, flow, report, start
+from sticker_service.handlers import admin, apply, flow, report, start, upload
 from sticker_service.handlers.errors import on_error
 from sticker_service.handlers.middleware import SentryScopeMiddleware, WhitelistMiddleware
 from sticker_service.services.canonical.loader import StyleLoader
@@ -44,6 +44,7 @@ def build_dispatcher(
         dp["orchestrator"] = orchestrator
         if loader is not None:
             dp["loader"] = loader
+        dp.include_router(upload.build_router())
         dp.include_router(flow.build_router())
     dp.include_router(start.build_router())
     return dp

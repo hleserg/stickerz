@@ -23,6 +23,7 @@ from sticker_service.services.postprocess.slice_stickers import (
     process_sheet_checked,
     sheet_quality,
     slice_sheet,
+    slice_uploaded_sheet,
     split_merged,
 )
 from sticker_service.services.postprocess.watermark import DEFAULT_TEXT, apply_watermark
@@ -54,6 +55,7 @@ __all__ = [
     "process_sheet_checked",
     "sheet_quality",
     "slice_sheet",
+    "slice_uploaded_sheet",
     "split_merged",
     "to_whatsapp",
     "to_whatsapp_pack",

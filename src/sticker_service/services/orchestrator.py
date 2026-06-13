@@ -32,7 +32,12 @@ from sticker_service.services.canonical.loader import StyleLoader
 from sticker_service.services.canonical.schema import Style
 from sticker_service.services.models.base import ImageModel
 from sticker_service.services.models.errors import TransientPipelineError
-from sticker_service.services.postprocess import apply_watermark, grid_for, process_sheet_checked
+from sticker_service.services.postprocess import (
+    apply_watermark,
+    grid_for,
+    process_sheet_checked,
+    slice_uploaded_sheet,
+)
 from sticker_service.services.publish import (
     MAX_STICKERS_PER_SET,
     Publisher,
@@ -41,6 +46,7 @@ from sticker_service.services.publish import (
 from sticker_service.services.publish.naming import build_set_name
 from sticker_service.services.publish.publisher import StickerInput
 from sticker_service.services.stickers import (
+    DEFAULT_EMOJI,
     MAX_CAPTIONS,
     PER_PAGE,
     assign_emojis,
@@ -53,6 +59,7 @@ from sticker_service.services.stickers.caption_check import (
     read_sheet_texts,
     review_scenes,
 )
+from sticker_service.services.stickers.upload import looks_like_sticker_sheet
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +71,11 @@ StepCallback = Callable[[int, int], Awaitable[None]]
 
 class OrchestratorError(RuntimeError):
     """A pipeline stage could not complete."""
+
+
+# Synthetic style id for characters backing UPLOADED packs (no generation ran).
+# Character/redraw screens filter it out — there is nothing to redraw.
+UPLOADED_STYLE_ID = "uploaded"
 
 
 def _batch_digest(stickers: list[StickerInput]) -> str:
@@ -486,6 +498,83 @@ class Orchestrator:
         return await asyncio.to_thread(
             lambda: [(Path(s.file_path).read_bytes(), s.emoji) for s in rows]
         )
+
+    # --- uploads: ready-made stickers in, packs out (owner's spec, 13.06) ----
+
+    async def upload_sheet_stickers(self, image: bytes) -> list[bytes] | None:
+        """Slice an uploaded sheet picture; ``None`` = vision says not a sheet.
+
+        ``[]`` means the slicer's honesty criterion refused the background.
+        Vision failing open defers entirely to the slicer.
+        """
+        verdict = await looks_like_sticker_sheet(self._model, image)
+        if verdict is False:
+            return None
+        return await asyncio.to_thread(slice_uploaded_sheet, image)
+
+    async def prepare_upload(
+        self, *, owner_id: int, images: list[bytes]
+    ) -> tuple[str, list[StickerInput]]:
+        """Park uploaded stickers in scratch until publish (default emojis).
+
+        Vision emoji picking is deliberately deferred to publish time: the
+        ingest step can be retried for free any number of times, and paid
+        per-sticker calls must run once, after the user committed.
+        """
+        stickers: list[StickerInput] = [(image, DEFAULT_EMOJI) for image in images]
+        scratch = await self.save_scratch(owner_id=owner_id, stickers=stickers)
+        return scratch, stickers
+
+    async def emojify_upload(self, stickers: list[StickerInput]) -> list[StickerInput]:
+        """Replace the placeholder emojis with vision-picked ones (publish time)."""
+        emojis = await assign_emojis(self._model, [image for image, _ in stickers])
+        return [(image, emoji) for (image, _), emoji in zip(stickers, emojis, strict=True)]
+
+    # createNewStickerSet accepts at most this many initial stickers; the rest
+    # of an upload is appended with addStickerToSet right after.
+    _CREATE_BATCH_MAX = 50
+
+    async def publish_upload_new(
+        self, *, owner_id: int, title: str, scratch_path: str
+    ) -> PackResult:
+        """Publish uploaded scratch stickers as a brand-new set.
+
+        Packs require a character row; an upload has no drawn character, so
+        one synthetic character per user (style ``uploaded``) backs every
+        uploaded pack — character screens filter the synthetic style out, and
+        reuse keeps failed publish retries from piling up orphan rows.
+        """
+        stickers = await self.load_scratch(scratch_path)
+        if not stickers:
+            raise OrchestratorError("загруженные стикеры устарели — пришли их ещё раз")
+        stickers = await self.emojify_upload(stickers)
+        characters = await self._db.list_characters(owner_id)
+        character = next((c for c in characters if c.style_id == UPLOADED_STYLE_ID), None)
+        if character is None:
+            character = await self.save_character(
+                owner_id=owner_id,
+                name=title,
+                style_id=UPLOADED_STYLE_ID,
+                subject_type="adult",
+                child_age=None,
+                canonical=stickers[0][0],
+            )
+        pack = await self.save_draft(
+            owner_id=owner_id, character=character, title=title, stickers=stickers
+        )
+        first = stickers[: self._CREATE_BATCH_MAX]
+        result = await self.publish_draft(owner_id=owner_id, pack=pack, stickers=first)
+        if rest := stickers[self._CREATE_BATCH_MAX :]:
+            # Rows are already persisted by save_draft; only Telegram lags.
+            await self._publisher.add_to_pack(
+                user_id=owner_id,
+                set_name=result.set_name,
+                stickers=rest,
+                current_count=len(first),
+            )
+            result = PackResult(result.set_name, result.link, len(stickers))
+        await self.drop_scratch(scratch_path)
+        return result
 
     # --- scratch: review-stage bytes for extend (no draft pack to hold them) --
 
