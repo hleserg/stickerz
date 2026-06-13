@@ -378,16 +378,21 @@ async def on_pick(  # pragma: no cover - thin I/O over tested orchestrator path
         if pack is None or pack.owner_id != user_id or not pack.published:
             await msg.answer(_TXT_NO_PACKS)
             return
-        data = await state.get_data()
-        stickers = await orchestrator.load_scratch(str(data.get("scratch_path") or ""))
-        if not stickers:
-            await state.clear()
-            await msg.answer("Загруженные стикеры устарели — пришли их ещё раз: /upload")
-            return
+        scratch = str((await state.get_data()).get("scratch_path") or "")
         await _disarm(callback)
         status = await msg.answer("🎭 Подбираю каждому стикеру эмодзи…")
         try:
-            stickers = await orchestrator.emojify_upload(stickers)
+            # emojify_scratch picks emojis once and persists them back, so a
+            # retry reuses the SAME (bytes, emoji) batch — the publish_extend
+            # resume digest stays stable and nothing re-adds on a retry.
+            stickers = await orchestrator.emojify_scratch(scratch)
+            if not stickers:
+                await state.clear()
+                with contextlib.suppress(TelegramBadRequest):
+                    await status.edit_text(
+                        "Загруженные стикеры устарели — пришли их ещё раз: /upload"
+                    )
+                return
             result = await orchestrator.publish_extend(
                 owner_id=user_id, pack=pack, stickers=stickers
             )
@@ -413,7 +418,7 @@ async def on_pick(  # pragma: no cover - thin I/O over tested orchestrator path
                 await status.edit_text(_friendly_error(exc))
             return
         with contextlib.suppress(Exception):
-            await orchestrator.drop_scratch(str(data.get("scratch_path") or ""))
+            await orchestrator.drop_scratch(scratch)
         await state.clear()
         await analytics.log(
             db, user_id, analytics.UPLOAD_PUBLISHED, mode="extend", count=result.count

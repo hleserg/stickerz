@@ -601,51 +601,87 @@ class Orchestrator:
         emojis = await assign_emojis(self._model, [image for image, _ in stickers])
         return [(image, emoji) for (image, _), emoji in zip(stickers, emojis, strict=True)]
 
+    async def emojify_scratch(self, scratch_path: str) -> list[StickerInput]:
+        """Load scratch stickers, picking emojis ONCE and persisting them.
+
+        The first publish attempt pays the per-sticker vision calls and writes
+        the emojis back into the scratch dir; every retry reuses them — so the
+        batch digest (the resume identity) stays stable and nothing is paid
+        twice. ``[]`` when the scratch expired.
+        """
+        stickers = await self.load_scratch(scratch_path)
+        if not stickers:
+            return []
+        if all(emoji == DEFAULT_EMOJI for _, emoji in stickers):
+            stickers = await self.emojify_upload(stickers)
+            base = self._resolve_scratch(scratch_path)
+            if base is not None:
+                emojis = json.dumps([emoji for _, emoji in stickers], ensure_ascii=False)
+                await asyncio.to_thread((base / "emojis.json").write_text, emojis)
+        return stickers
+
     # createNewStickerSet accepts at most this many initial stickers; the rest
     # of an upload is appended with addStickerToSet right after.
     _CREATE_BATCH_MAX = 50
 
+    def _upload_marker(self, owner_id: int, scratch_path: str) -> Path:
+        digest = hashlib.sha256(scratch_path.encode()).hexdigest()[:12]
+        return self._storage / "upload_pending" / f"{owner_id}_{digest}.json"
+
     async def publish_upload_new(
         self, *, owner_id: int, title: str, scratch_path: str
     ) -> PackResult:
-        """Publish uploaded scratch stickers as a brand-new set.
+        """Publish uploaded scratch stickers as a brand-new set — resumably.
 
         Packs require a character row; an upload has no drawn character, so
         one synthetic character per user (style ``uploaded``) backs every
-        uploaded pack — character screens filter the synthetic style out, and
-        reuse keeps failed publish retries from piling up orphan rows.
+        uploaded pack. A pending marker (keyed by the scratch dir) records the
+        created pack, so retrying after a partial failure CONTINUES the same
+        Telegram set from its live count instead of minting a duplicate.
         """
-        stickers = await self.load_scratch(scratch_path)
+        stickers = await self.emojify_scratch(scratch_path)
         if not stickers:
             raise OrchestratorError("загруженные стикеры устарели — пришли их ещё раз")
-        stickers = await self.emojify_upload(stickers)
-        characters = await self._db.list_characters(owner_id)
-        character = next((c for c in characters if c.style_id == UPLOADED_STYLE_ID), None)
-        if character is None:
-            character = await self.save_character(
-                owner_id=owner_id,
-                name=title,
-                style_id=UPLOADED_STYLE_ID,
-                subject_type="adult",
-                child_age=None,
-                canonical=stickers[0][0],
+        marker = self._upload_marker(owner_id, scratch_path)
+        prev = await asyncio.to_thread(_read_json, marker) or {}
+        pack = None
+        prev_pack_id = prev.get("pack_id")
+        if isinstance(prev_pack_id, int):
+            pack = await self._db.get_pack(prev_pack_id)
+        if pack is None:
+            characters = await self._db.list_characters(owner_id)
+            character = next((c for c in characters if c.style_id == UPLOADED_STYLE_ID), None)
+            if character is None:
+                character = await self.save_character(
+                    owner_id=owner_id,
+                    name=title,
+                    style_id=UPLOADED_STYLE_ID,
+                    subject_type="adult",
+                    child_age=None,
+                    canonical=stickers[0][0],
+                )
+            pack = await self.save_draft(
+                owner_id=owner_id, character=character, title=title, stickers=stickers
             )
-        pack = await self.save_draft(
-            owner_id=owner_id, character=character, title=title, stickers=stickers
-        )
-        first = stickers[: self._CREATE_BATCH_MAX]
-        result = await self.publish_draft(owner_id=owner_id, pack=pack, stickers=first)
-        if rest := stickers[self._CREATE_BATCH_MAX :]:
-            # Rows are already persisted by save_draft; only Telegram lags.
+            await asyncio.to_thread(self._write, marker, json.dumps({"pack_id": pack.id}).encode())
+        if not pack.published:
+            first = stickers[: self._CREATE_BATCH_MAX]
+            await self.publish_draft(owner_id=owner_id, pack=pack, stickers=first)
+            pack = await self._db.get_pack(pack.id) or pack  # fresh set_name/published
+        # The tail resumes from Telegram's own count: rows are already in the
+        # DB, so only the not-yet-landed suffix is sent on this (re)try.
+        live = await self._publisher.live_count(pack.set_name)
+        done = live if live is not None else min(len(stickers), self._CREATE_BATCH_MAX)
+        if rest := stickers[done:]:
             await self._publisher.add_to_pack(
                 user_id=owner_id,
-                set_name=result.set_name,
+                set_name=pack.set_name,
                 stickers=rest,
-                current_count=len(first),
+                current_count=done,
             )
-            result = PackResult(result.set_name, result.link, len(stickers))
         await self.drop_scratch(scratch_path)
-        return result
+        await asyncio.to_thread(lambda: marker.unlink(missing_ok=True))
+        return PackResult(pack.set_name, self._publisher.link(pack.set_name), len(stickers))
 
     # --- scratch: review-stage bytes for extend (no draft pack to hold them) --
 
