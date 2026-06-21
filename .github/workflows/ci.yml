@@ -25,7 +25,7 @@ jobs:
       # `uv run`, rebuilding the venv without dev extras and breaking the 3.13 leg.
       UV_PYTHON: ${{ matrix.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
