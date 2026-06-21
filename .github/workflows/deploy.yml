@@ -27,7 +27,7 @@ jobs:
       # SSH step is skipped (not failed) until the VDS secrets are configured.
       HAS_VDS: ${{ secrets.VDS_HOST != '' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
